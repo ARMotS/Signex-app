@@ -1,0 +1,220 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_DIRECT")
+}
+
+// ─── Multi-Tenancy ───────────────────────────────────────────────────────
+
+model Tenant {
+  id          String      @id @default(cuid())
+  name        String
+  slug        String      @unique
+  createdAt   DateTime    @default(now())
+  users       User[]
+  drivers     Driver[]
+  contacts    Contact[]
+  tripSheets  TripSheet[]
+  stops       Stop[]
+}
+
+model User {
+  id         String    @id @default(cuid())
+  email      String    @unique
+  name       String?
+  role       UserRole  @default(ADMIN)
+  tenantId   String
+  tenant     Tenant    @relation(fields: [tenantId], references: [id])
+  createdAt  DateTime  @default(now())
+  driver     Driver?
+
+  @@index([tenantId])
+  @@index([email])
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  DRIVER
+}
+
+// ─── Accounts ─────────────────────────────────────────────────────────────
+
+model Admin {
+  id           String      @id @default(cuid())
+  name         String
+  email        String      @unique
+  passwordHash String
+  sessionToken String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  tripSheets   TripSheet[]
+}
+
+model Driver {
+  id           String      @id @default(cuid())
+  name         String      @unique
+  pinHash      String
+  active       Boolean     @default(true)
+  sessionToken String?
+  userId       String?     @unique
+  user         User?       @relation(fields: [userId], references: [id])
+  tenantId     String
+  tenant       Tenant      @relation(fields: [tenantId], references: [id])
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  tripSheets   TripSheet[]
+
+  @@index([tenantId])
+  @@index([active])
+}
+
+// ─── Trip Sheets & Stops ──────────────────────────────────────────────────
+
+enum TripSheetStatus {
+  ACTIVE
+  QUEUED
+}
+
+model TripSheet {
+  id             String          @id @default(cuid())
+  date           DateTime        @default(now())
+  sourceFilename String
+  uploadedBy     String
+  driverId       String
+  driver         Driver          @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  regNo          String?
+  status         TripSheetStatus @default(ACTIVE)
+  adminId        String?
+  admin          Admin?          @relation(fields: [adminId], references: [id])
+  tenantId       String
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  stops          Stop[]
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@index([tenantId])
+  @@index([driverId])
+  @@index([driverId, status])
+  @@index([date])
+}
+
+enum StopStatus {
+  PENDING
+  IN_PROGRESS
+  SIGNED
+}
+
+model Stop {
+  id            String     @id @default(cuid())
+  stopNumber    Int
+  invoiceNumber String
+  customerName  String     @default("Unknown")
+  address       String     @default("")
+  nop           Int        @default(0)
+  invoiceFile   String?
+  status        StopStatus @default(PENDING)
+  signedAt      DateTime?
+  emailSentAt   DateTime?
+  signatureData String?    @db.Text
+  tripSheetId   String
+  tripSheet     TripSheet  @relation(fields: [tripSheetId], references: [id], onDelete: Cascade)
+  contactId     String?
+  contact       Contact?   @relation(fields: [contactId], references: [id])
+  tenantId      String
+  tenant        Tenant     @relation(fields: [tenantId], references: [id])
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@index([tenantId])
+  @@index([tripSheetId])
+  @@index([invoiceNumber])
+  @@index([status])
+  @@index([contactId])
+}
+
+// ─── App Configuration ────────────────────────────────────────────────────
+
+model AppConfig {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// ─── Imported Files (Trip Sheet Cloud Folder Tracking) ────────────────────
+
+model ImportedFile {
+  id          String   @id @default(cuid())
+  filename    String   @unique
+  folderPath  String
+  importedAt  DateTime @default(now())
+  tripSheetId String?
+  status      String   @default("imported") // imported | failed | skipped
+
+  @@index([filename])
+  @@index([importedAt])
+}
+
+// ─── Audit Log ────────────────────────────────────────────────────────────
+
+enum AuditAction {
+  UPLOAD
+  SIGN
+  LOGIN
+  LOGOUT
+  STATUS_CHANGE
+  DRIVER_CREATE
+  DRIVER_UPDATE
+  DRIVER_DELETE
+  CONFIG_UPDATE
+}
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  action    AuditAction
+  entity    String      // trip_sheet | stop | driver | admin | config
+  entityId  String?
+  userName  String?
+  details   String?     @db.Text
+  createdAt DateTime    @default(now())
+
+  @@index([action])
+  @@index([createdAt])
+  @@index([entity, entityId])
+}
+
+// ─── Contacts ─────────────────────────────────────────────────────────────
+
+enum ContactSource {
+  MANUAL
+  SPREADSHEET
+  AUTO_CREATED
+}
+
+model Contact {
+  id            String        @id @default(cuid())
+  tenantId      String
+  tenant        Tenant        @relation(fields: [tenantId], references: [id])
+  companyName   String
+  contactPerson String?
+  email         String?
+  phone         String?
+  altPhone      String?
+  address       String?
+  notes         String?
+  source        ContactSource @default(MANUAL)
+  deletedAt     DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  stops         Stop[]
+
+  @@index([tenantId])
+  @@index([tenantId, companyName])
+  @@index([tenantId, email])
+  @@index([deletedAt])
+}
+

@@ -1,0 +1,205 @@
+@import "tailwindcss";
+
+/* ─── Signex Design Tokens ─────────────────────────────────────────────── */
+:root {
+  /* Core palette */
+  --ink-black: #0F0F0F;
+  --ink-green: #00C07F;
+  --ink-green-dim: #00C07F22;
+  --ink-green-hover: #00A86E;
+  --ink-amber: #F5A623;
+  --ink-amber-dim: #F5A62322;
+  --ink-red: #E84040;
+  --ink-red-dim: #E8404022;
+  --ink-surface: #F7F6F3;
+  --ink-card: #FFFFFF;
+  --ink-border: #E2E0DA;
+  --ink-muted: #888580;
+  --ink-muted-light: #B8B5B0;
+
+  /* Semantic */
+  --background: var(--ink-surface);
+  --foreground: var(--ink-black);
+  --card: var(--ink-card);
+  --border: var(--ink-border);
+  --primary: var(--ink-green);
+  --primary-hover: var(--ink-green-hover);
+  --destructive: var(--ink-red);
+  --warning: var(--ink-amber);
+  --muted: var(--ink-muted);
+
+  /* Sidebar */
+  --sidebar-bg: var(--ink-black);
+  --sidebar-text: #CCCCCC;
+  --sidebar-text-active: #FFFFFF;
+  --sidebar-accent: var(--ink-green);
+}
+
+/* ─── Tailwind v4 Theme Extension ──────────────────────────────────────── */
+@theme inline {
+  --color-ink-black: var(--ink-black);
+  --color-ink-green: var(--ink-green);
+  --color-ink-green-dim: var(--ink-green-dim);
+  --color-ink-green-hover: var(--ink-green-hover);
+  --color-ink-amber: var(--ink-amber);
+  --color-ink-amber-dim: var(--ink-amber-dim);
+  --color-ink-red: var(--ink-red);
+  --color-ink-red-dim: var(--ink-red-dim);
+  --color-ink-surface: var(--ink-surface);
+  --color-ink-card: var(--ink-card);
+  --color-ink-border: var(--ink-border);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-muted-light: var(--ink-muted-light);
+  --color-sidebar-bg: var(--sidebar-bg);
+  --color-sidebar-text: var(--sidebar-text);
+  --color-sidebar-text-active: var(--sidebar-text-active);
+  --color-sidebar-accent: var(--sidebar-accent);
+
+  --font-sans: var(--font-geist-sans), "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-dm-mono), "DM Mono", ui-monospace, monospace;
+}
+
+/* ─── Base Styles ──────────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  min-height: 100dvh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Status Badge Pills ───────────────────────────────────────────────── */
+.badge-signed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  background: var(--ink-green-dim);
+  color: var(--ink-green);
+}
+
+.badge-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  background: var(--ink-red-dim);
+  color: var(--ink-red);
+}
+
+.badge-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  background: var(--ink-amber-dim);
+  color: var(--ink-amber);
+}
+
+/* ─── Scrollbar Styling ────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--ink-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-muted);
+}
+
+/* ─── Animations ───────────────────────────────────────────────────────── */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out both;
+}
+
+.animate-slide-in {
+  animation: slide-in-right 0.3s ease-out both;
+}
+
+.animate-scale-in {
+  animation: scale-in 0.2s ease-out both;
+}
+
+/* Staggered children animation */
+.stagger-children > * {
+  animation: fade-in 0.3s ease-out both;
+}
+.stagger-children > *:nth-child(1) { animation-delay: 0ms; }
+.stagger-children > *:nth-child(2) { animation-delay: 50ms; }
+.stagger-children > *:nth-child(3) { animation-delay: 100ms; }
+.stagger-children > *:nth-child(4) { animation-delay: 150ms; }
+.stagger-children > *:nth-child(5) { animation-delay: 200ms; }
+.stagger-children > *:nth-child(6) { animation-delay: 250ms; }
+.stagger-children > *:nth-child(7) { animation-delay: 300ms; }
+.stagger-children > *:nth-child(8) { animation-delay: 350ms; }
+
+/* ─── Touch Targets (mobile driver app) ────────────────────────────────── */
+.touch-target {
+  min-height: 48px;
+  min-width: 48px;
+}
+
+/* ─── Safe area padding for PWA ────────────────────────────────────────── */
+.safe-bottom {
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+}
+
+.safe-top {
+  padding-top: max(16px, env(safe-area-inset-top));
+}

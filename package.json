@@ -1,0 +1,59 @@
+{
+  "name": "signex-app",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0",
+    "postinstall": "prisma generate",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "eslint",
+    "db:push": "npx prisma db push",
+    "db:studio": "npx prisma studio",
+    "db:migrate": "npx prisma migrate dev",
+    "db:reset": "npx prisma migrate reset",
+    "db:seed": "npx tsx prisma/seed.ts"
+  },
+  "prisma": {
+    "seed": "npx tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.96.0",
+    "@auth/prisma-adapter": "^2.11.2",
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client": "^7.8.0",
+    "@react-email/components": "^1.0.12",
+    "@react-email/render": "^2.0.8",
+    "@serwist/next": "^9.5.11",
+    "date-fns": "^4.1.0",
+    "fuse.js": "^7.3.0",
+    "jose": "^6.2.3",
+    "jszip": "^3.10.1",
+    "next": "16.2.4",
+    "nodemailer": "^8.0.7",
+    "papaparse": "^5.5.3",
+    "pdf-lib": "^1.17.1",
+    "pdf.js-extract": "^1.0.1",
+    "pg": "^8.20.0",
+    "prisma": "^7.8.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-dropzone": "^15.0.0",
+    "serwist": "^9.5.11",
+    "xlsx": "^0.18.5",
+    "zustand": "^5.0.12"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/nodemailer": "^8.0.0",
+    "@types/papaparse": "^5.5.2",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.4",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
