@@ -39,14 +39,12 @@ export async function POST(request: NextRequest) {
       }
       tenantId = session.tenantId!;
     } else {
-      // First admin — use the default tenant
-      const defaultTenant = await prisma.tenant.findUnique({ where: { slug: "default" } });
-      if (!defaultTenant) {
-        return NextResponse.json(
-          { error: "No default tenant found. Run the seed script first." },
-          { status: 500 }
-        );
-      }
+      // First admin — find or create the default tenant
+      const defaultTenant = await prisma.tenant.upsert({
+        where: { slug: "default" },
+        update: {},
+        create: { name: "Default", slug: "default" },
+      });
       tenantId = defaultTenant.id;
     }
 
