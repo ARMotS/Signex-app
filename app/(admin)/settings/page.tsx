@@ -2,6 +2,21 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 
+interface OneDriveAccount {
+  connected: boolean;
+  accountEmail?: string;
+  accountName?: string;
+  folderPath?: string;
+  folderItemId?: string;
+}
+
+interface OneDriveFolder {
+  id: string;
+  name: string;
+  folder?: { childCount: number };
+  parentReference?: { path: string };
+}
+
 interface FolderEntry {
   name: string;
   path: string;
@@ -92,6 +107,18 @@ export default function SettingsPage() {
   // Cloud sync roots
   const [cloudRoots, setCloudRoots] = useState<CloudSyncRoot[]>([]);
 
+  // OneDrive cloud connection state
+  const [onedrive, setOnedrive] = useState<OneDriveAccount | null>(null);
+  const [onedriveLoading, setOnedriveLoading] = useState(true);
+  const [onedriveConnecting, setOnedriveConnecting] = useState(false);
+  const [onedriveDisconnecting, setOnedriveDisconnecting] = useState(false);
+  const [onedriveFolders, setOnedriveFolders] = useState<OneDriveFolder[]>([]);
+  const [onedriveBrowsing, setOnedriveBrowsing] = useState(false);
+  const [onedriveBrowserOpen, setOnedriveBrowserOpen] = useState(false);
+  const [onedriveBreadcrumbs, setOnedriveBreadcrumbs] = useState<{ id: string; name: string }[]>([]);
+  const [onedriveFolderSaving, setOnedriveFolderSaving] = useState(false);
+  const [onedriveMessage, setOnedriveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
   // Signature placement state
   const [sigPosition, setSigPosition] = useState<SignaturePosition>(DEFAULT_SIG_POSITION);
   const [sigSaving, setSigSaving] = useState(false);
@@ -126,6 +153,54 @@ export default function SettingsPage() {
       .then((r) => r.json())
       .then((data) => setCloudRoots(data.roots || []))
       .catch(() => {});
+
+    // Load OneDrive connection status
+    fetch("/api/cloud/onedrive")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.connected && data.account) {
+          setOnedrive({
+            connected: true,
+            accountEmail: data.account.accountEmail,
+            accountName: data.account.accountName,
+            folderPath: data.account.folderPath,
+            folderItemId: data.account.folderItemId,
+          });
+        } else {
+          setOnedrive(null);
+        }
+      })
+      .catch(() => setOnedrive(null))
+      .finally(() => setOnedriveLoading(false));
+  }, []);
+
+  // Check URL params for OAuth callback result
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("cloud_connected") === "true") {
+      setOnedriveMessage({ type: "success", text: "OneDrive connected successfully!" });
+      // Refresh connection status
+      fetch("/api/cloud/onedrive")
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.connected && data.account) {
+            setOnedrive({
+              connected: true,
+              accountEmail: data.account.accountEmail,
+              accountName: data.account.accountName,
+              folderPath: data.account.folderPath,
+              folderItemId: data.account.folderItemId,
+            });
+          }
+        })
+        .catch(() => {});
+      window.history.replaceState({}, "", "/settings");
+      setTimeout(() => setOnedriveMessage(null), 5000);
+    } else if (params.get("cloud_error")) {
+      setOnedriveMessage({ type: "error", text: params.get("cloud_error")! });
+      window.history.replaceState({}, "", "/settings");
+      setTimeout(() => setOnedriveMessage(null), 8000);
+    }
   }, []);
 
   // Load first available invoice PDF for preview
@@ -411,6 +486,107 @@ export default function SettingsPage() {
   const tsHasChanges = tsSelectedPath !== (settings.tripSheetFolderPath || "");
   const tsCanSave = tsHasChanges && (tsSelectedPath === "" || (tsValidation?.valid ?? false));
 
+  // OneDrive: initiate OAuth flow
+  const handleOnedriveConnect = async () => {
+    setOnedriveConnecting(true);
+    try {
+      const res = await fetch("/api/auth/microsoft");
+      const data = await res.json();
+      if (data.url) {
+        window.location.href = data.url;
+      } else {
+        setOnedriveMessage({ type: "error", text: "Failed to start OAuth flow" });
+      }
+    } catch {
+      setOnedriveMessage({ type: "error", text: "Network error" });
+    } finally {
+      setOnedriveConnecting(false);
+    }
+  };
+
+  // OneDrive: disconnect
+  const handleOnedriveDisconnect = async () => {
+    setOnedriveDisconnecting(true);
+    try {
+      await fetch("/api/cloud/onedrive", { method: "DELETE" });
+      setOnedrive(null);
+      setOnedriveMessage({ type: "success", text: "OneDrive disconnected" });
+      setTimeout(() => setOnedriveMessage(null), 4000);
+    } catch {
+      setOnedriveMessage({ type: "error", text: "Failed to disconnect" });
+    } finally {
+      setOnedriveDisconnecting(false);
+    }
+  };
+
+  // OneDrive: browse folders
+  const browseOnedriveFolders = async (parentId?: string) => {
+    setOnedriveBrowsing(true);
+    try {
+      const params = parentId ? `?parentId=${parentId}` : "";
+      const res = await fetch(`/api/cloud/onedrive/folders${params}`);
+      const data = await res.json();
+      setOnedriveFolders(data.folders || []);
+    } catch {
+      setOnedriveFolders([]);
+    } finally {
+      setOnedriveBrowsing(false);
+    }
+  };
+
+  // OneDrive: open folder browser
+  const openOnedriveBrowser = () => {
+    setOnedriveBrowserOpen(true);
+    setOnedriveBreadcrumbs([]);
+    browseOnedriveFolders();
+  };
+
+  // OneDrive: navigate into a folder
+  const navigateOnedriveFolder = (folder: OneDriveFolder) => {
+    setOnedriveBreadcrumbs((prev) => [...prev, { id: folder.id, name: folder.name }]);
+    browseOnedriveFolders(folder.id);
+  };
+
+  // OneDrive: navigate back to a breadcrumb
+  const navigateOnedriveBreadcrumb = (index: number) => {
+    if (index < 0) {
+      setOnedriveBreadcrumbs([]);
+      browseOnedriveFolders();
+    } else {
+      const crumb = onedriveBreadcrumbs[index];
+      setOnedriveBreadcrumbs((prev) => prev.slice(0, index + 1));
+      browseOnedriveFolders(crumb.id);
+    }
+  };
+
+  // OneDrive: select a folder as trip sheet source
+  const selectOnedriveFolder = async (folder: OneDriveFolder) => {
+    setOnedriveFolderSaving(true);
+    try {
+      const folderPath = folder.parentReference?.path
+        ? `${folder.parentReference.path}/${folder.name}`.replace("/drive/root:", "")
+        : `/${folder.name}`;
+      const res = await fetch("/api/cloud/onedrive/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folderPath, folderItemId: folder.id }),
+      });
+      if (res.ok) {
+        setOnedrive((prev) => prev ? { ...prev, folderPath, folderItemId: folder.id } : prev);
+        setOnedriveBrowserOpen(false);
+        setOnedriveMessage({ type: "success", text: `Folder set: ${folderPath}` });
+        setTimeout(() => setOnedriveMessage(null), 4000);
+      } else {
+        const data = await res.json();
+        setOnedriveMessage({ type: "error", text: data.error || "Failed to set folder" });
+      }
+    } catch {
+      setOnedriveMessage({ type: "error", text: "Network error" });
+    } finally {
+      setOnedriveFolderSaving(false);
+    }
+  };
+
   // Cloud provider label helper
   const getProviderBadge = (providerType: string) => {
     if (providerType === "onedrive") return { icon: "☁️", label: "OneDrive", color: "#0078D4" };
@@ -688,6 +864,268 @@ export default function SettingsPage() {
           </li>
         </ul>
       </div>
+
+      {/* ─── OneDrive Cloud Sync ──────────────────────────────────── */}
+      <div className="mt-6 bg-ink-card border border-ink-border rounded overflow-hidden">
+        <div className="px-6 py-4 border-b border-ink-border">
+          <div className="flex items-center gap-2">
+            <h2 className="font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
+              OneDrive Cloud Sync
+            </h2>
+            {onedrive?.connected && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono font-medium rounded-full bg-[#0078D4]/10 text-[#0078D4] border border-[#0078D4]/30">
+                Connected
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-ink-muted mt-1">
+            Connect your OneDrive account to sync trip sheet files from the cloud
+          </p>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {/* Message toast */}
+          {onedriveMessage && (
+            <div
+              className={`rounded p-3 border animate-fade-in ${
+                onedriveMessage.type === "success"
+                  ? "bg-ink-green-dim border-ink-green/20"
+                  : "bg-ink-red-dim border-ink-red/20"
+              }`}
+            >
+              <span className={`text-sm font-mono ${onedriveMessage.type === "success" ? "text-ink-green" : "text-ink-red"}`}>
+                {onedriveMessage.type === "success" ? "✓" : "✕"} {onedriveMessage.text}
+              </span>
+            </div>
+          )}
+
+          {onedriveLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <div className="w-5 h-5 border-2 border-ink-border border-t-[#0078D4] rounded-full animate-spin" />
+            </div>
+          ) : onedrive?.connected ? (
+            <>
+              {/* Connected state */}
+              <div className="flex items-center gap-3 p-4 bg-ink-surface border border-ink-border rounded">
+                <div className="w-10 h-10 rounded bg-[#0078D4]/10 border border-[#0078D4]/20 flex items-center justify-center shrink-0">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0078D4" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+                  </svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-mono text-ink-black">
+                    {onedrive.accountName || onedrive.accountEmail || "OneDrive Account"}
+                  </p>
+                  {onedrive.accountEmail && onedrive.accountName && (
+                    <p className="text-xs font-mono text-ink-muted truncate">{onedrive.accountEmail}</p>
+                  )}
+                </div>
+                <button
+                  onClick={handleOnedriveDisconnect}
+                  disabled={onedriveDisconnecting}
+                  className="text-xs font-mono text-ink-muted hover:text-ink-red transition-colors px-3 py-1.5 border border-ink-border rounded hover:border-ink-red/30"
+                >
+                  {onedriveDisconnecting ? "..." : "Disconnect"}
+                </button>
+              </div>
+
+              {/* Folder selection */}
+              <div className="space-y-3">
+                <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
+                  Trip Sheet Folder
+                </p>
+                <div className="flex items-center gap-3 p-3 bg-ink-surface border border-ink-border rounded">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={onedrive.folderPath ? "#00C07F" : "#888580"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                  <span className="flex-1 text-sm font-mono text-ink-black truncate">
+                    {onedrive.folderPath || "No folder selected"}
+                  </span>
+                  <button
+                    onClick={openOnedriveBrowser}
+                    className="text-xs font-mono text-[#0078D4] hover:text-[#005a9e] transition-colors px-3 py-1.5 border border-[#0078D4]/30 rounded hover:bg-[#0078D4]/5"
+                  >
+                    {onedrive.folderPath ? "Change" : "Choose Folder"}
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            /* Not connected state */
+            <div className="text-center py-6 space-y-4">
+              <div className="w-14 h-14 rounded-full bg-[#0078D4]/10 border border-[#0078D4]/20 flex items-center justify-center mx-auto">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#0078D4" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+                </svg>
+              </div>
+              <div>
+                <p className="text-sm font-mono text-ink-black">Connect OneDrive</p>
+                <p className="text-xs text-ink-muted mt-1 max-w-sm mx-auto">
+                  Link your Microsoft account to automatically sync trip sheet files from OneDrive
+                </p>
+              </div>
+              <button
+                onClick={handleOnedriveConnect}
+                disabled={onedriveConnecting}
+                className="inline-flex items-center gap-2 px-6 py-3 bg-[#0078D4] text-white font-mono text-sm font-medium rounded hover:bg-[#005a9e] active:scale-[0.98] transition-all disabled:opacity-60"
+              >
+                {onedriveConnecting ? (
+                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+                  </svg>
+                )}
+                {onedriveConnecting ? "Connecting..." : "Connect OneDrive"}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ─── OneDrive Folder Browser Modal ───────────────────────────── */}
+      {onedriveBrowserOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => setOnedriveBrowserOpen(false)}
+          />
+          <div className="relative w-full max-w-xl bg-ink-card border border-ink-border rounded-lg shadow-2xl animate-scale-in flex flex-col max-h-[80vh]">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-ink-border shrink-0">
+              <div>
+                <h3 className="font-mono text-sm font-medium text-ink-black">
+                  Select OneDrive Folder
+                </h3>
+                <p className="text-xs text-ink-muted mt-0.5">
+                  Choose the folder containing your trip sheet files
+                </p>
+              </div>
+              <button
+                onClick={() => setOnedriveBrowserOpen(false)}
+                className="w-8 h-8 flex items-center justify-center rounded hover:bg-ink-surface transition-colors text-ink-muted hover:text-ink-black"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Breadcrumbs */}
+            <div className="flex items-center gap-1 px-5 py-2.5 border-b border-ink-border overflow-x-auto shrink-0">
+              <button
+                onClick={() => navigateOnedriveBreadcrumb(-1)}
+                className="text-xs font-mono text-ink-muted hover:text-[#0078D4] transition-colors shrink-0 px-1"
+              >
+                OneDrive
+              </button>
+              {onedriveBreadcrumbs.map((crumb, i) => (
+                <span key={crumb.id} className="flex items-center gap-1 shrink-0">
+                  <span className="text-xs text-ink-muted-light">/</span>
+                  <button
+                    onClick={() => navigateOnedriveBreadcrumb(i)}
+                    className={`text-xs font-mono px-1 py-0.5 rounded transition-colors ${
+                      i === onedriveBreadcrumbs.length - 1
+                        ? "text-ink-black font-medium bg-ink-surface"
+                        : "text-ink-muted hover:text-[#0078D4]"
+                    }`}
+                  >
+                    {crumb.name}
+                  </button>
+                </span>
+              ))}
+            </div>
+
+            {/* Loading */}
+            {onedriveBrowsing && (
+              <div className="flex items-center justify-center py-12">
+                <div className="w-5 h-5 border-2 border-ink-border border-t-[#0078D4] rounded-full animate-spin" />
+              </div>
+            )}
+
+            {/* Folder list */}
+            {!onedriveBrowsing && (
+              <div className="flex-1 overflow-y-auto min-h-0">
+                {/* Go up */}
+                {onedriveBreadcrumbs.length > 0 && (
+                  <button
+                    onClick={() => navigateOnedriveBreadcrumb(onedriveBreadcrumbs.length - 2)}
+                    className="flex items-center gap-3 w-full px-5 py-3 text-left hover:bg-ink-surface transition-colors border-b border-ink-border"
+                  >
+                    <div className="w-8 h-8 rounded bg-ink-surface flex items-center justify-center shrink-0">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888580" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="15 18 9 12 15 6" />
+                      </svg>
+                    </div>
+                    <span className="text-sm font-mono text-ink-muted">..</span>
+                    <span className="text-xs text-ink-muted-light ml-auto">Go up</span>
+                  </button>
+                )}
+
+                {onedriveFolders.length === 0 && !onedriveBrowsing && (
+                  <div className="py-12 text-center">
+                    <p className="text-sm font-mono text-ink-muted">No subfolders found</p>
+                    <p className="text-xs text-ink-muted-light mt-1">
+                      Select the current folder using the button below
+                    </p>
+                  </div>
+                )}
+
+                {onedriveFolders.map((folder) => (
+                  <button
+                    key={folder.id}
+                    onClick={() => navigateOnedriveFolder(folder)}
+                    className="flex items-center gap-3 w-full px-5 py-3 text-left hover:bg-ink-surface transition-colors border-b border-ink-border/50 group"
+                  >
+                    <div className="w-8 h-8 rounded bg-ink-surface flex items-center justify-center shrink-0">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0078D4" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                      </svg>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-mono text-ink-black truncate group-hover:text-[#0078D4] transition-colors">
+                        {folder.name}
+                      </p>
+                    </div>
+                    {folder.folder && (
+                      <span className="text-[10px] font-mono text-ink-muted shrink-0">
+                        {folder.folder.childCount} items
+                      </span>
+                    )}
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#B8B5B0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Footer with select button */}
+            <div className="flex items-center justify-between px-5 py-4 border-t border-ink-border shrink-0 bg-ink-surface/50">
+              <span className="text-xs font-mono text-ink-muted truncate mr-3">
+                /{onedriveBreadcrumbs.map((c) => c.name).join("/")}
+              </span>
+              <button
+                onClick={() => {
+                  const lastCrumb = onedriveBreadcrumbs[onedriveBreadcrumbs.length - 1];
+                  if (lastCrumb) {
+                    selectOnedriveFolder({ id: lastCrumb.id, name: lastCrumb.name } as OneDriveFolder);
+                  }
+                }}
+                disabled={onedriveBreadcrumbs.length === 0 || onedriveFolderSaving}
+                className={`px-4 py-2 text-xs font-mono font-medium rounded transition-all ${
+                  onedriveBreadcrumbs.length > 0 && !onedriveFolderSaving
+                    ? "bg-ink-green text-white hover:bg-ink-green-hover active:scale-[0.98]"
+                    : "bg-ink-border text-ink-muted cursor-not-allowed"
+                }`}
+              >
+                {onedriveFolderSaving ? "Saving..." : "Select This Folder"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ─── Trip Sheet Folder ──────────────────────────────────── */}
       <div className="mt-6 bg-ink-card border border-ink-border rounded overflow-hidden">
