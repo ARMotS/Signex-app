@@ -1,6 +1,6 @@
 /**
  * Trip sheet folder operations — reads CSV/Excel files from a configured
- * cloud-synced (or local) folder.
+ * cloud-synced (or local) folder, OR from OneDrive via Graph API.
  *
  * Features:
  *   - List available trip sheet files in the folder
@@ -8,10 +8,11 @@
  *   - Import a file: read → parse → return preview data
  *   - Move processed files to a processed/ subfolder
  *
- * Priority for folder path:
- *   1. Runtime config in database (AppConfig table)
- *   2. TRIP_SHEET_FOLDER_PATH environment variable
- *   3. null (no folder configured)
+ * Priority for folder source:
+ *   1. OneDrive Graph API (if cloud account connected with folder configured)
+ *   2. Runtime config in database (AppConfig table) — local filesystem path
+ *   3. TRIP_SHEET_FOLDER_PATH environment variable
+ *   4. null (no folder configured)
  */
 
 import fs from "fs";
@@ -19,6 +20,11 @@ import path from "path";
 import { prisma } from "./db";
 import { readConfig } from "./config";
 import { detectCloudProvider, type CloudProvider } from "./cloud-detect";
+import {
+  getCloudAccountStatus,
+  listOneDriveTripSheetFiles,
+  downloadFileById,
+} from "./microsoft-graph";
 
 export interface TripSheetFile {
   /** Filename (basename) */
@@ -57,6 +63,30 @@ export interface TripSheetFolderInfo {
 const TRIP_SHEET_EXTENSIONS = [".csv", ".xlsx", ".xls"];
 
 /**
+ * Check if OneDrive Graph API should be used as the file source.
+ * Returns the cloud account status if connected with a folder configured.
+ */
+export async function getOneDriveSource(): Promise<{
+  connected: boolean;
+  folderPath?: string;
+  folderItemId?: string;
+} | null> {
+  try {
+    const status = await getCloudAccountStatus();
+    if (status?.connected && status.folderItemId) {
+      return {
+        connected: true,
+        folderPath: status.folderPath ?? undefined,
+        folderItemId: status.folderItemId,
+      };
+    }
+  } catch {
+    // Graph API not configured or unavailable — fall through to local
+  }
+  return null;
+}
+
+/**
  * Get the configured trip sheet folder path.
  * Returns null if no folder is configured.
  */
@@ -70,9 +100,77 @@ export async function getTripSheetFolderPath(): Promise<string | null> {
 
 /**
  * List all trip sheet files in the configured folder.
+ * Uses OneDrive Graph API if connected, otherwise falls back to local filesystem.
  * Checks DB to mark which files have already been imported.
  */
 export async function listTripSheetFiles(): Promise<TripSheetFolderInfo> {
+  // Try OneDrive Graph API first
+  const onedrive = await getOneDriveSource();
+  if (onedrive) {
+    return listTripSheetFilesFromOneDrive(onedrive.folderPath || "");
+  }
+
+  // Fall back to local filesystem
+  return listTripSheetFilesFromLocal();
+}
+
+async function listTripSheetFilesFromOneDrive(
+  folderPath: string
+): Promise<TripSheetFolderInfo> {
+  try {
+    const items = await listOneDriveTripSheetFiles();
+
+    const filenames = items.map((i) => i.name);
+    const importRecords = await prisma.importedFile.findMany({
+      where: { filename: { in: filenames } },
+    });
+    const importMap = new Map(importRecords.map((r) => [r.filename, r]));
+
+    const files: TripSheetFile[] = items.map((item) => {
+      const ext = item.name.slice(item.name.lastIndexOf(".") + 1).toLowerCase();
+      const importRecord = importMap.get(item.name);
+
+      return {
+        filename: item.name,
+        fullPath: item.id, // Store OneDrive item ID as fullPath for download
+        sizeBytes: item.size,
+        lastModified: item.lastModifiedDateTime,
+        extension: ext,
+        imported: !!importRecord,
+        importedAt: importRecord?.importedAt.toISOString(),
+        importStatus: importRecord?.status,
+      };
+    });
+
+    files.sort((a, b) => {
+      if (a.imported !== b.imported) return a.imported ? 1 : -1;
+      return new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime();
+    });
+
+    const newFiles = files.filter((f) => !f.imported).length;
+
+    return {
+      path: folderPath,
+      accessible: true,
+      provider: "onedrive",
+      totalFiles: files.length,
+      newFiles,
+      files,
+    };
+  } catch (err) {
+    console.error("Failed to list OneDrive trip sheet files:", err);
+    return {
+      path: folderPath,
+      accessible: false,
+      provider: "onedrive",
+      totalFiles: 0,
+      newFiles: 0,
+      files: [],
+    };
+  }
+}
+
+async function listTripSheetFilesFromLocal(): Promise<TripSheetFolderInfo> {
   const folderPath = await getTripSheetFolderPath();
 
   if (!folderPath) {
@@ -88,7 +186,6 @@ export async function listTripSheetFiles(): Promise<TripSheetFolderInfo> {
 
   const provider = detectCloudProvider(folderPath);
 
-  // Check folder accessibility
   if (!fs.existsSync(folderPath)) {
     return {
       path: folderPath,
@@ -107,7 +204,6 @@ export async function listTripSheetFiles(): Promise<TripSheetFolderInfo> {
       return TRIP_SHEET_EXTENSIONS.includes(ext);
     });
 
-    // Get import records from DB
     const importRecords = await prisma.importedFile.findMany({
       where: {
         filename: { in: tripFiles },
@@ -135,7 +231,6 @@ export async function listTripSheetFiles(): Promise<TripSheetFolderInfo> {
       };
     });
 
-    // Sort: new files first, then by last modified (newest first)
     files.sort((a, b) => {
       if (a.imported !== b.imported) return a.imported ? 1 : -1;
       return new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime();
@@ -165,12 +260,45 @@ export async function listTripSheetFiles(): Promise<TripSheetFolderInfo> {
 }
 
 /**
- * Read a trip sheet file from the configured folder as a Buffer.
- * Returns { buffer, filename } or null if not found.
+ * Read a trip sheet file as a Buffer.
+ * If OneDrive is connected, downloads via Graph API using the item ID stored in fullPath.
+ * Otherwise reads from local filesystem.
+ *
+ * @param filename - The file's display name
+ * @param fileId - Optional OneDrive item ID (used when source is OneDrive)
  */
 export async function readTripSheetFile(
-  filename: string
+  filename: string,
+  fileId?: string
 ): Promise<{ buffer: Buffer; filename: string } | null> {
+  // If a fileId is provided, download from OneDrive
+  if (fileId) {
+    try {
+      const buffer = await downloadFileById(fileId);
+      return { buffer, filename };
+    } catch (err) {
+      console.error(`Failed to download ${filename} from OneDrive:`, err);
+      return null;
+    }
+  }
+
+  // Check if OneDrive is connected and try to find the file there
+  const onedrive = await getOneDriveSource();
+  if (onedrive) {
+    try {
+      const items = await listOneDriveTripSheetFiles();
+      const match = items.find((i) => i.name === filename);
+      if (match) {
+        const buffer = await downloadFileById(match.id);
+        return { buffer, filename };
+      }
+    } catch (err) {
+      console.error(`Failed to download ${filename} from OneDrive:`, err);
+    }
+    return null;
+  }
+
+  // Fall back to local filesystem
   const folderPath = await getTripSheetFolderPath();
   if (!folderPath) return null;
 

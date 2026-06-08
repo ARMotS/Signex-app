@@ -143,6 +143,25 @@ model AppConfig {
   updatedAt DateTime @updatedAt
 }
 
+// ─── Cloud Accounts (OneDrive / Google Drive OAuth) ───────────────────────
+
+model CloudAccount {
+  id            String   @id @default(cuid())
+  provider      String   // "onedrive" | "gdrive"
+  accountEmail  String?
+  accountName   String?
+  accessToken   String   @db.Text
+  refreshToken  String   @db.Text
+  tokenExpiry   DateTime
+  driveId       String?
+  folderPath    String?
+  folderItemId  String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([provider])
+}
+
 // ─── Imported Files (Trip Sheet Cloud Folder Tracking) ────────────────────
 
 model ImportedFile {
