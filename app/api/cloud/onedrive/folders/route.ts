@@ -3,6 +3,7 @@ import {
   listRootFolders,
   listFolderById,
   setOneDriveFolder,
+  setOneDriveInvoiceFolder,
 } from "@/lib/microsoft-graph";
 import { getSessionContext, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
@@ -30,14 +31,14 @@ export const GET = withAuth(async (request: NextRequest) => {
 
 /**
  * POST /api/cloud/onedrive/folders
- * Set the selected OneDrive folder as the trip sheet source.
- * Body: { folderPath: string, folderItemId: string }
+ * Set the selected OneDrive folder as the trip sheet or invoice source.
+ * Body: { folderPath: string, folderItemId: string, target?: "tripsheets" | "invoices" }
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getSessionContext();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
-  const { folderPath, folderItemId } = await request.json();
+  const { folderPath, folderItemId, target } = await request.json();
 
   if (!folderPath || !folderItemId) {
     return NextResponse.json(
@@ -46,6 +47,11 @@ export const POST = withAuth(async (request: NextRequest) => {
     );
   }
 
-  await setOneDriveFolder(folderPath, folderItemId);
-  return NextResponse.json({ success: true, folderPath, folderItemId });
+  if (target === "invoices") {
+    await setOneDriveInvoiceFolder(folderPath, folderItemId);
+  } else {
+    await setOneDriveFolder(folderPath, folderItemId);
+  }
+
+  return NextResponse.json({ success: true, folderPath, folderItemId, target: target || "tripsheets" });
 });

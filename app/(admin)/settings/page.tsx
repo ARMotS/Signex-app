@@ -8,6 +8,8 @@ interface OneDriveAccount {
   accountName?: string;
   folderPath?: string;
   folderItemId?: string;
+  invoiceFolderPath?: string;
+  invoiceFolderItemId?: string;
 }
 
 interface OneDriveFolder {
@@ -115,6 +117,7 @@ export default function SettingsPage() {
   const [onedriveFolders, setOnedriveFolders] = useState<OneDriveFolder[]>([]);
   const [onedriveBrowsing, setOnedriveBrowsing] = useState(false);
   const [onedriveBrowserOpen, setOnedriveBrowserOpen] = useState(false);
+  const [onedriveBrowserTarget, setOnedriveBrowserTarget] = useState<"tripsheets" | "invoices">("tripsheets");
   const [onedriveBreadcrumbs, setOnedriveBreadcrumbs] = useState<{ id: string; name: string }[]>([]);
   const [onedriveFolderSaving, setOnedriveFolderSaving] = useState(false);
   const [onedriveMessage, setOnedriveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -165,6 +168,8 @@ export default function SettingsPage() {
             accountName: data.account.accountName,
             folderPath: data.account.folderPath,
             folderItemId: data.account.folderItemId,
+            invoiceFolderPath: data.account.invoiceFolderPath,
+            invoiceFolderItemId: data.account.invoiceFolderItemId,
           });
         } else {
           setOnedrive(null);
@@ -190,6 +195,8 @@ export default function SettingsPage() {
               accountName: data.account.accountName,
               folderPath: data.account.folderPath,
               folderItemId: data.account.folderItemId,
+              invoiceFolderPath: data.account.invoiceFolderPath,
+              invoiceFolderItemId: data.account.invoiceFolderItemId,
             });
           }
         })
@@ -535,7 +542,8 @@ export default function SettingsPage() {
   };
 
   // OneDrive: open folder browser
-  const openOnedriveBrowser = () => {
+  const openOnedriveBrowser = (target: "tripsheets" | "invoices" = "tripsheets") => {
+    setOnedriveBrowserTarget(target);
     setOnedriveBrowserOpen(true);
     setOnedriveBreadcrumbs([]);
     browseOnedriveFolders();
@@ -559,7 +567,7 @@ export default function SettingsPage() {
     }
   };
 
-  // OneDrive: select a folder as trip sheet source
+  // OneDrive: select a folder as trip sheet or invoice source
   const selectOnedriveFolder = async (folder: OneDriveFolder) => {
     setOnedriveFolderSaving(true);
     try {
@@ -569,12 +577,17 @@ export default function SettingsPage() {
       const res = await fetch("/api/cloud/onedrive/folders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folderPath, folderItemId: folder.id }),
+        body: JSON.stringify({ folderPath, folderItemId: folder.id, target: onedriveBrowserTarget }),
       });
       if (res.ok) {
-        setOnedrive((prev) => prev ? { ...prev, folderPath, folderItemId: folder.id } : prev);
+        if (onedriveBrowserTarget === "invoices") {
+          setOnedrive((prev) => prev ? { ...prev, invoiceFolderPath: folderPath, invoiceFolderItemId: folder.id } : prev);
+        } else {
+          setOnedrive((prev) => prev ? { ...prev, folderPath, folderItemId: folder.id } : prev);
+        }
         setOnedriveBrowserOpen(false);
-        setOnedriveMessage({ type: "success", text: `Folder set: ${folderPath}` });
+        const label = onedriveBrowserTarget === "invoices" ? "Invoice folder" : "Trip sheet folder";
+        setOnedriveMessage({ type: "success", text: `${label} set: ${folderPath}` });
         setTimeout(() => setOnedriveMessage(null), 4000);
       } else {
         const data = await res.json();
@@ -879,7 +892,7 @@ export default function SettingsPage() {
             )}
           </div>
           <p className="text-xs text-ink-muted mt-1">
-            Connect your OneDrive account to sync trip sheet files from the cloud
+            Connect your OneDrive account to sync invoice and trip sheet files from the cloud
           </p>
         </div>
 
@@ -929,7 +942,28 @@ export default function SettingsPage() {
                 </button>
               </div>
 
-              {/* Folder selection */}
+              {/* Invoice Folder selection */}
+              <div className="space-y-3">
+                <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
+                  Invoice Folder
+                </p>
+                <div className="flex items-center gap-3 p-3 bg-ink-surface border border-ink-border rounded">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={onedrive.invoiceFolderPath ? "#00C07F" : "#888580"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                  <span className="flex-1 text-sm font-mono text-ink-black truncate">
+                    {onedrive.invoiceFolderPath || "No folder selected"}
+                  </span>
+                  <button
+                    onClick={() => openOnedriveBrowser("invoices")}
+                    className="text-xs font-mono text-[#0078D4] hover:text-[#005a9e] transition-colors px-3 py-1.5 border border-[#0078D4]/30 rounded hover:bg-[#0078D4]/5"
+                  >
+                    {onedrive.invoiceFolderPath ? "Change" : "Choose Folder"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Trip Sheet Folder selection */}
               <div className="space-y-3">
                 <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
                   Trip Sheet Folder
@@ -942,7 +976,7 @@ export default function SettingsPage() {
                     {onedrive.folderPath || "No folder selected"}
                   </span>
                   <button
-                    onClick={openOnedriveBrowser}
+                    onClick={() => openOnedriveBrowser("tripsheets")}
                     className="text-xs font-mono text-[#0078D4] hover:text-[#005a9e] transition-colors px-3 py-1.5 border border-[#0078D4]/30 rounded hover:bg-[#0078D4]/5"
                   >
                     {onedrive.folderPath ? "Change" : "Choose Folder"}
@@ -961,7 +995,7 @@ export default function SettingsPage() {
               <div>
                 <p className="text-sm font-mono text-ink-black">Connect OneDrive</p>
                 <p className="text-xs text-ink-muted mt-1 max-w-sm mx-auto">
-                  Link your Microsoft account to automatically sync trip sheet files from OneDrive
+                  Link your Microsoft account to sync invoices and trip sheets from OneDrive
                 </p>
               </div>
               <button
@@ -998,7 +1032,7 @@ export default function SettingsPage() {
                   Select OneDrive Folder
                 </h3>
                 <p className="text-xs text-ink-muted mt-0.5">
-                  Choose the folder containing your trip sheet files
+                  Choose the folder containing your {onedriveBrowserTarget === "invoices" ? "PDF invoices" : "trip sheet files"}
                 </p>
               </div>
               <button

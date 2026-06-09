@@ -190,6 +190,8 @@ export async function getCloudAccountStatus() {
     tokenExpiry: account.tokenExpiry.toISOString(),
     folderPath: account.folderPath,
     folderItemId: account.folderItemId,
+    invoiceFolderPath: account.invoiceFolderPath,
+    invoiceFolderItemId: account.invoiceFolderItemId,
   };
 }
 
@@ -309,6 +311,16 @@ export async function setOneDriveFolder(folderPath: string, folderItemId: string
 }
 
 /**
+ * Set the configured OneDrive folder for invoices.
+ */
+export async function setOneDriveInvoiceFolder(folderPath: string, folderItemId: string): Promise<void> {
+  await prisma.cloudAccount.update({
+    where: { provider: "onedrive" },
+    data: { invoiceFolderPath: folderPath, invoiceFolderItemId: folderItemId },
+  });
+}
+
+/**
  * List trip sheet files in the configured OneDrive folder.
  * Filters for CSV/Excel files only.
  */
@@ -326,5 +338,24 @@ export async function listOneDriveTripSheetFiles(): Promise<OneDriveItem[]> {
     if (item.folder) return false;
     const ext = item.name.toLowerCase().slice(item.name.lastIndexOf("."));
     return extensions.includes(ext);
+  });
+}
+
+/**
+ * List invoice files in the configured OneDrive invoice folder.
+ * Filters for PDF files only.
+ */
+export async function listOneDriveInvoiceFiles(): Promise<OneDriveItem[]> {
+  const account = await prisma.cloudAccount.findUnique({
+    where: { provider: "onedrive" },
+  });
+
+  if (!account?.invoiceFolderItemId) return [];
+
+  const items = await listFolderById(account.invoiceFolderItemId);
+
+  return items.filter((item) => {
+    if (item.folder) return false;
+    return item.name.toLowerCase().endsWith(".pdf");
   });
 }

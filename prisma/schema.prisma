@@ -146,18 +146,20 @@ model AppConfig {
 // ─── Cloud Accounts (OneDrive / Google Drive OAuth) ───────────────────────
 
 model CloudAccount {
-  id            String   @id @default(cuid())
-  provider      String   // "onedrive" | "gdrive"
-  accountEmail  String?
-  accountName   String?
-  accessToken   String   @db.Text
-  refreshToken  String   @db.Text
-  tokenExpiry   DateTime
-  driveId       String?
-  folderPath    String?
-  folderItemId  String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                   String   @id @default(cuid())
+  provider             String   // "onedrive" | "gdrive"
+  accountEmail         String?
+  accountName          String?
+  accessToken          String   @db.Text
+  refreshToken         String   @db.Text
+  tokenExpiry          DateTime
+  driveId              String?
+  folderPath           String?  // trip sheet folder
+  folderItemId         String?  // trip sheet folder item ID
+  invoiceFolderPath    String?
+  invoiceFolderItemId  String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
   @@unique([provider])
 }
