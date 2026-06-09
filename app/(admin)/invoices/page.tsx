@@ -251,8 +251,7 @@ export default function InvoicesPage() {
         <div className="bg-ink-red-dim border border-ink-red/20 rounded p-6 text-center">
           <p className="text-sm font-mono text-ink-red mb-2">{error}</p>
           <p className="text-xs text-ink-muted">
-            Make sure the <code className="font-mono bg-ink-surface px-1 py-0.5 rounded">INVOICE_FOLDER_PATH</code> is
-            set in your <code className="font-mono bg-ink-surface px-1 py-0.5 rounded">.env</code> file and the folder exists.
+            Go to <Link href="/settings" className="text-[#0078D4] underline">Settings</Link> and choose an invoice folder via OneDrive, or set a local folder path.
           </p>
         </div>
       )}

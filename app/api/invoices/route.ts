@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listInvoiceFiles, getInvoiceFolderPath, deleteInvoiceFiles, findDuplicateInvoices } from "@/lib/invoices";
+import { listOneDriveInvoiceFiles, getCloudAccountStatus } from "@/lib/microsoft-graph";
 import { getSessionContext, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
@@ -7,6 +8,32 @@ export const GET = withAuth(async () => {
   const ctx = await getSessionContext();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
+  // Check if OneDrive invoice folder is configured
+  const cloudStatus = await getCloudAccountStatus();
+  if (cloudStatus?.invoiceFolderItemId) {
+    const files = await listOneDriveInvoiceFiles();
+    const invoices = files.map((f) => ({
+      name: f.name.replace(/\.pdf$/i, ""),
+      filename: f.name,
+      sizeBytes: f.size,
+      lastModified: f.lastModifiedDateTime,
+      invoiceNumber: f.name.replace(/\.pdf$/i, "").toUpperCase(),
+      isSigned: false,
+      oneDriveItemId: f.id,
+    }));
+
+    return NextResponse.json({
+      folder: `OneDrive: ${cloudStatus.invoiceFolderPath}`,
+      source: "onedrive",
+      count: invoices.length,
+      signedCount: 0,
+      unsignedCount: invoices.length,
+      invoices,
+      duplicates: [],
+    });
+  }
+
+  // Fall back to local filesystem
   const [invoices, folderPath, duplicates] = await Promise.all([
     listInvoiceFiles(),
     getInvoiceFolderPath(),
@@ -18,6 +45,7 @@ export const GET = withAuth(async () => {
 
   return NextResponse.json({
     folder: folderPath,
+    source: "local",
     count: invoices.length,
     signedCount,
     unsignedCount,
