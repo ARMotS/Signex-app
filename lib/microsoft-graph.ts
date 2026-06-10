@@ -359,3 +359,148 @@ export async function listOneDriveInvoiceFiles(): Promise<OneDriveItem[]> {
     return item.name.toLowerCase().endsWith(".pdf");
   });
 }
+
+/**
+ * Check if the OneDrive invoice folder is configured.
+ */
+export async function getOneDriveInvoiceSource(): Promise<{
+  connected: boolean;
+  folderPath?: string;
+  folderItemId?: string;
+} | null> {
+  try {
+    const status = await getCloudAccountStatus();
+    if (status?.connected && status.invoiceFolderItemId) {
+      return {
+        connected: true,
+        folderPath: status.invoiceFolderPath ?? undefined,
+        folderItemId: status.invoiceFolderItemId,
+      };
+    }
+  } catch {
+    // not configured
+  }
+  return null;
+}
+
+/**
+ * Upload a file to a specific OneDrive folder by folder item ID.
+ * Uses the simple upload endpoint (< 4MB files).
+ */
+export async function uploadFileToFolder(
+  folderItemId: string,
+  filename: string,
+  buffer: Buffer,
+  contentType: string = "application/pdf"
+): Promise<OneDriveItem> {
+  const token = await getValidAccessToken();
+  if (!token) throw new Error("No valid OneDrive access token");
+
+  const encodedName = encodeURIComponent(filename);
+  const url = `${GRAPH_API_URL}/me/drive/items/${folderItemId}:/${encodedName}:/content`;
+
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": contentType,
+    },
+    body: new Uint8Array(buffer),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Graph API upload error (${res.status}): ${err}`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Ensure a subfolder exists inside a parent folder. Creates if missing.
+ * Returns the subfolder item ID.
+ */
+export async function ensureSubfolder(
+  parentItemId: string,
+  folderName: string
+): Promise<string> {
+  const token = await getValidAccessToken();
+  if (!token) throw new Error("No valid OneDrive access token");
+
+  const children = await listFolderById(parentItemId);
+  const existing = children.find(
+    (item) => item.folder && item.name.toLowerCase() === folderName.toLowerCase()
+  );
+  if (existing) return existing.id;
+
+  const url = `${GRAPH_API_URL}/me/drive/items/${parentItemId}/children`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: folderName,
+      folder: {},
+      "@microsoft.graph.conflictBehavior": "fail",
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    if (res.status === 409) {
+      const retryChildren = await listFolderById(parentItemId);
+      const retryExisting = retryChildren.find(
+        (item) => item.folder && item.name.toLowerCase() === folderName.toLowerCase()
+      );
+      if (retryExisting) return retryExisting.id;
+    }
+    throw new Error(`Graph API create folder error (${res.status}): ${err}`);
+  }
+
+  const created = await res.json();
+  return created.id;
+}
+
+/**
+ * Upload a signed invoice to the OneDrive invoice folder's "signed" subfolder.
+ */
+export async function uploadSignedInvoiceToOneDrive(
+  filename: string,
+  buffer: Buffer
+): Promise<void> {
+  const account = await prisma.cloudAccount.findUnique({
+    where: { provider: "onedrive" },
+  });
+
+  if (!account?.invoiceFolderItemId) {
+    throw new Error("OneDrive invoice folder not configured");
+  }
+
+  const signedFolderId = await ensureSubfolder(account.invoiceFolderItemId, "signed");
+  await uploadFileToFolder(signedFolderId, filename, buffer);
+}
+
+/**
+ * List signed invoice files from the OneDrive "signed" subfolder.
+ */
+export async function listOneDriveSignedInvoices(): Promise<OneDriveItem[]> {
+  const account = await prisma.cloudAccount.findUnique({
+    where: { provider: "onedrive" },
+  });
+
+  if (!account?.invoiceFolderItemId) return [];
+
+  const children = await listFolderById(account.invoiceFolderItemId);
+  const signedFolder = children.find(
+    (item) => item.folder && item.name.toLowerCase() === "signed"
+  );
+  if (!signedFolder) return [];
+
+  const items = await listFolderById(signedFolder.id);
+  return items.filter((item) => {
+    if (item.folder) return false;
+    return item.name.toLowerCase().endsWith(".pdf");
+  });
+}

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { readInvoiceFile, saveSignedInvoice, embedSignatureOnPdf, getInvoiceFolderPath } from "@/lib/invoices";
+import { getOneDriveInvoiceSource, listOneDriveSignedInvoices, downloadFileById } from "@/lib/microsoft-graph";
 import { updateStopStatus } from "@/lib/trip-data";
 import { prisma } from "@/lib/db";
 import { getSessionContext } from "@/lib/tenant";
@@ -11,13 +12,43 @@ export const GET = withAuth(async (
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) => {
-  const ctx = await getSessionContext();
+  await getSessionContext();
   const { id } = await params;
   const decodedFilename = decodeURIComponent(id);
   const { searchParams } = new URL(request.url);
   const wantSigned = searchParams.get("signed") === "true";
 
   if (wantSigned) {
+    // Try OneDrive first
+    const onedrive = await getOneDriveInvoiceSource();
+    if (onedrive) {
+      try {
+        const signedItems = await listOneDriveSignedInvoices();
+        const match = signedItems.find((i) => i.name === decodedFilename);
+        if (match) {
+          const buffer = await downloadFileById(match.id);
+          return new NextResponse(new Uint8Array(buffer), {
+            headers: {
+              "Content-Type": "application/pdf",
+              "Content-Disposition": `inline; filename="signed-${decodedFilename}"`,
+              "Cache-Control": "no-cache",
+            },
+          });
+        }
+        return NextResponse.json(
+          { error: `Signed invoice "${decodedFilename}" not found` },
+          { status: 404 }
+        );
+      } catch (err) {
+        console.error("Failed to read signed invoice from OneDrive:", err);
+        return NextResponse.json(
+          { error: `Failed to read signed invoice from OneDrive` },
+          { status: 500 }
+        );
+      }
+    }
+
+    // Fall back to local filesystem
     const folderPath = await getInvoiceFolderPath();
     const signedPath = path.join(folderPath, "signed", decodedFilename);
     const resolved = path.resolve(signedPath);

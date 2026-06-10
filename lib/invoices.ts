@@ -16,6 +16,13 @@ import fs from "fs";
 import path from "path";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { readConfig } from "./config";
+import {
+  getOneDriveInvoiceSource,
+  listOneDriveInvoiceFiles,
+  listOneDriveSignedInvoices,
+  downloadFileById,
+  uploadSignedInvoiceToOneDrive,
+} from "./microsoft-graph";
 
 /** Default fallback folder (relative to project root) */
 const DEFAULT_FOLDER = path.join(process.cwd(), "invoices");
@@ -47,9 +54,54 @@ export interface InvoiceFile {
 }
 
 /**
- * List all PDF files in the invoice folder
+ * List all PDF files in the invoice folder.
+ * Uses OneDrive Graph API if an invoice folder is configured there,
+ * otherwise falls back to the local filesystem.
  */
 export async function listInvoiceFiles(): Promise<InvoiceFile[]> {
+  // Try OneDrive first
+  const onedrive = await getOneDriveInvoiceSource();
+  if (onedrive) {
+    return listInvoiceFilesFromOneDrive();
+  }
+
+  // Fall back to local filesystem
+  return listInvoiceFilesFromLocal();
+}
+
+async function listInvoiceFilesFromOneDrive(): Promise<InvoiceFile[]> {
+  try {
+    const [items, signedItems] = await Promise.all([
+      listOneDriveInvoiceFiles(),
+      listOneDriveSignedInvoices(),
+    ]);
+
+    const signedSet = new Set(signedItems.map((s) => s.name.toLowerCase()));
+    const signedTimeMap = new Map(
+      signedItems.map((s) => [s.name.toLowerCase(), s.lastModifiedDateTime])
+    );
+
+    return items.map((item) => {
+      const name = item.name.replace(/\.pdf$/i, "");
+      const isSigned = signedSet.has(item.name.toLowerCase());
+
+      return {
+        name,
+        filename: item.name,
+        sizeBytes: item.size,
+        lastModified: item.lastModifiedDateTime,
+        invoiceNumber: name.toUpperCase(),
+        isSigned,
+        signedAt: isSigned ? signedTimeMap.get(item.name.toLowerCase()) : undefined,
+      };
+    });
+  } catch (err) {
+    console.error("Failed to list OneDrive invoice files:", err);
+    return [];
+  }
+}
+
+async function listInvoiceFilesFromLocal(): Promise<InvoiceFile[]> {
   const folderPath = await getInvoiceFolderPath();
 
   // Ensure folder exists
@@ -100,9 +152,27 @@ export async function listInvoiceFiles(): Promise<InvoiceFile[]> {
 }
 
 /**
- * Read a specific invoice PDF file as a Buffer
+ * Read a specific invoice PDF file as a Buffer.
+ * Downloads from OneDrive if configured, otherwise reads from local filesystem.
  */
 export async function readInvoiceFile(filename: string): Promise<Buffer | null> {
+  // Try OneDrive first
+  const onedrive = await getOneDriveInvoiceSource();
+  if (onedrive) {
+    try {
+      const items = await listOneDriveInvoiceFiles();
+      const match = items.find((i) => i.name === filename);
+      if (match) {
+        return downloadFileById(match.id);
+      }
+      return null;
+    } catch (err) {
+      console.error(`Failed to read ${filename} from OneDrive:`, err);
+      return null;
+    }
+  }
+
+  // Fall back to local filesystem
   const folderPath = await getInvoiceFolderPath();
   const filePath = path.join(folderPath, filename);
 
@@ -121,15 +191,29 @@ export async function readInvoiceFile(filename: string): Promise<Buffer | null> 
 }
 
 /**
- * Save a signed PDF back to the invoice folder (saves to signed subfolder)
+ * Save a signed PDF back to the invoice folder (saves to signed subfolder).
+ * Uploads to OneDrive if configured, otherwise saves to local filesystem.
  */
 export async function saveSignedInvoice(
   filename: string,
   pdfBuffer: Buffer,
   saveToSubfolder: boolean = true
 ): Promise<string> {
+  // Upload to OneDrive if invoice folder is configured there
+  const onedrive = await getOneDriveInvoiceSource();
+  if (onedrive) {
+    try {
+      await uploadSignedInvoiceToOneDrive(filename, pdfBuffer);
+      return `onedrive://signed/${filename}`;
+    } catch (err) {
+      console.error("Failed to upload signed invoice to OneDrive:", err);
+      throw err;
+    }
+  }
+
+  // Fall back to local filesystem
   const folderPath = await getInvoiceFolderPath();
-  
+
   let targetPath: string;
   if (saveToSubfolder) {
     const signedFolder = path.join(folderPath, "signed");
@@ -261,6 +345,16 @@ export async function embedSignatureOnPdf(
  * Check if a signed version of an invoice exists in the signed subfolder.
  */
 export async function checkIfSigned(filename: string): Promise<boolean> {
+  const onedrive = await getOneDriveInvoiceSource();
+  if (onedrive) {
+    try {
+      const signedItems = await listOneDriveSignedInvoices();
+      return signedItems.some((i) => i.name.toLowerCase() === filename.toLowerCase());
+    } catch {
+      return false;
+    }
+  }
+
   const folderPath = await getInvoiceFolderPath();
   const signedPath = path.join(folderPath, "signed", filename);
   return fs.existsSync(signedPath);
@@ -339,16 +433,9 @@ export interface DuplicateGroup {
  * appear to be copies (e.g. "INV-2041 (1).pdf").
  */
 export async function findDuplicateInvoices(): Promise<DuplicateGroup[]> {
-  const folderPath = await getInvoiceFolderPath();
-
-  if (!fs.existsSync(folderPath)) return [];
-
-  const files = fs.readdirSync(folderPath);
-  const pdfFiles = files.filter((f) => f.toLowerCase().endsWith(".pdf"));
-
   // Normalize: strip common copy patterns like " (1)", " - Copy", "_copy", etc.
   const normalize = (filename: string): string => {
-    const name = path.parse(filename).name;
+    const name = filename.replace(/\.pdf$/i, "");
     return name
       .replace(/\s*\(\d+\)\s*$/i, "")     // " (1)", " (2)"
       .replace(/\s*-\s*copy\s*\d*$/i, "")  // " - Copy", " - Copy2"
@@ -357,6 +444,24 @@ export async function findDuplicateInvoices(): Promise<DuplicateGroup[]> {
       .trim()
       .toUpperCase();
   };
+
+  // Get file list from whichever source is active
+  const onedrive = await getOneDriveInvoiceSource();
+  let pdfFiles: string[];
+
+  if (onedrive) {
+    try {
+      const items = await listOneDriveInvoiceFiles();
+      pdfFiles = items.map((i) => i.name);
+    } catch {
+      return [];
+    }
+  } else {
+    const folderPath = await getInvoiceFolderPath();
+    if (!fs.existsSync(folderPath)) return [];
+    const files = fs.readdirSync(folderPath);
+    pdfFiles = files.filter((f) => f.toLowerCase().endsWith(".pdf"));
+  }
 
   const groups = new Map<string, string[]>();
   for (const file of pdfFiles) {

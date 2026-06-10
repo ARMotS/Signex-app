@@ -24,6 +24,7 @@ import {
   getCloudAccountStatus,
   listOneDriveTripSheetFiles,
   downloadFileById,
+  uploadFileToFolder,
 } from "./microsoft-graph";
 
 export interface TripSheetFile {
@@ -389,13 +390,30 @@ export async function moveToProcessed(filename: string): Promise<string | null> 
 
 /**
  * Save an uploaded file buffer to the trip sheet folder.
- * Ensures the file exists on disk so moveToProcessed can find it later.
- * Returns the full path, or null if no folder is configured.
+ * Uploads to OneDrive if connected, otherwise saves to local filesystem.
+ * Returns the full path (or OneDrive path), or null if no folder is configured.
  */
 export async function saveUploadedFile(
   filename: string,
   buffer: Buffer
 ): Promise<string | null> {
+  // Upload to OneDrive if trip sheet folder is configured there
+  const onedrive = await getOneDriveSource();
+  if (onedrive?.folderItemId) {
+    try {
+      const ext = filename.toLowerCase().slice(filename.lastIndexOf("."));
+      const contentType = ext === ".csv"
+        ? "text/csv"
+        : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      await uploadFileToFolder(onedrive.folderItemId, filename, buffer, contentType);
+      return `onedrive://${filename}`;
+    } catch (err) {
+      console.error("Failed to upload trip sheet to OneDrive:", err);
+      // Fall through to local save as fallback
+    }
+  }
+
+  // Fall back to local filesystem
   const folderPath = await getTripSheetFolderPath();
   if (!folderPath) return null;
 
