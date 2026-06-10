@@ -474,12 +474,31 @@ export async function uploadSignedInvoiceToOneDrive(
     where: { provider: "onedrive" },
   });
 
-  if (!account?.invoiceFolderItemId) {
+  if (!account?.invoiceFolderItemId || !account?.invoiceFolderPath) {
     throw new Error("OneDrive invoice folder not configured");
   }
 
-  const signedFolderId = await ensureSubfolder(account.invoiceFolderItemId, "signed");
-  await uploadFileToFolder(signedFolderId, filename, buffer);
+  // Use path-based upload which is more reliable than ID-based colon syntax
+  const token = await getValidAccessToken();
+  if (!token) throw new Error("No valid OneDrive access token");
+
+  const folderPath = account.invoiceFolderPath.replace(/^\//, "");
+  const encodedPath = encodeURIComponent(`${folderPath}/signed/${filename}`).replace(/%2F/g, "/");
+  const url = `${GRAPH_API_URL}/me/drive/root:/${encodedPath}:/content`;
+
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/pdf",
+    },
+    body: new Uint8Array(buffer),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Graph API upload error (${res.status}): ${err}`);
+  }
 }
 
 /**
