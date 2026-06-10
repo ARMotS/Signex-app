@@ -7,10 +7,6 @@ interface Driver {
   id: string;
   name: string;
   active: boolean;
-}
-
-interface TripSheetSummary {
-  driverId: string;
   stopCount: number;
   signedCount: number;
 }
@@ -18,7 +14,6 @@ interface TripSheetSummary {
 export default function DriverSelectPage() {
   const router = useRouter();
   const [drivers, setDrivers] = useState<Driver[]>([]);
-  const [tripSummaries, setTripSummaries] = useState<Map<string, TripSheetSummary>>(new Map());
   const [loading, setLoading] = useState(true);
   const [selectedDriver, setSelectedDriver] = useState<Driver | null>(null);
   const [pin, setPin] = useState("");
@@ -29,27 +24,10 @@ export default function DriverSelectPage() {
     // Clear old driver data so stale sessions don't persist
     localStorage.removeItem("signex-driver");
 
-    // Fetch drivers (public endpoint) and trip sheets in parallel
-    Promise.all([
-      fetch("/api/auth/drivers").then((r) => r.json()),
-      fetch("/api/trip-sheet").then((r) => r.json()).catch(() => ({ tripSheets: [] })),
-    ])
-      .then(([driverData, tripData]) => {
-        setDrivers((driverData.drivers || []).filter((d: Driver) => d.active));
-
-        // Build summary map: driverId -> { stopCount, signedCount }
-        const summaries = new Map<string, TripSheetSummary>();
-        for (const trip of tripData.tripSheets || []) {
-          const signedCount = (trip.stops || []).filter(
-            (s: { status: string }) => s.status === "SIGNED"
-          ).length;
-          summaries.set(trip.driverId, {
-            driverId: trip.driverId,
-            stopCount: (trip.stops || []).length,
-            signedCount,
-          });
-        }
-        setTripSummaries(summaries);
+    fetch("/api/auth/drivers")
+      .then((r) => r.json())
+      .then((data) => {
+        setDrivers((data.drivers || []).filter((d: Driver) => d.active));
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -242,9 +220,8 @@ export default function DriverSelectPage() {
       ) : (
         <div className="grid grid-cols-1 gap-3 max-w-md mx-auto w-full stagger-children">
           {drivers.map((driver) => {
-            const summary = tripSummaries.get(driver.id);
-            const hasStops = summary && summary.stopCount > 0;
-            const allSigned = hasStops && summary.signedCount === summary.stopCount;
+            const hasStops = driver.stopCount > 0;
+            const allSigned = hasStops && driver.signedCount === driver.stopCount;
 
             return (
               <button
@@ -268,7 +245,7 @@ export default function DriverSelectPage() {
                           ? "bg-ink-green-dim text-ink-green"
                           : "bg-ink-amber-dim text-ink-amber"
                       }`}>
-                        {summary.signedCount}/{summary.stopCount} stops
+                        {driver.signedCount}/{driver.stopCount} stops
                       </span>
                     )}
                     {!hasStops && (

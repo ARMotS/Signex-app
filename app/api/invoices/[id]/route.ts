@@ -134,7 +134,7 @@ export const PUT = withAuth(async (
   const originalPdf = await readInvoiceFile(decodedFilename);
   if (!originalPdf) {
     return NextResponse.json(
-      { error: `Invoice "${decodedFilename}" not found` },
+      { error: `Invoice file "${decodedFilename}" not found. It may have been renamed or moved.` },
       { status: 404 }
     );
   }
@@ -142,17 +142,34 @@ export const PUT = withAuth(async (
   const base64Data = signatureImage.replace(/^data:image\/png;base64,/, "");
   const signatureBytes = Uint8Array.from(Buffer.from(base64Data, "base64"));
 
-  const signedPdfBuffer = await embedSignatureOnPdf(
-    originalPdf,
-    signatureBytes,
-    signerName
-  );
+  let signedPdfBuffer: Buffer;
+  try {
+    signedPdfBuffer = await embedSignatureOnPdf(
+      originalPdf,
+      signatureBytes,
+      signerName
+    );
+  } catch (err) {
+    console.error("Failed to embed signature on PDF:", err);
+    return NextResponse.json(
+      { error: `Failed to embed signature on PDF: ${err instanceof Error ? err.message : "unknown error"}` },
+      { status: 500 }
+    );
+  }
 
-  await saveSignedInvoice(
-    decodedFilename,
-    signedPdfBuffer,
-    true
-  );
+  try {
+    await saveSignedInvoice(
+      decodedFilename,
+      signedPdfBuffer,
+      true
+    );
+  } catch (err) {
+    console.error("Failed to save signed invoice:", err);
+    return NextResponse.json(
+      { error: `Failed to save signed invoice: ${err instanceof Error ? err.message : "unknown error"}` },
+      { status: 500 }
+    );
+  }
 
   if (stopId) {
     await updateStopStatus(stopId, "SIGNED");
