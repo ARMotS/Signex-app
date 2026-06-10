@@ -8,7 +8,7 @@ import { prisma } from "./db";
 const MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0";
 const GRAPH_API_URL = "https://graph.microsoft.com/v1.0";
 
-const SCOPES = ["Files.Read", "Files.Read.All", "User.Read", "offline_access"];
+const SCOPES = ["Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "User.Read", "offline_access"];
 
 function getClientId(): string {
   const id = process.env.MICROSOFT_CLIENT_ID;
