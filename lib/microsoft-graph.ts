@@ -474,17 +474,19 @@ export async function uploadSignedInvoiceToOneDrive(
     where: { provider: "onedrive" },
   });
 
-  if (!account?.invoiceFolderItemId || !account?.invoiceFolderPath) {
+  if (!account?.invoiceFolderItemId) {
     throw new Error("OneDrive invoice folder not configured");
   }
 
-  // Use path-based upload which is more reliable than ID-based colon syntax
   const token = await getValidAccessToken();
   if (!token) throw new Error("No valid OneDrive access token");
 
-  const folderPath = account.invoiceFolderPath.replace(/^\//, "");
-  const encodedPath = encodeURIComponent(`${folderPath}/signed/${filename}`).replace(/%2F/g, "/");
-  const url = `${GRAPH_API_URL}/me/drive/root:/${encodedPath}:/content`;
+  // Ensure "signed" subfolder exists inside the invoice folder (by ID)
+  const signedFolderId = await ensureSubfolder(account.invoiceFolderItemId, "signed");
+
+  // Upload into the signed subfolder using ID-based colon syntax
+  const encodedName = encodeURIComponent(filename);
+  const url = `${GRAPH_API_URL}/me/drive/items/${signedFolderId}:/${encodedName}:/content`;
 
   const res = await fetch(url, {
     method: "PUT",
@@ -498,6 +500,39 @@ export async function uploadSignedInvoiceToOneDrive(
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`Graph API upload error (${res.status}): ${err}`);
+  }
+}
+
+/**
+ * Move a file to a subfolder within the same parent folder.
+ * Creates the subfolder if it doesn't exist.
+ * Used to move completed trip sheets to processed/.
+ */
+export async function moveFileToSubfolder(
+  fileItemId: string,
+  parentFolderItemId: string,
+  subfolderName: string
+): Promise<void> {
+  const token = await getValidAccessToken();
+  if (!token) throw new Error("No valid OneDrive access token");
+
+  const subfolderId = await ensureSubfolder(parentFolderItemId, subfolderName);
+
+  const url = `${GRAPH_API_URL}/me/drive/items/${fileItemId}`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      parentReference: { id: subfolderId },
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Graph API move error (${res.status}): ${err}`);
   }
 }
 

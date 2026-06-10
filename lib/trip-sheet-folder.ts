@@ -25,6 +25,7 @@ import {
   listOneDriveTripSheetFiles,
   downloadFileById,
   uploadFileToFolder,
+  moveFileToSubfolder,
 } from "./microsoft-graph";
 
 export interface TripSheetFile {
@@ -349,9 +350,27 @@ export async function markFileImported(
 /**
  * Move a processed file to the processed/ subfolder.
  * Creates the subfolder if it doesn't exist.
+ * Uses OneDrive Graph API if connected, otherwise local filesystem.
  * Returns the new path, or null if the move failed.
  */
 export async function moveToProcessed(filename: string): Promise<string | null> {
+  // Try OneDrive first
+  const onedrive = await getOneDriveSource();
+  if (onedrive?.folderItemId) {
+    try {
+      const items = await listOneDriveTripSheetFiles();
+      const match = items.find((i) => i.name === filename);
+      if (match) {
+        await moveFileToSubfolder(match.id, onedrive.folderItemId, "processed");
+        return `onedrive://processed/${filename}`;
+      }
+    } catch (err) {
+      console.error("Failed to move file to processed on OneDrive:", err);
+    }
+    return null;
+  }
+
+  // Fall back to local filesystem
   const folderPath = await getTripSheetFolderPath();
   if (!folderPath) return null;
 
