@@ -1170,7 +1170,7 @@ export default function TripSheetPage() {
                           {result.driverName}
                         </p>
                         <p className="text-xs text-ink-muted font-mono">
-                          {result.regNo || "No REG No"} · {result.stops.filter((s) => !skippedInvoices.has(s.invoiceNumber)).length} stop{result.stops.filter((s) => !skippedInvoices.has(s.invoiceNumber)).length !== 1 ? "s" : ""}
+                          {result.regNo || "No REGNO"} · {result.stops.filter((s) => !skippedInvoices.has(s.invoiceNumber)).length} stop{result.stops.filter((s) => !skippedInvoices.has(s.invoiceNumber)).length !== 1 ? "s" : ""}
                           {result.stops.some((s) => skippedInvoices.has(s.invoiceNumber)) && (
                             <span className="text-ink-red ml-1">({result.stops.filter((s) => skippedInvoices.has(s.invoiceNumber)).length} skipped)</span>
                           )}

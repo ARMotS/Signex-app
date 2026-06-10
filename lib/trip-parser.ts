@@ -5,9 +5,9 @@
  * Expected columns (auto-detected by header):
  *   1. Date       — trip date for reference
  *   2. Driver     — driver name (used for matching as fallback)
- *   3. REG No     — vehicle registration (used for matching as priority)
+ *   3. REGNO      — vehicle registration (used for matching as priority)
  *   4. Customer   — customer name (displayed on driver app)
- *   5. Invoice No — invoice number (matched to PDF files)
+ *   5. INVOICENO  — invoice number (matched to PDF files)
  *   6. NOP        — number of parcels (displayed on driver app)
  */
 
@@ -72,6 +72,7 @@ const COLUMN_PATTERNS: Record<string, RegExp[]> = {
     /^assigned$/i,
   ],
   regNo: [
+    /^regno$/i,
     /^reg\s*no\.?$/i,
     /^reg$/i,
     /^registration$/i,
@@ -91,6 +92,7 @@ const COLUMN_PATTERNS: Record<string, RegExp[]> = {
     /^deliver\s*to$/i,
   ],
   invoiceNumber: [
+    /^invoiceno$/i,
     /^invoice\s*no\.?$/i,
     /^invoice\s*#?\s*n/i,
     /^invoice\s*#/i,
@@ -144,10 +146,20 @@ function mapColumns(headers: string[]): Record<string, number> {
 /**
  * Normalize an invoice number for matching.
  * Handles formats: "Invoice # 001", "INV-001", "Invoice 001", "001", "827323", etc.
+ * For "IV-365-4.pdf" style filenames, extracts the middle numeric value (365).
  * Strips prefixes, spaces, hyphens. Leading zeros are preserved.
  */
 function normalizeInvoiceNumber(raw: string): string {
   let normalized = String(raw).trim().toUpperCase();
+
+  // Strip .pdf extension if present
+  normalized = normalized.replace(/\.PDF$/i, "");
+
+  // Handle IV-NNN-N format: extract the middle number only
+  const ivMatch = normalized.match(/^IV[- ](\d+)[- ]\d+$/i);
+  if (ivMatch) {
+    return ivMatch[1];
+  }
 
   // Remove common prefixes: "INVOICE #", "INVOICE#", "INV-", "INV ", "INVOICE "
   normalized = normalized
