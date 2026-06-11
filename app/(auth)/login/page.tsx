@@ -275,22 +275,6 @@ export default function LoginPage() {
             </form>
           )}
 
-          {/* Toggle mode */}
-          {!needsSetup && (
-            <div className="mt-5 pt-4 border-t border-ink-border text-center">
-              <button
-                onClick={() => {
-                  setMode(mode === "login" ? "signup" : "login");
-                  setError("");
-                }}
-                className="text-xs font-mono text-ink-muted hover:text-ink-green transition-colors"
-              >
-                {mode === "login"
-                  ? "Need an account? Sign up"
-                  : "Already have an account? Sign in"}
-              </button>
-            </div>
-          )}
         </div>
 
         {/* Back link */}

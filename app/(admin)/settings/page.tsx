@@ -626,223 +626,8 @@ export default function SettingsPage() {
         </p>
       </div>
 
-      {/* ─── Invoice Folder Path ────────────────────────────────────── */}
-      <div className="bg-ink-card border border-ink-border rounded overflow-hidden">
-        <div className="px-6 py-4 border-b border-ink-border">
-          <div className="flex items-center gap-2">
-            <h2 className="font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
-              Invoice Folder
-            </h2>
-            {selectedPath && getProviderBadge(settings.invoiceFolderType) && (
-              <span
-                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono font-medium rounded-full"
-                style={{
-                  backgroundColor: getProviderBadge(settings.invoiceFolderType)!.color + '15',
-                  color: getProviderBadge(settings.invoiceFolderType)!.color,
-                  border: `1px solid ${getProviderBadge(settings.invoiceFolderType)!.color}30`,
-                }}
-              >
-                {getProviderBadge(settings.invoiceFolderType)!.icon} {getProviderBadge(settings.invoiceFolderType)!.label}
-              </span>
-            )}
-          </div>
-          <p className="text-xs text-ink-muted mt-1">
-            Choose the local, OneDrive, or Google Drive folder containing your PDF invoices
-          </p>
-        </div>
-
-        <div className="p-6 space-y-5">
-          {/* Current selection display */}
-          <div className="flex items-center gap-3 p-4 bg-ink-surface border border-ink-border rounded">
-            <div className="w-10 h-10 rounded bg-ink-card border border-ink-border flex items-center justify-center shrink-0">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={selectedPath ? "#00C07F" : "#888580"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-              </svg>
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-mono text-ink-muted uppercase tracking-wide mb-0.5">
-                {selectedPath ? "Selected folder" : "No folder selected"}
-              </p>
-              <p className="text-sm font-mono text-ink-black truncate">
-                {selectedPath || "Using default (./invoices)"}
-              </p>
-            </div>
-            {selectedPath && (
-              <button
-                onClick={() => {
-                  setSelectedPath("");
-                  setValidation(null);
-                }}
-                className="text-xs font-mono text-ink-muted hover:text-ink-red transition-colors px-2 py-1"
-                title="Reset to default"
-              >
-                ✕
-              </button>
-            )}
-          </div>
-
-          {/* Action buttons */}
-          <div className="flex flex-wrap gap-3">
-            <button
-              onClick={() => openBrowser("invoices")}
-              className="flex items-center gap-2 px-5 py-3 bg-ink-black text-white font-mono text-sm font-medium rounded hover:bg-ink-black/90 active:scale-[0.98] transition-all"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-              </svg>
-              Browse Folders
-            </button>
-            <button
-              onClick={() => setShowManualInput(!showManualInput)}
-              className="flex items-center gap-2 px-4 py-3 border border-ink-border text-ink-muted font-mono text-sm rounded hover:text-ink-black hover:border-ink-muted-light transition-all"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-              </svg>
-              Type Path
-            </button>
-          </div>
-
-          {/* Cloud quick-select */}
-          {cloudRoots.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
-                Detected cloud folders
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {cloudRoots.map((root) => (
-                  <button
-                    key={root.path}
-                    onClick={() => {
-                      setBrowserTarget("invoices");
-                      selectFolder(root.path);
-                    }}
-                    className="flex items-center gap-2 px-3 py-2 bg-ink-surface border border-ink-border rounded text-xs font-mono text-ink-muted hover:text-ink-black hover:border-ink-muted-light transition-all group"
-                  >
-                    <span>{root.icon}</span>
-                    <span className="group-hover:text-ink-black transition-colors">{root.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Manual path input (toggle) */}
-          {showManualInput && (
-            <div className="flex gap-2 animate-fade-in">
-              <input
-                type="text"
-                value={manualPath}
-                onChange={(e) => setManualPath(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleManualSubmit()}
-                placeholder="C:\Invoices  or  \\server\share\invoices"
-                className="flex-1 px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
-                autoFocus
-              />
-              <button
-                onClick={handleManualSubmit}
-                disabled={!manualPath.trim()}
-                className="px-4 py-2.5 bg-ink-green text-white font-mono text-sm font-medium rounded hover:bg-ink-green-hover disabled:bg-ink-border disabled:text-ink-muted transition-all"
-              >
-                Use Path
-              </button>
-            </div>
-          )}
-
-          {/* Validation result */}
-          {validation && (
-            <div
-              className={`rounded p-4 border animate-fade-in ${
-                validation.valid
-                  ? "bg-ink-green-dim border-ink-green/20"
-                  : "bg-ink-red-dim border-ink-red/20"
-              }`}
-            >
-              {validation.valid ? (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                    <span className="text-sm font-mono font-medium text-ink-green">
-                      Folder is valid and accessible
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap gap-3 mt-1">
-                    <span className="text-xs font-mono text-ink-muted">
-                      📄 {validation.pdfCount} PDF{validation.pdfCount !== 1 ? "s" : ""} found
-                    </span>
-                    <span className="text-xs font-mono text-ink-muted">
-                      {validation.readable ? "✅ Readable" : "❌ Not readable"}
-                    </span>
-                    <span className="text-xs font-mono text-ink-muted">
-                      {validation.writable ? "✅ Writable" : "⚠️ Read-only"}
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-start gap-2">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#E84040" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5">
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="15" y1="9" x2="9" y2="15" />
-                    <line x1="9" y1="9" x2="15" y2="15" />
-                  </svg>
-                  <span className="text-sm font-mono text-ink-red">{validation.error}</span>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Save actions */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-ink-border bg-ink-surface/50">
-          <div className="flex-1">
-            {saveResult && (
-              <div
-                className={`flex items-center gap-2 text-sm font-mono animate-fade-in ${
-                  saveResult.success ? "text-ink-green" : "text-ink-red"
-                }`}
-              >
-                {saveResult.success ? "✓" : "✕"} {saveResult.message}
-              </div>
-            )}
-          </div>
-          <div className="flex items-center gap-3">
-            {hasChanges && (
-              <button
-                onClick={() => {
-                  setSelectedPath(settings.invoiceFolderPath || "");
-                  setValidation(null);
-                }}
-                className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
-              >
-                Cancel
-              </button>
-            )}
-            <button
-              onClick={handleSave}
-              disabled={!canSave || saving}
-              className={`px-5 py-2.5 text-sm font-mono font-medium rounded transition-all ${
-                canSave && !saving
-                  ? "bg-ink-green text-white hover:bg-ink-green-hover active:scale-[0.98]"
-                  : "bg-ink-border text-ink-muted cursor-not-allowed"
-              }`}
-            >
-              {saving ? (
-                <span className="flex items-center gap-2">
-                  <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Saving…
-                </span>
-              ) : (
-                "Save Changes"
-              )}
-            </button>
-          </div>
-        </div>
-      </div>
-
       {/* ─── How It Works ───────────────────────────────────────────── */}
-      <div className="mt-6 bg-ink-card border border-ink-border rounded p-6">
+      <div className="bg-ink-card border border-ink-border rounded p-6">
         <h3 className="font-mono text-sm font-medium text-ink-black mb-3">
           How it works
         </h3>
@@ -1161,221 +946,6 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* ─── Trip Sheet Folder ──────────────────────────────────── */}
-      <div className="mt-6 bg-ink-card border border-ink-border rounded overflow-hidden">
-        <div className="px-6 py-4 border-b border-ink-border">
-          <div className="flex items-center gap-2">
-            <h2 className="font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
-              Trip Sheet Folder
-            </h2>
-            {tsSelectedPath && getProviderBadge(settings.tripSheetFolderType) && (
-              <span
-                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono font-medium rounded-full"
-                style={{
-                  backgroundColor: getProviderBadge(settings.tripSheetFolderType)!.color + '15',
-                  color: getProviderBadge(settings.tripSheetFolderType)!.color,
-                  border: `1px solid ${getProviderBadge(settings.tripSheetFolderType)!.color}30`,
-                }}
-              >
-                {getProviderBadge(settings.tripSheetFolderType)!.icon} {getProviderBadge(settings.tripSheetFolderType)!.label}
-              </span>
-            )}
-          </div>
-          <p className="text-xs text-ink-muted mt-1">
-            Link a OneDrive or Google Drive folder to auto-detect trip sheet files (CSV/Excel)
-          </p>
-        </div>
-
-        <div className="p-6 space-y-5">
-          {/* Current selection display */}
-          <div className="flex items-center gap-3 p-4 bg-ink-surface border border-ink-border rounded">
-            <div className="w-10 h-10 rounded bg-ink-card border border-ink-border flex items-center justify-center shrink-0">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={tsSelectedPath ? "#00C07F" : "#888580"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-                <line x1="16" y1="13" x2="8" y2="13" />
-                <line x1="16" y1="17" x2="8" y2="17" />
-              </svg>
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-mono text-ink-muted uppercase tracking-wide mb-0.5">
-                {tsSelectedPath ? "Selected folder" : "No folder configured"}
-              </p>
-              <p className="text-sm font-mono text-ink-black truncate">
-                {tsSelectedPath || "Trip sheets must be uploaded manually"}
-              </p>
-            </div>
-            {tsSelectedPath && (
-              <button
-                onClick={() => {
-                  setTsSelectedPath("");
-                  setTsValidation(null);
-                }}
-                className="text-xs font-mono text-ink-muted hover:text-ink-red transition-colors px-2 py-1"
-                title="Remove folder"
-              >
-                ✕
-              </button>
-            )}
-          </div>
-
-          {/* Action buttons */}
-          <div className="flex flex-wrap gap-3">
-            <button
-              onClick={() => openBrowser("tripsheets")}
-              className="flex items-center gap-2 px-5 py-3 bg-ink-black text-white font-mono text-sm font-medium rounded hover:bg-ink-black/90 active:scale-[0.98] transition-all"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-              </svg>
-              Browse Folders
-            </button>
-            <button
-              onClick={() => setTsShowManualInput(!tsShowManualInput)}
-              className="flex items-center gap-2 px-4 py-3 border border-ink-border text-ink-muted font-mono text-sm rounded hover:text-ink-black hover:border-ink-muted-light transition-all"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-              </svg>
-              Type Path
-            </button>
-          </div>
-
-          {/* Cloud quick-select */}
-          {cloudRoots.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
-                Detected cloud folders
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {cloudRoots.map((root) => (
-                  <button
-                    key={root.path}
-                    onClick={() => {
-                      setBrowserTarget("tripsheets");
-                      selectFolder(root.path);
-                    }}
-                    className="flex items-center gap-2 px-3 py-2 bg-ink-surface border border-ink-border rounded text-xs font-mono text-ink-muted hover:text-ink-black hover:border-ink-muted-light transition-all group"
-                  >
-                    <span>{root.icon}</span>
-                    <span className="group-hover:text-ink-black transition-colors">{root.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Manual path input (toggle) */}
-          {tsShowManualInput && (
-            <div className="flex gap-2 animate-fade-in">
-              <input
-                type="text"
-                value={tsManualPath}
-                onChange={(e) => setTsManualPath(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleTsManualSubmit()}
-                placeholder="C:\TripSheets  or  OneDrive path"
-                className="flex-1 px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
-                autoFocus
-              />
-              <button
-                onClick={handleTsManualSubmit}
-                disabled={!tsManualPath.trim()}
-                className="px-4 py-2.5 bg-ink-green text-white font-mono text-sm font-medium rounded hover:bg-ink-green-hover disabled:bg-ink-border disabled:text-ink-muted transition-all"
-              >
-                Use Path
-              </button>
-            </div>
-          )}
-
-          {/* Validation result */}
-          {tsValidation && (
-            <div
-              className={`rounded p-4 border animate-fade-in ${
-                tsValidation.valid
-                  ? "bg-ink-green-dim border-ink-green/20"
-                  : "bg-ink-red-dim border-ink-red/20"
-              }`}
-            >
-              {tsValidation.valid ? (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                    <span className="text-sm font-mono font-medium text-ink-green">
-                      Folder is valid and accessible
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap gap-3 mt-1">
-                    <span className="text-xs font-mono text-ink-muted">
-                      📄 {tsValidation.fileCount} file{tsValidation.fileCount !== 1 ? "s" : ""} found
-                    </span>
-                    <span className="text-xs font-mono text-ink-muted">
-                      {tsValidation.readable ? "✅ Readable" : "❌ Not readable"}
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-start gap-2">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#E84040" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5">
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="15" y1="9" x2="9" y2="15" />
-                    <line x1="9" y1="9" x2="15" y2="15" />
-                  </svg>
-                  <span className="text-sm font-mono text-ink-red">{tsValidation.error}</span>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Save actions */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-ink-border bg-ink-surface/50">
-          <div className="flex-1">
-            {tsSaveResult && (
-              <div
-                className={`flex items-center gap-2 text-sm font-mono animate-fade-in ${
-                  tsSaveResult.success ? "text-ink-green" : "text-ink-red"
-                }`}
-              >
-                {tsSaveResult.success ? "✓" : "✕"} {tsSaveResult.message}
-              </div>
-            )}
-          </div>
-          <div className="flex items-center gap-3">
-            {tsHasChanges && (
-              <button
-                onClick={() => {
-                  setTsSelectedPath(settings.tripSheetFolderPath || "");
-                  setTsValidation(null);
-                }}
-                className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
-              >
-                Cancel
-              </button>
-            )}
-            <button
-              onClick={handleTsSave}
-              disabled={!tsCanSave || tsSaving}
-              className={`px-5 py-2.5 text-sm font-mono font-medium rounded transition-all ${
-                tsCanSave && !tsSaving
-                  ? "bg-ink-green text-white hover:bg-ink-green-hover active:scale-[0.98]"
-                  : "bg-ink-border text-ink-muted cursor-not-allowed"
-              }`}
-            >
-              {tsSaving ? (
-                <span className="flex items-center gap-2">
-                  <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Saving…
-                </span>
-              ) : (
-                "Save Changes"
-              )}
-            </button>
-          </div>
-        </div>
-      </div>
-
       {/* ─── Signature Placement ──────────────────────────────────── */}
       <div className="mt-6 bg-ink-card border border-ink-border rounded overflow-hidden">
         <div className="px-6 py-4 border-b border-ink-border">
@@ -1588,6 +1158,436 @@ export default function SettingsPage() {
                 </span>
               ) : (
                 "Save Position"
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ─── Invoice Folder Path ────────────────────────────────────── */}
+      <div className="mt-6 bg-ink-card border border-ink-border rounded overflow-hidden">
+        <div className="px-6 py-4 border-b border-ink-border">
+          <div className="flex items-center gap-2">
+            <h2 className="font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
+              Invoice Folder
+            </h2>
+            {selectedPath && getProviderBadge(settings.invoiceFolderType) && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono font-medium rounded-full"
+                style={{
+                  backgroundColor: getProviderBadge(settings.invoiceFolderType)!.color + '15',
+                  color: getProviderBadge(settings.invoiceFolderType)!.color,
+                  border: `1px solid ${getProviderBadge(settings.invoiceFolderType)!.color}30`,
+                }}
+              >
+                {getProviderBadge(settings.invoiceFolderType)!.icon} {getProviderBadge(settings.invoiceFolderType)!.label}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-ink-muted mt-1">
+            Choose the local, OneDrive, or Google Drive folder containing your PDF invoices
+          </p>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {/* Current selection display */}
+          <div className="flex items-center gap-3 p-4 bg-ink-surface border border-ink-border rounded">
+            <div className="w-10 h-10 rounded bg-ink-card border border-ink-border flex items-center justify-center shrink-0">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={selectedPath ? "#00C07F" : "#888580"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-mono text-ink-muted uppercase tracking-wide mb-0.5">
+                {selectedPath ? "Selected folder" : "No folder selected"}
+              </p>
+              <p className="text-sm font-mono text-ink-black truncate">
+                {selectedPath || "Using default (./invoices)"}
+              </p>
+            </div>
+            {selectedPath && (
+              <button
+                onClick={() => {
+                  setSelectedPath("");
+                  setValidation(null);
+                }}
+                className="text-xs font-mono text-ink-muted hover:text-ink-red transition-colors px-2 py-1"
+                title="Reset to default"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={() => openBrowser("invoices")}
+              className="flex items-center gap-2 px-5 py-3 bg-ink-black text-white font-mono text-sm font-medium rounded hover:bg-ink-black/90 active:scale-[0.98] transition-all"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+              Browse Folders
+            </button>
+            <button
+              onClick={() => setShowManualInput(!showManualInput)}
+              className="flex items-center gap-2 px-4 py-3 border border-ink-border text-ink-muted font-mono text-sm rounded hover:text-ink-black hover:border-ink-muted-light transition-all"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+              </svg>
+              Type Path
+            </button>
+          </div>
+
+          {/* Cloud quick-select */}
+          {cloudRoots.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
+                Detected cloud folders
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {cloudRoots.map((root) => (
+                  <button
+                    key={root.path}
+                    onClick={() => {
+                      setBrowserTarget("invoices");
+                      selectFolder(root.path);
+                    }}
+                    className="flex items-center gap-2 px-3 py-2 bg-ink-surface border border-ink-border rounded text-xs font-mono text-ink-muted hover:text-ink-black hover:border-ink-muted-light transition-all group"
+                  >
+                    <span>{root.icon}</span>
+                    <span className="group-hover:text-ink-black transition-colors">{root.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Manual path input (toggle) */}
+          {showManualInput && (
+            <div className="flex gap-2 animate-fade-in">
+              <input
+                type="text"
+                value={manualPath}
+                onChange={(e) => setManualPath(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleManualSubmit()}
+                placeholder="C:\Invoices  or  \\server\share\invoices"
+                className="flex-1 px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
+                autoFocus
+              />
+              <button
+                onClick={handleManualSubmit}
+                disabled={!manualPath.trim()}
+                className="px-4 py-2.5 bg-ink-green text-white font-mono text-sm font-medium rounded hover:bg-ink-green-hover disabled:bg-ink-border disabled:text-ink-muted transition-all"
+              >
+                Use Path
+              </button>
+            </div>
+          )}
+
+          {/* Validation result */}
+          {validation && (
+            <div
+              className={`rounded p-4 border animate-fade-in ${
+                validation.valid
+                  ? "bg-ink-green-dim border-ink-green/20"
+                  : "bg-ink-red-dim border-ink-red/20"
+              }`}
+            >
+              {validation.valid ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                    <span className="text-sm font-mono font-medium text-ink-green">
+                      Folder is valid and accessible
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-3 mt-1">
+                    <span className="text-xs font-mono text-ink-muted">
+                      📄 {validation.pdfCount} PDF{validation.pdfCount !== 1 ? "s" : ""} found
+                    </span>
+                    <span className="text-xs font-mono text-ink-muted">
+                      {validation.readable ? "✅ Readable" : "❌ Not readable"}
+                    </span>
+                    <span className="text-xs font-mono text-ink-muted">
+                      {validation.writable ? "✅ Writable" : "⚠️ Read-only"}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-start gap-2">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#E84040" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="15" y1="9" x2="9" y2="15" />
+                    <line x1="9" y1="9" x2="15" y2="15" />
+                  </svg>
+                  <span className="text-sm font-mono text-ink-red">{validation.error}</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Save actions */}
+        <div className="flex items-center justify-between px-6 py-4 border-t border-ink-border bg-ink-surface/50">
+          <div className="flex-1">
+            {saveResult && (
+              <div
+                className={`flex items-center gap-2 text-sm font-mono animate-fade-in ${
+                  saveResult.success ? "text-ink-green" : "text-ink-red"
+                }`}
+              >
+                {saveResult.success ? "✓" : "✕"} {saveResult.message}
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {hasChanges && (
+              <button
+                onClick={() => {
+                  setSelectedPath(settings.invoiceFolderPath || "");
+                  setValidation(null);
+                }}
+                className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
+              >
+                Cancel
+              </button>
+            )}
+            <button
+              onClick={handleSave}
+              disabled={!canSave || saving}
+              className={`px-5 py-2.5 text-sm font-mono font-medium rounded transition-all ${
+                canSave && !saving
+                  ? "bg-ink-green text-white hover:bg-ink-green-hover active:scale-[0.98]"
+                  : "bg-ink-border text-ink-muted cursor-not-allowed"
+              }`}
+            >
+              {saving ? (
+                <span className="flex items-center gap-2">
+                  <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Saving…
+                </span>
+              ) : (
+                "Save Changes"
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ─── Trip Sheet Folder ──────────────────────────────────── */}
+      <div className="mt-6 bg-ink-card border border-ink-border rounded overflow-hidden">
+        <div className="px-6 py-4 border-b border-ink-border">
+          <div className="flex items-center gap-2">
+            <h2 className="font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
+              Trip Sheet Folder
+            </h2>
+            {tsSelectedPath && getProviderBadge(settings.tripSheetFolderType) && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono font-medium rounded-full"
+                style={{
+                  backgroundColor: getProviderBadge(settings.tripSheetFolderType)!.color + '15',
+                  color: getProviderBadge(settings.tripSheetFolderType)!.color,
+                  border: `1px solid ${getProviderBadge(settings.tripSheetFolderType)!.color}30`,
+                }}
+              >
+                {getProviderBadge(settings.tripSheetFolderType)!.icon} {getProviderBadge(settings.tripSheetFolderType)!.label}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-ink-muted mt-1">
+            Link a OneDrive or Google Drive folder to auto-detect trip sheet files (CSV/Excel)
+          </p>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {/* Current selection display */}
+          <div className="flex items-center gap-3 p-4 bg-ink-surface border border-ink-border rounded">
+            <div className="w-10 h-10 rounded bg-ink-card border border-ink-border flex items-center justify-center shrink-0">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={tsSelectedPath ? "#00C07F" : "#888580"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-mono text-ink-muted uppercase tracking-wide mb-0.5">
+                {tsSelectedPath ? "Selected folder" : "No folder configured"}
+              </p>
+              <p className="text-sm font-mono text-ink-black truncate">
+                {tsSelectedPath || "Trip sheets must be uploaded manually"}
+              </p>
+            </div>
+            {tsSelectedPath && (
+              <button
+                onClick={() => {
+                  setTsSelectedPath("");
+                  setTsValidation(null);
+                }}
+                className="text-xs font-mono text-ink-muted hover:text-ink-red transition-colors px-2 py-1"
+                title="Remove folder"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={() => openBrowser("tripsheets")}
+              className="flex items-center gap-2 px-5 py-3 bg-ink-black text-white font-mono text-sm font-medium rounded hover:bg-ink-black/90 active:scale-[0.98] transition-all"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+              Browse Folders
+            </button>
+            <button
+              onClick={() => setTsShowManualInput(!tsShowManualInput)}
+              className="flex items-center gap-2 px-4 py-3 border border-ink-border text-ink-muted font-mono text-sm rounded hover:text-ink-black hover:border-ink-muted-light transition-all"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+              </svg>
+              Type Path
+            </button>
+          </div>
+
+          {/* Cloud quick-select */}
+          {cloudRoots.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
+                Detected cloud folders
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {cloudRoots.map((root) => (
+                  <button
+                    key={root.path}
+                    onClick={() => {
+                      setBrowserTarget("tripsheets");
+                      selectFolder(root.path);
+                    }}
+                    className="flex items-center gap-2 px-3 py-2 bg-ink-surface border border-ink-border rounded text-xs font-mono text-ink-muted hover:text-ink-black hover:border-ink-muted-light transition-all group"
+                  >
+                    <span>{root.icon}</span>
+                    <span className="group-hover:text-ink-black transition-colors">{root.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Manual path input (toggle) */}
+          {tsShowManualInput && (
+            <div className="flex gap-2 animate-fade-in">
+              <input
+                type="text"
+                value={tsManualPath}
+                onChange={(e) => setTsManualPath(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleTsManualSubmit()}
+                placeholder="C:\TripSheets  or  OneDrive path"
+                className="flex-1 px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
+                autoFocus
+              />
+              <button
+                onClick={handleTsManualSubmit}
+                disabled={!tsManualPath.trim()}
+                className="px-4 py-2.5 bg-ink-green text-white font-mono text-sm font-medium rounded hover:bg-ink-green-hover disabled:bg-ink-border disabled:text-ink-muted transition-all"
+              >
+                Use Path
+              </button>
+            </div>
+          )}
+
+          {/* Validation result */}
+          {tsValidation && (
+            <div
+              className={`rounded p-4 border animate-fade-in ${
+                tsValidation.valid
+                  ? "bg-ink-green-dim border-ink-green/20"
+                  : "bg-ink-red-dim border-ink-red/20"
+              }`}
+            >
+              {tsValidation.valid ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                    <span className="text-sm font-mono font-medium text-ink-green">
+                      Folder is valid and accessible
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-3 mt-1">
+                    <span className="text-xs font-mono text-ink-muted">
+                      📄 {tsValidation.fileCount} file{tsValidation.fileCount !== 1 ? "s" : ""} found
+                    </span>
+                    <span className="text-xs font-mono text-ink-muted">
+                      {tsValidation.readable ? "✅ Readable" : "❌ Not readable"}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-start gap-2">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#E84040" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="15" y1="9" x2="9" y2="15" />
+                    <line x1="9" y1="9" x2="15" y2="15" />
+                  </svg>
+                  <span className="text-sm font-mono text-ink-red">{tsValidation.error}</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Save actions */}
+        <div className="flex items-center justify-between px-6 py-4 border-t border-ink-border bg-ink-surface/50">
+          <div className="flex-1">
+            {tsSaveResult && (
+              <div
+                className={`flex items-center gap-2 text-sm font-mono animate-fade-in ${
+                  tsSaveResult.success ? "text-ink-green" : "text-ink-red"
+                }`}
+              >
+                {tsSaveResult.success ? "✓" : "✕"} {tsSaveResult.message}
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {tsHasChanges && (
+              <button
+                onClick={() => {
+                  setTsSelectedPath(settings.tripSheetFolderPath || "");
+                  setTsValidation(null);
+                }}
+                className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
+              >
+                Cancel
+              </button>
+            )}
+            <button
+              onClick={handleTsSave}
+              disabled={!tsCanSave || tsSaving}
+              className={`px-5 py-2.5 text-sm font-mono font-medium rounded transition-all ${
+                tsCanSave && !tsSaving
+                  ? "bg-ink-green text-white hover:bg-ink-green-hover active:scale-[0.98]"
+                  : "bg-ink-border text-ink-muted cursor-not-allowed"
+              }`}
+            >
+              {tsSaving ? (
+                <span className="flex items-center gap-2">
+                  <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Saving…
+                </span>
+              ) : (
+                "Save Changes"
               )}
             </button>
           </div>
