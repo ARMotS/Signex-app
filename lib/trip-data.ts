@@ -41,8 +41,7 @@ export interface TripSheet {
 
 /**
  * Save a new trip sheet for a driver.
- * If the driver has no active trip sheet, the new one becomes ACTIVE.
- * If the driver already has an active trip sheet, the new one is QUEUED.
+ * All trip sheets are immediately ACTIVE — drivers can have multiple active sheets.
  */
 export async function saveTripSheet(trip: {
   driverId: string;
@@ -53,11 +52,7 @@ export async function saveTripSheet(trip: {
   stops: Omit<TripStop, "id">[];
   tenantId: string;
 }): Promise<TripSheet> {
-  const existingActive = await prisma.tripSheet.findFirst({
-    where: { driverId: trip.driverId, tenantId: trip.tenantId, status: "ACTIVE" },
-  });
-
-  const status: "ACTIVE" | "QUEUED" = existingActive ? "QUEUED" : "ACTIVE";
+  const status: "ACTIVE" | "QUEUED" = "ACTIVE";
 
   const created = await prisma.tripSheet.create({
     data: {
@@ -92,7 +87,7 @@ export async function saveTripSheet(trip: {
     entity: "trip_sheet",
     entityId: created.id,
     userName: trip.uploadedBy,
-    details: `Trip sheet ${status === "QUEUED" ? "queued" : "deployed"}: ${trip.sourceFilename} for driver ${trip.driverName} (${trip.stops.length} stops)`,
+    details: `Trip sheet deployed: ${trip.sourceFilename} for driver ${trip.driverName} (${trip.stops.length} stops)`,
   });
 
   return {
@@ -267,28 +262,6 @@ export async function updateStopStatus(
 }
 
 /**
- * Promote the next queued trip sheet for a driver to ACTIVE.
- * Called after an active trip sheet is deleted or completed.
- */
-async function promoteNextQueued(driverId: string, tenantId: string): Promise<void> {
-  const hasActive = await prisma.tripSheet.findFirst({
-    where: { driverId, tenantId, status: "ACTIVE" },
-  });
-  if (hasActive) return;
-
-  const nextQueued = await prisma.tripSheet.findFirst({
-    where: { driverId, tenantId, status: "QUEUED" },
-    orderBy: { date: "asc" },
-  });
-  if (nextQueued) {
-    await prisma.tripSheet.update({
-      where: { id: nextQueued.id },
-      data: { status: "ACTIVE" },
-    });
-  }
-}
-
-/**
  * Delete a trip sheet by ID.
  */
 export async function deleteTripSheet(
@@ -308,10 +281,6 @@ export async function deleteTripSheet(
     });
 
     await prisma.tripSheet.delete({ where: { id: tripId } });
-
-    if (trip.status === "ACTIVE") {
-      await promoteNextQueued(trip.driverId, trip.tenantId);
-    }
 
     await logAudit({
       action: "STATUS_CHANGE",
@@ -370,8 +339,6 @@ export async function completeTripSheet(
 
     // Delete the trip sheet (cascades to stops)
     await prisma.tripSheet.delete({ where: { id: tripId } });
-
-    await promoteNextQueued(trip.driverId, trip.tenantId);
 
     await logAudit({
       action: "STATUS_CHANGE",

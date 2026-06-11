@@ -6,6 +6,7 @@ import { sendDeliveryConfirmation } from '@/lib/email'
 import { getSessionContext } from '@/lib/tenant'
 import { withAuth } from '@/lib/api-handler'
 import { getInvoiceFolderPath } from '@/lib/invoices'
+import { getOneDriveInvoiceSource, listOneDriveSignedInvoices, downloadFileById } from '@/lib/microsoft-graph'
 
 export const runtime = 'nodejs'
 
@@ -27,17 +28,29 @@ export const POST = withAuth(async (req: NextRequest, { params }: { params: Prom
 
   const signedPDFUrl = '';
 
-  // Read signed PDF from disk for attachment
+  // Read signed PDF for attachment (OneDrive or local)
   let pdfAttachment: { filename: string; content: Buffer } | undefined;
   if (stop.invoiceFile) {
     try {
-      const folderPath = await getInvoiceFolderPath();
-      const signedPath = path.join(folderPath, 'signed', stop.invoiceFile);
-      if (fs.existsSync(signedPath)) {
-        pdfAttachment = {
-          filename: `signed-${stop.invoiceFile}`,
-          content: fs.readFileSync(signedPath),
-        };
+      const onedrive = await getOneDriveInvoiceSource();
+      if (onedrive) {
+        const signedItems = await listOneDriveSignedInvoices();
+        const match = signedItems.find((i) => i.name === stop.invoiceFile);
+        if (match) {
+          pdfAttachment = {
+            filename: `signed-${stop.invoiceFile}`,
+            content: await downloadFileById(match.id),
+          };
+        }
+      } else {
+        const folderPath = await getInvoiceFolderPath();
+        const signedPath = path.join(folderPath, 'signed', stop.invoiceFile);
+        if (fs.existsSync(signedPath)) {
+          pdfAttachment = {
+            filename: `signed-${stop.invoiceFile}`,
+            content: fs.readFileSync(signedPath),
+          };
+        }
       }
     } catch (err) {
       console.error('[notify] Failed to read signed PDF for attachment:', err);

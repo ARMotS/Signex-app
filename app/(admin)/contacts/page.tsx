@@ -1,12 +1,12 @@
+"use client";
+
+import { useState } from "react";
 import { ContactImporter } from "@/components/admin/contacts/ContactImporter";
 import { ContactsTable } from "@/components/admin/contacts/ContactsTable";
 
-export const metadata = {
-  title: "Contacts — Signex",
-  description: "Customer and supplier contact details. Matched automatically to deliveries on trip sheet upload.",
-};
-
 export default function ContactsPage() {
+  const [refreshKey, setRefreshKey] = useState(0);
+
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6">
       <div>
@@ -15,8 +15,8 @@ export default function ContactsPage() {
           Customer and supplier contact details. Matched automatically to deliveries on trip sheet upload.
         </p>
       </div>
-      <ContactImporter />
-      <ContactsTable />
+      <ContactImporter onImported={() => setRefreshKey((k) => k + 1)} />
+      <ContactsTable key={refreshKey} />
     </div>
   );
 }

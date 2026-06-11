@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getStopsForDriver, getTripSheetsForDriver, updateStopStatus } from "@/lib/trip-data";
+import { getTripSheetsForDriver, updateStopStatus } from "@/lib/trip-data";
 import type { StopStatus } from "@/lib/trip-data";
 import { prisma } from "@/lib/db";
 import { getSessionContext } from "@/lib/tenant";
@@ -35,8 +35,10 @@ export const GET = withAuth(async (request: NextRequest) => {
   }
 
   const tripSheets = await getTripSheetsForDriver(driverId);
-  const activeSheet = tripSheets.find((t) => t.status === "ACTIVE");
-  const stops = activeSheet?.stops || [];
+  const activeSheets = tripSheets.filter((t) => t.status === "ACTIVE");
+  const stops = activeSheets.flatMap((sheet) =>
+    sheet.stops.map((s) => ({ ...s, tripSheetDate: sheet.uploadedAt }))
+  );
   return NextResponse.json({ stops, tripSheets });
 });
 

@@ -24,6 +24,7 @@ import {
   getCloudAccountStatus,
   listOneDriveTripSheetFiles,
   downloadFileById,
+  deleteFileById,
   uploadFileToFolder,
   moveFileToSubfolder,
 } from "./microsoft-graph";
@@ -452,11 +453,30 @@ export async function saveUploadedFile(
 
 /**
  * Delete a single trip sheet file from the configured folder.
+ * Uses OneDrive Graph API if connected, otherwise local filesystem.
  * Also removes the corresponding ImportedFile DB record if it exists.
  */
 export async function deleteTripSheetFile(
   filename: string
 ): Promise<{ success: boolean; error?: string }> {
+  const onedrive = await getOneDriveSource();
+  if (onedrive) {
+    try {
+      const items = await listOneDriveTripSheetFiles();
+      const match = items.find((i) => i.name === filename);
+      if (match) await deleteFileById(match.id);
+      try {
+        await prisma.importedFile.deleteMany({ where: { filename } });
+      } catch {
+        // Ignore DB cleanup errors
+      }
+      return { success: true };
+    } catch (err) {
+      console.error(`Failed to delete trip sheet file ${filename} from OneDrive:`, err);
+      return { success: false, error: `Failed to delete ${filename} from OneDrive` };
+    }
+  }
+
   const folderPath = await getTripSheetFolderPath();
   if (!folderPath) {
     return { success: false, error: "No trip sheet folder configured" };
@@ -476,11 +496,10 @@ export async function deleteTripSheetFile(
       fs.unlinkSync(resolved);
     }
 
-    // Also clean up the import record from DB
     try {
       await prisma.importedFile.deleteMany({ where: { filename } });
     } catch {
-      // Ignore DB cleanup errors — file is already deleted
+      // Ignore DB cleanup errors
     }
 
     return { success: true };

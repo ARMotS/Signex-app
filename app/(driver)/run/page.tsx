@@ -19,6 +19,7 @@ interface TripStop {
   invoiceFile?: string;
   status: "PENDING" | "IN_PROGRESS" | "SIGNED";
   signedAt?: string;
+  tripSheetDate?: string;
 }
 
 interface DriverTripSheet {
@@ -195,6 +196,11 @@ export default function RunPage() {
                         📦 {stop.nop} {stop.nop === 1 ? "parcel" : "parcels"}
                       </span>
                     )}
+                    {stop.tripSheetDate && (
+                      <span className="ml-2 text-[10px] font-mono text-ink-muted">
+                        {new Date(stop.tripSheetDate).toLocaleDateString("en-ZA", { day: "2-digit", month: "short" })}
+                      </span>
+                    )}
                   </p>
 
                 {/* Action buttons for non-signed stops */}
@@ -254,40 +260,6 @@ export default function RunPage() {
         </div>
       )}
 
-      {/* Queued trip sheets */}
-      {!loading && tripSheets.filter((t) => t.status === "QUEUED").length > 0 && (
-        <div className="mt-4 space-y-2">
-          <p className="text-xs font-mono text-ink-muted uppercase tracking-wide px-1">
-            Up Next
-          </p>
-          {tripSheets
-            .filter((t) => t.status === "QUEUED")
-            .map((sheet) => (
-              <div
-                key={sheet.id}
-                className="flex items-center gap-3 p-3 bg-ink-card border border-ink-border rounded opacity-70"
-              >
-                <div className="w-8 h-8 rounded bg-ink-surface flex items-center justify-center shrink-0">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-muted">
-                    <circle cx="12" cy="12" r="10" />
-                    <polyline points="12 6 12 12 16 14" />
-                  </svg>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-mono text-sm text-ink-black truncate">
-                    {sheet.sourceFilename}
-                  </p>
-                  <p className="text-xs text-ink-muted">
-                    {sheet.stops.length} stop{sheet.stops.length !== 1 ? "s" : ""} · Queued
-                  </p>
-                </div>
-                <span className="px-2 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-surface text-ink-muted border border-ink-border">
-                  QUEUED
-                </span>
-              </div>
-            ))}
-        </div>
-      )}
 
       {/* Change driver */}
       <div className="mt-auto pt-6 text-center">

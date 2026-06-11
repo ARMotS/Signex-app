@@ -537,6 +537,25 @@ export async function moveFileToSubfolder(
 }
 
 /**
+ * Delete a file from OneDrive by its item ID.
+ */
+export async function deleteFileById(itemId: string): Promise<void> {
+  const token = await getValidAccessToken();
+  if (!token) throw new Error("No valid OneDrive access token");
+
+  const url = `${GRAPH_API_URL}/me/drive/items/${itemId}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok && res.status !== 404) {
+    const err = await res.text();
+    throw new Error(`Graph API delete error (${res.status}): ${err}`);
+  }
+}
+
+/**
  * List signed invoice files from the OneDrive "signed" subfolder.
  */
 export async function listOneDriveSignedInvoices(): Promise<OneDriveItem[]> {

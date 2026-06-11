@@ -27,7 +27,7 @@ const ACCEPTED = {
   "application/pdf": [".pdf"],
 };
 
-export function ContactImporter() {
+export function ContactImporter({ onImported }: { onImported?: () => void } = {}) {
   const [state, setState] = useState<ImportState>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [preview, setPreview] = useState<ParsedContact[]>([]);
@@ -79,6 +79,7 @@ export function ContactImporter() {
       if (!res.ok) throw new Error(data.error || "Import failed");
       setResult({ saved: data.saved, skipped: data.skipped });
       setState("done");
+      onImported?.();
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Import failed");
       setState("error");

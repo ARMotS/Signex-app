@@ -18,16 +18,35 @@ export interface ParsedContact {
   notes?: string;
 }
 
-// ─── Column header fuzzy mapping ─────────────────────────────────────────────
+// ─── Column header mapping ───────────────────────────────────────────────────
+// Matches exact field labels from the manual add form first, then fuzzy fallback.
+
+const EXACT_MAP: Record<string, keyof ParsedContact> = {
+  "company name": "companyName",
+  "companyname": "companyName",
+  "contact person": "contactPerson",
+  "contactperson": "contactPerson",
+  "email": "email",
+  "phone": "phone",
+  "alt phone": "altPhone",
+  "altphone": "altPhone",
+  "address": "address",
+  "notes": "notes",
+};
 
 function mapHeader(header: string): keyof ParsedContact | null {
   const h = header.toLowerCase().trim();
-  if (h.includes("company") || h === "name" || h === "business") return "companyName";
+
+  const exact = EXACT_MAP[h];
+  if (exact) return exact;
+
+  if (h.includes("company") || h === "name" || h === "business" || h === "customer") return "companyName";
   if (h.includes("contact") || h.includes("person") || h.includes("rep") || h.includes("attn")) return "contactPerson";
-  if (h.includes("email") || h.includes("mail")) return "email";
-  if (h.includes("alt") || h.includes("alternative") || h.includes("second") || h.includes("other")) return "altPhone";
+  if (h.includes("email") || h.includes("e-mail") || h.includes("mail")) return "email";
+  if (h.includes("alt") && (h.includes("phone") || h.includes("tel") || h.includes("cell"))) return "altPhone";
+  if (h.includes("alternative") || h.includes("second phone") || h.includes("other phone")) return "altPhone";
   if (h.includes("phone") || h.includes("tel") || h.includes("mobile") || h.includes("cell") || h.includes("fax")) return "phone";
-  if (h.includes("address") || h.includes("addr")) return "address";
+  if (h.includes("address") || h.includes("addr") || h.includes("location")) return "address";
   if (h.includes("note") || h.includes("comment") || h.includes("remark")) return "notes";
   return null;
 }

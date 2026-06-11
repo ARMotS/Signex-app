@@ -21,6 +21,7 @@ import {
   listOneDriveInvoiceFiles,
   listOneDriveSignedInvoices,
   downloadFileById,
+  deleteFileById,
   uploadSignedInvoiceToOneDrive,
 } from "./microsoft-graph";
 
@@ -361,12 +362,31 @@ export async function checkIfSigned(filename: string): Promise<boolean> {
 }
 
 /**
- * Delete a single invoice file from the filesystem.
+ * Delete a single invoice file.
+ * Uses OneDrive Graph API if configured, otherwise local filesystem.
  * Also removes the signed copy if it exists.
  */
 export async function deleteInvoiceFile(
   filename: string
 ): Promise<{ success: boolean; error?: string }> {
+  const onedrive = await getOneDriveInvoiceSource();
+  if (onedrive) {
+    try {
+      const [items, signedItems] = await Promise.all([
+        listOneDriveInvoiceFiles(),
+        listOneDriveSignedInvoices(),
+      ]);
+      const match = items.find((i) => i.name === filename);
+      if (match) await deleteFileById(match.id);
+      const signedMatch = signedItems.find((i) => i.name === filename);
+      if (signedMatch) await deleteFileById(signedMatch.id);
+      return { success: true };
+    } catch (err) {
+      console.error(`Failed to delete invoice file ${filename} from OneDrive:`, err);
+      return { success: false, error: `Failed to delete ${filename} from OneDrive` };
+    }
+  }
+
   const folderPath = await getInvoiceFolderPath();
   const filePath = path.join(folderPath, filename);
 
@@ -378,12 +398,10 @@ export async function deleteInvoiceFile(
   }
 
   try {
-    // Delete main file
     if (fs.existsSync(resolved)) {
       fs.unlinkSync(resolved);
     }
 
-    // Delete signed copy if it exists
     const signedPath = path.join(folderPath, "signed", filename);
     const resolvedSigned = path.resolve(signedPath);
     if (resolvedSigned.startsWith(resolvedFolder) && fs.existsSync(resolvedSigned)) {
