@@ -32,7 +32,8 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
   const [errorMsg, setErrorMsg] = useState("");
   const [preview, setPreview] = useState<ParsedContact[]>([]);
   const [currentFile, setCurrentFile] = useState<File | null>(null);
-  const [result, setResult] = useState<{ saved: number; skipped: number } | null>(null);
+  const [overwrite, setOverwrite] = useState(false);
+  const [result, setResult] = useState<{ saved: number; skipped: number; updated: number } | null>(null);
 
   const isPDF = currentFile
     ? currentFile.type === "application/pdf" || currentFile.name.toLowerCase().endsWith(".pdf")
@@ -74,10 +75,11 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
       const fd = new FormData();
       fd.append("file", currentFile);
       fd.append("confirm", "true");
+      if (overwrite) fd.append("overwrite", "true");
       const res = await fetch("/api/contacts/import", { method: "POST", body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Import failed");
-      setResult({ saved: data.saved, skipped: data.skipped });
+      setResult({ saved: data.saved, skipped: data.skipped, updated: data.updated || 0 });
       setState("done");
       onImported?.();
     } catch (err) {
@@ -90,6 +92,7 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
     setState("idle");
     setPreview([]);
     setCurrentFile(null);
+    setOverwrite(false);
     setResult(null);
     setErrorMsg("");
   }
@@ -183,6 +186,16 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
               </table>
             </div>
 
+            <label className="flex items-center gap-2 px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-lg cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={overwrite}
+                onChange={(e) => setOverwrite(e.target.checked)}
+                className="w-3.5 h-3.5 rounded border-zinc-300 accent-zinc-900 cursor-pointer"
+              />
+              <span className="text-xs text-zinc-700 font-medium">Update existing contacts with latest details</span>
+            </label>
+
             <div className="flex gap-3">
               <button onClick={reset} className="flex-1 py-2 text-sm border border-zinc-200 rounded-lg text-zinc-600 hover:bg-zinc-50 transition-colors font-medium">Cancel</button>
               <button onClick={confirmImport} className="flex-1 py-2 text-sm bg-zinc-900 text-white rounded-lg hover:bg-zinc-800 transition-colors font-medium font-mono">
@@ -211,6 +224,9 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
               </div>
               <div>
                 <p className="text-sm font-semibold text-emerald-800">{result.saved} contact{result.saved !== 1 ? "s" : ""} imported</p>
+                {result.updated > 0 && (
+                  <p className="text-xs text-emerald-700 mt-0.5">{result.updated} existing contact{result.updated !== 1 ? "s" : ""} updated</p>
+                )}
                 {result.skipped > 0 && (
                   <p className="text-xs text-emerald-700 mt-0.5">{result.skipped} duplicate{result.skipped !== 1 ? "s" : ""} skipped</p>
                 )}

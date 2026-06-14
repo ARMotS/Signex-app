@@ -437,6 +437,54 @@ export async function deleteInvoiceFiles(
   return { deleted, failed };
 }
 
+/**
+ * Delete only the original invoice files (not signed copies).
+ */
+export async function deleteInvoiceOriginalOnly(
+  filenames: string[]
+): Promise<{ deleted: number; failed: string[] }> {
+  let deleted = 0;
+  const failed: string[] = [];
+
+  const onedrive = await getOneDriveInvoiceSource();
+  if (onedrive) {
+    const items = await listOneDriveInvoiceFiles();
+    for (const filename of filenames) {
+      try {
+        const match = items.find((i) => i.name === filename);
+        if (match) await deleteFileById(match.id);
+        deleted++;
+      } catch {
+        failed.push(filename);
+      }
+    }
+    return { deleted, failed };
+  }
+
+  const folderPath = await getInvoiceFolderPath();
+  for (const filename of filenames) {
+    const filePath = path.join(folderPath, filename);
+    const resolved = path.resolve(filePath);
+    const resolvedFolder = path.resolve(folderPath);
+
+    if (!resolved.startsWith(resolvedFolder)) {
+      failed.push(filename);
+      continue;
+    }
+
+    try {
+      if (fs.existsSync(resolved)) {
+        fs.unlinkSync(resolved);
+      }
+      deleted++;
+    } catch {
+      failed.push(filename);
+    }
+  }
+
+  return { deleted, failed };
+}
+
 export interface DuplicateGroup {
   /** The normalized invoice number shared by duplicates */
   invoiceNumber: string;

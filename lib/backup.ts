@@ -17,6 +17,11 @@ import path from "path";
 import JSZip from "jszip";
 import { prisma } from "./db";
 import { getInvoiceFolderPath } from "./invoices";
+import {
+  getOneDriveInvoiceSource,
+  listOneDriveSignedInvoices,
+  downloadFileById,
+} from "./microsoft-graph";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -52,6 +57,11 @@ export interface BackupSummary {
 export async function getBackupableInvoices(
   beforeDate?: Date
 ): Promise<BackupableInvoice[]> {
+  const onedrive = await getOneDriveInvoiceSource();
+  if (onedrive) {
+    return getBackupableInvoicesFromOneDrive(beforeDate);
+  }
+
   const folderPath = await getInvoiceFolderPath();
   const signedFolder = path.join(folderPath, "signed");
 
@@ -80,6 +90,30 @@ export async function getBackupableInvoices(
   }
 
   // Sort oldest first
+  results.sort(
+    (a, b) => new Date(a.signedAt).getTime() - new Date(b.signedAt).getTime()
+  );
+
+  return results;
+}
+
+async function getBackupableInvoicesFromOneDrive(
+  beforeDate?: Date
+): Promise<BackupableInvoice[]> {
+  const items = await listOneDriveSignedInvoices();
+  const results: BackupableInvoice[] = [];
+
+  for (const item of items) {
+    const signedAt = new Date(item.lastModifiedDateTime);
+    if (beforeDate && signedAt >= beforeDate) continue;
+
+    results.push({
+      filename: item.name,
+      sizeBytes: item.size,
+      signedAt: signedAt.toISOString(),
+    });
+  }
+
   results.sort(
     (a, b) => new Date(a.signedAt).getTime() - new Date(b.signedAt).getTime()
   );
@@ -173,19 +207,34 @@ export async function createBackupZip(
 
   // ── Signed invoices ──────────────────────────────────────────────
   if (invoiceFilenames.length > 0) {
-    const folderPath = await getInvoiceFolderPath();
-    const signedFolder = path.join(folderPath, "signed");
+    const onedrive = await getOneDriveInvoiceSource();
+    if (onedrive) {
+      const items = await listOneDriveSignedInvoices();
+      for (const filename of invoiceFilenames) {
+        const item = items.find((i) => i.name === filename);
+        if (!item) continue;
+        try {
+          const fileData = await downloadFileById(item.id);
+          zip.file(`${prefix}/signed-invoices/${filename}`, fileData);
+        } catch {
+          // skip files we can't download
+        }
+      }
+    } else {
+      const folderPath = await getInvoiceFolderPath();
+      const signedFolder = path.join(folderPath, "signed");
 
-    for (const filename of invoiceFilenames) {
-      const filePath = path.join(signedFolder, filename);
-      // Security: prevent directory traversal
-      const resolved = path.resolve(filePath);
-      const resolvedFolder = path.resolve(signedFolder);
-      if (!resolved.startsWith(resolvedFolder)) continue;
+      for (const filename of invoiceFilenames) {
+        const filePath = path.join(signedFolder, filename);
+        // Security: prevent directory traversal
+        const resolved = path.resolve(filePath);
+        const resolvedFolder = path.resolve(signedFolder);
+        if (!resolved.startsWith(resolvedFolder)) continue;
 
-      if (fs.existsSync(resolved)) {
-        const fileData = fs.readFileSync(resolved);
-        zip.file(`${prefix}/signed-invoices/${filename}`, fileData);
+        if (fs.existsSync(resolved)) {
+          const fileData = fs.readFileSync(resolved);
+          zip.file(`${prefix}/signed-invoices/${filename}`, fileData);
+        }
       }
     }
   }

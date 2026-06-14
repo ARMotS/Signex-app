@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { listInvoiceFiles, getInvoiceFolderPath, deleteInvoiceFiles, findDuplicateInvoices } from "@/lib/invoices";
+import { listInvoiceFiles, getInvoiceFolderPath, deleteInvoiceFiles, deleteInvoiceOriginalOnly, findDuplicateInvoices } from "@/lib/invoices";
 import { getCloudAccountStatus } from "@/lib/microsoft-graph";
 import { getSessionContext, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
@@ -35,7 +35,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
   const ctx = await getSessionContext();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
-  const { filenames } = await request.json();
+  const { filenames, mode = "both" } = await request.json();
   if (!filenames || !Array.isArray(filenames) || filenames.length === 0) {
     return NextResponse.json(
       { error: "filenames array is required" },
@@ -43,7 +43,9 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     );
   }
 
-  const result = await deleteInvoiceFiles(filenames);
+  const result = mode === "original_only"
+    ? await deleteInvoiceOriginalOnly(filenames)
+    : await deleteInvoiceFiles(filenames);
 
   return NextResponse.json({
     success: true,

@@ -11,6 +11,7 @@ export const POST = withAuth(async (request: NextRequest) => {
   const formData = await request.formData();
   const file = formData.get("file") as File | null;
   const confirm = formData.get("confirm") === "true";
+  const overwrite = formData.get("overwrite") === "true";
 
   if (!file) {
     return NextResponse.json({ error: "No file provided" }, { status: 400 });
@@ -29,6 +30,7 @@ export const POST = withAuth(async (request: NextRequest) => {
 
   let saved = 0;
   let skipped = 0;
+  let updated = 0;
 
   for (const contact of parsed) {
     const existing = await prisma.contact.findFirst({
@@ -41,7 +43,22 @@ export const POST = withAuth(async (request: NextRequest) => {
     });
 
     if (existing) {
-      skipped++;
+      if (overwrite) {
+        await prisma.contact.update({
+          where: { id: existing.id },
+          data: {
+            contactPerson: contact.contactPerson?.trim() || undefined,
+            email: contact.email?.trim().toLowerCase() || undefined,
+            phone: contact.phone?.trim() || undefined,
+            altPhone: contact.altPhone?.trim() || undefined,
+            address: contact.address?.trim() || undefined,
+            notes: contact.notes?.trim() || undefined,
+          },
+        });
+        updated++;
+      } else {
+        skipped++;
+      }
       continue;
     }
 
@@ -61,5 +78,5 @@ export const POST = withAuth(async (request: NextRequest) => {
     saved++;
   }
 
-  return NextResponse.json({ saved, skipped });
+  return NextResponse.json({ saved, skipped, updated });
 });

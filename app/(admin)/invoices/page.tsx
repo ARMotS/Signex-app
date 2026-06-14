@@ -39,6 +39,7 @@ export default function InvoicesPage() {
   const [selectedInvoices, setSelectedInvoices] = useState<Set<string>>(new Set());
   const [deletingInvoices, setDeletingInvoices] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteMode, setDeleteMode] = useState<"original_only" | "both">("both");
 
   const fetchInvoices = useCallback(() => {
     setLoading(true);
@@ -142,7 +143,7 @@ export default function InvoicesPage() {
       const res = await fetch("/api/invoices", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filenames: Array.from(selectedInvoices) }),
+        body: JSON.stringify({ filenames: Array.from(selectedInvoices), mode: deleteMode }),
       });
       const result = await res.json();
       if (!res.ok) {
@@ -156,6 +157,7 @@ export default function InvoicesPage() {
     } finally {
       setDeletingInvoices(false);
       setShowDeleteConfirm(false);
+      setDeleteMode("both");
     }
   };
 
@@ -498,7 +500,7 @@ export default function InvoicesPage() {
 
       {/* Delete confirmation modal */}
       {showDeleteConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={() => setShowDeleteConfirm(false)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={() => { setShowDeleteConfirm(false); setDeleteMode("both"); }}>
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
             <div className="px-6 py-5">
               <div className="flex items-center gap-3 mb-4">
@@ -513,8 +515,40 @@ export default function InvoicesPage() {
                   <p className="text-xs text-ink-muted mt-0.5">This action cannot be undone</p>
                 </div>
               </div>
+
+              {/* Delete mode selection */}
+              <div className="mb-4 space-y-2">
+                <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">What to delete</p>
+                <label className={`flex items-center gap-3 px-4 py-3 rounded border cursor-pointer transition-all ${deleteMode === "original_only" ? "border-ink-black bg-ink-surface" : "border-ink-border hover:border-ink-black/30"}`}>
+                  <input
+                    type="radio"
+                    name="deleteMode"
+                    checked={deleteMode === "original_only"}
+                    onChange={() => setDeleteMode("original_only")}
+                    className="w-3.5 h-3.5 accent-ink-black cursor-pointer"
+                  />
+                  <div>
+                    <p className="text-sm font-mono font-medium text-ink-black">Original only</p>
+                    <p className="text-xs text-ink-muted mt-0.5">Keep signed copies, remove originals</p>
+                  </div>
+                </label>
+                <label className={`flex items-center gap-3 px-4 py-3 rounded border cursor-pointer transition-all ${deleteMode === "both" ? "border-ink-red bg-ink-red-dim/30" : "border-ink-border hover:border-ink-red/30"}`}>
+                  <input
+                    type="radio"
+                    name="deleteMode"
+                    checked={deleteMode === "both"}
+                    onChange={() => setDeleteMode("both")}
+                    className="w-3.5 h-3.5 accent-[#E53935] cursor-pointer"
+                  />
+                  <div>
+                    <p className="text-sm font-mono font-medium text-ink-black">Original + Signed</p>
+                    <p className="text-xs text-ink-muted mt-0.5">Remove both original and signed copies permanently</p>
+                  </div>
+                </label>
+              </div>
+
               <p className="text-sm text-ink-muted mb-1">
-                The following files will be <span className="font-medium text-ink-red">permanently removed</span> from the filesystem, including any signed copies:
+                The following files will be <span className="font-medium text-ink-red">permanently removed</span>:
               </p>
               <div className="max-h-32 overflow-y-auto bg-ink-surface rounded p-2 mb-4">
                 {Array.from(selectedInvoices).map((fn) => (
@@ -524,7 +558,7 @@ export default function InvoicesPage() {
             </div>
             <div className="flex justify-end gap-3 px-6 py-4 bg-ink-surface/50 border-t border-ink-border">
               <button
-                onClick={() => setShowDeleteConfirm(false)}
+                onClick={() => { setShowDeleteConfirm(false); setDeleteMode("both"); }}
                 className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
               >
                 Cancel
@@ -540,7 +574,7 @@ export default function InvoicesPage() {
                     Deleting…
                   </>
                 ) : (
-                  "Delete Permanently"
+                  deleteMode === "original_only" ? "Delete Originals" : "Delete All Copies"
                 )}
               </button>
             </div>
