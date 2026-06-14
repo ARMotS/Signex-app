@@ -40,6 +40,7 @@ export default function InvoicesPage() {
   const [deletingInvoices, setDeletingInvoices] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteMode, setDeleteMode] = useState<"original_only" | "both">("both");
+  const [syncing, setSyncing] = useState(false);
 
   const fetchInvoices = useCallback(() => {
     setLoading(true);
@@ -54,6 +55,23 @@ export default function InvoicesPage() {
       })
       .catch(() => setError("Failed to connect to server"))
       .finally(() => setLoading(false));
+  }, []);
+
+  const syncInvoices = useCallback(() => {
+    setSyncing(true);
+    setError(null);
+    fetch("/api/invoices")
+      .then((res) => res.json())
+      .then((json) => {
+        if (json.error) {
+          setError(json.error);
+        } else {
+          setData(json);
+          setSelectedInvoices(new Set());
+        }
+      })
+      .catch(() => setError("Failed to connect to server"))
+      .finally(() => setSyncing(false));
   }, []);
 
   useEffect(() => {
@@ -150,7 +168,7 @@ export default function InvoicesPage() {
         setError(result.error || "Failed to delete invoices");
       } else {
         setSelectedInvoices(new Set());
-        fetchInvoices();
+        syncInvoices();
       }
     } catch {
       setError("Failed to delete invoices");
@@ -174,17 +192,30 @@ export default function InvoicesPage() {
   return (
     <div className="animate-fade-in">
       <div className="flex items-start justify-between mb-8 gap-4">
-        <div>
-          <h1 className="font-mono text-2xl font-medium text-ink-black tracking-tight">
-            Invoices
-          </h1>
-          <p className="text-sm text-ink-muted mt-1">
-            {loading
-              ? "Loading…"
-              : error
-              ? "Error loading invoices"
-              : `${data?.count ?? 0} invoices in local folder`}
-          </p>
+        <div className="flex items-center gap-3">
+          <div>
+            <h1 className="font-mono text-2xl font-medium text-ink-black tracking-tight">
+              Invoices
+            </h1>
+            <p className="text-sm text-ink-muted mt-1">
+              {loading
+                ? "Loading…"
+                : error
+                ? "Error loading invoices"
+                : `${data?.count ?? 0} invoices in local folder`}
+            </p>
+          </div>
+          <button
+            onClick={syncInvoices}
+            disabled={syncing || loading}
+            title="Sync from folder"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono text-ink-muted bg-ink-card border border-ink-border rounded hover:text-ink-black hover:border-ink-black/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={syncing ? "animate-spin" : ""}>
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
+            </svg>
+            {syncing ? "Syncing…" : "Sync"}
+          </button>
         </div>
         {/* Filter pills */}
         <div className="flex gap-1 bg-ink-card border border-ink-border rounded p-0.5">
