@@ -64,6 +64,66 @@ export async function createAdminAccount(
   }
 }
 
+/**
+ * Update an admin credential row, matched by its current email.
+ * Only touches the Admin table (email/password/name live here); the
+ * companion User row is updated separately by the caller.
+ */
+export async function updateAdminAccount(
+  currentEmail: string,
+  updates: { name?: string; email?: string; password?: string }
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const admin = await prisma.admin.findUnique({
+      where: { email: currentEmail.toLowerCase() },
+    });
+    if (!admin) {
+      return { success: false, error: "Admin credentials not found" };
+    }
+
+    await prisma.admin.update({
+      where: { id: admin.id },
+      data: {
+        ...(updates.name !== undefined && { name: updates.name }),
+        ...(updates.email !== undefined && { email: updates.email.toLowerCase() }),
+        ...(updates.password !== undefined &&
+          updates.password !== "" && {
+            passwordHash: hashPassword(updates.password),
+          }),
+      },
+    });
+
+    await logAudit({
+      action: "CONFIG_UPDATE",
+      entity: "admin",
+      entityId: admin.id,
+      userName: updates.name || admin.name,
+      details: `Admin account updated: ${(updates.email || admin.email).toLowerCase()}`,
+    });
+
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to update admin:", err);
+    return { success: false, error: "Failed to update admin credentials" };
+  }
+}
+
+/**
+ * Delete an admin credential row by email.
+ * The companion User row is deleted separately by the caller.
+ */
+export async function deleteAdminAccount(
+  email: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    await prisma.admin.deleteMany({ where: { email: email.toLowerCase() } });
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to delete admin:", err);
+    return { success: false, error: "Failed to delete admin credentials" };
+  }
+}
+
 export async function loginAdmin(
   email: string,
   password: string

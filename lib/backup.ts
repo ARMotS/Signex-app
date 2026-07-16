@@ -3,24 +3,27 @@
  *
  * "Backupable" items:
  *   - Signed invoices: PDFs in the invoices/signed/ subfolder
- *   - Completed trip sheets: trip sheets where ALL stops have status SIGNED
+ *   - Completed trip sheets: source files moved to the trip-sheet processed/
+ *     subfolder when a trip sheet is completed/archived
  *
  * The ZIP archive layout:
  *   backup-YYYY-MM-DD/
  *     signed-invoices/     ← signed PDF files
- *     trip-sheets/         ← JSON export per trip sheet
+ *     trip-sheets/         ← completed trip sheet source files (csv/xlsx)
  *     manifest.json        ← summary + timestamps
  */
 
 import fs from "fs";
 import path from "path";
 import JSZip from "jszip";
-import { prisma } from "./db";
 import { getInvoiceFolderPath } from "./invoices";
+import { getOneDriveSource, getTripSheetFolderPath } from "./trip-sheet-folder";
 import {
   getOneDriveInvoiceSource,
   listOneDriveSignedInvoices,
+  listOneDriveProcessedTripSheets,
   downloadFileById,
+  deleteFileById,
 } from "./microsoft-graph";
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -32,13 +35,12 @@ export interface BackupableInvoice {
 }
 
 export interface BackupableTripSheet {
-  id: string;
-  driverName: string;
-  regNo: string;
-  date: string;
-  sourceFilename: string;
-  stopCount: number;
-  uploadedBy: string;
+  /** The completed trip sheet file name in the processed/ folder (unique key) */
+  filename: string;
+  /** File size in bytes */
+  sizeBytes: number;
+  /** When the file was moved to processed/ (last-modified time) */
+  processedAt: string;
 }
 
 export interface BackupSummary {
@@ -123,49 +125,81 @@ async function getBackupableInvoicesFromOneDrive(
 
 /**
  * List completed trip sheets eligible for backup.
- * A trip sheet is "complete" when ALL its stops are SIGNED.
- * Optionally filter to trip sheets created before a given date.
+ *
+ * When a trip sheet is completed/archived, its source file is moved to the
+ * "processed/" subfolder of the trip sheet folder (and the DB record is
+ * removed). The backupable trip sheets are therefore the files sitting in
+ * that processed/ folder — read from OneDrive if configured, otherwise from
+ * the local filesystem.
+ *
+ * Optionally filter to files processed before a given date.
  */
 export async function getBackupableTripSheets(
-  beforeDate?: Date,
-  tenantId?: string
+  beforeDate?: Date
 ): Promise<BackupableTripSheet[]> {
-  const whereClause: Record<string, unknown> = {};
-  if (beforeDate) {
-    whereClause.date = { lt: beforeDate };
-  }
-  if (tenantId) {
-    whereClause.tenantId = tenantId;
+  const onedrive = await getOneDriveSource();
+  if (onedrive) {
+    return getBackupableTripSheetsFromOneDrive(beforeDate);
   }
 
-  // Get trip sheets with their stop counts
-  const tripSheets = await prisma.tripSheet.findMany({
-    where: whereClause,
-    orderBy: { date: "asc" },
-    include: {
-      driver: { select: { name: true } },
-      _count: { select: { stops: true } },
-      stops: { select: { status: true } },
-    },
-  });
+  const folderPath = await getTripSheetFolderPath();
+  if (!folderPath) return [];
+
+  const processedFolder = path.join(folderPath, "processed");
+  if (!fs.existsSync(processedFolder)) return [];
+
+  const extensions = [".csv", ".xlsx", ".xls"];
+  const files = fs
+    .readdirSync(processedFolder)
+    .filter((f) => extensions.includes(path.extname(f).toLowerCase()));
 
   const results: BackupableTripSheet[] = [];
-  for (const ts of tripSheets) {
-    // Only include if ALL stops are SIGNED (and there's at least one stop)
-    if (ts.stops.length === 0) continue;
-    const allSigned = ts.stops.every((s) => s.status === "SIGNED");
-    if (!allSigned) continue;
+  for (const filename of files) {
+    try {
+      const stats = fs.statSync(path.join(processedFolder, filename));
+      const processedAt = stats.mtime;
+      if (beforeDate && processedAt >= beforeDate) continue;
+
+      results.push({
+        filename,
+        sizeBytes: stats.size,
+        processedAt: processedAt.toISOString(),
+      });
+    } catch {
+      // skip files we can't stat
+    }
+  }
+
+  // Sort oldest first
+  results.sort(
+    (a, b) =>
+      new Date(a.processedAt).getTime() - new Date(b.processedAt).getTime()
+  );
+
+  return results;
+}
+
+async function getBackupableTripSheetsFromOneDrive(
+  beforeDate?: Date
+): Promise<BackupableTripSheet[]> {
+  const items = await listOneDriveProcessedTripSheets();
+  const results: BackupableTripSheet[] = [];
+
+  for (const item of items) {
+    const processedAt = new Date(item.lastModifiedDateTime);
+    if (beforeDate && processedAt >= beforeDate) continue;
 
     results.push({
-      id: ts.id,
-      driverName: ts.driver?.name || "Unknown",
-      regNo: ts.regNo || "",
-      date: ts.date.toISOString(),
-      sourceFilename: ts.sourceFilename,
-      stopCount: ts._count.stops,
-      uploadedBy: ts.uploadedBy,
+      filename: item.name,
+      sizeBytes: item.size,
+      processedAt: processedAt.toISOString(),
     });
   }
+
+  results.sort(
+    (a, b) =>
+      new Date(a.processedAt).getTime() - new Date(b.processedAt).getTime()
+  );
 
   return results;
 }
@@ -174,12 +208,11 @@ export async function getBackupableTripSheets(
  * Get a combined summary of all backupable items.
  */
 export async function getBackupSummary(
-  beforeDate?: Date,
-  tenantId?: string
+  beforeDate?: Date
 ): Promise<BackupSummary> {
   const [invoices, tripSheets] = await Promise.all([
     getBackupableInvoices(beforeDate),
-    getBackupableTripSheets(beforeDate, tenantId),
+    getBackupableTripSheets(beforeDate),
   ]);
 
   return {
@@ -198,8 +231,7 @@ export async function getBackupSummary(
  */
 export async function createBackupZip(
   invoiceFilenames: string[],
-  tripSheetIds: string[],
-  tenantId?: string
+  tripSheetFilenames: string[]
 ): Promise<Buffer> {
   const zip = new JSZip();
   const datestamp = new Date().toISOString().slice(0, 10);
@@ -239,44 +271,38 @@ export async function createBackupZip(
     }
   }
 
-  // ── Trip sheet JSON exports ──────────────────────────────────────
-  if (tripSheetIds.length > 0) {
-    const tripSheets = await prisma.tripSheet.findMany({
-      where: { id: { in: tripSheetIds }, ...(tenantId && { tenantId }) },
-      include: {
-        driver: { select: { name: true } },
-        stops: { orderBy: { stopNumber: "asc" } },
-      },
-    });
+  // ── Completed trip sheet files (from processed/ folder) ──────────
+  if (tripSheetFilenames.length > 0) {
+    const onedrive = await getOneDriveSource();
+    if (onedrive) {
+      const items = await listOneDriveProcessedTripSheets();
+      for (const filename of tripSheetFilenames) {
+        const item = items.find((i) => i.name === filename);
+        if (!item) continue;
+        try {
+          const fileData = await downloadFileById(item.id);
+          zip.file(`${prefix}/trip-sheets/${filename}`, fileData);
+        } catch {
+          // skip files we can't download
+        }
+      }
+    } else {
+      const folderPath = await getTripSheetFolderPath();
+      if (folderPath) {
+        const processedFolder = path.join(folderPath, "processed");
+        for (const filename of tripSheetFilenames) {
+          const filePath = path.join(processedFolder, filename);
+          // Security: prevent directory traversal
+          const resolved = path.resolve(filePath);
+          const resolvedFolder = path.resolve(processedFolder);
+          if (!resolved.startsWith(resolvedFolder)) continue;
 
-    for (const ts of tripSheets) {
-      const exportData = {
-        id: ts.id,
-        driverName: ts.driver?.name || "Unknown",
-        regNo: ts.regNo || "",
-        date: ts.date.toISOString(),
-        sourceFilename: ts.sourceFilename,
-        uploadedBy: ts.uploadedBy,
-        createdAt: ts.createdAt.toISOString(),
-        stops: ts.stops.map((s) => ({
-          stopNumber: s.stopNumber,
-          invoiceNumber: s.invoiceNumber,
-          customerName: s.customerName,
-          address: s.address,
-          nop: s.nop,
-          invoiceFile: s.invoiceFile,
-          status: s.status,
-          signedAt: s.signedAt?.toISOString() || null,
-          signatureData: s.signatureData,
-        })),
-      };
-
-      const safeName =
-        ts.sourceFilename.replace(/[^a-zA-Z0-9_\-.]/g, "_") || ts.id;
-      zip.file(
-        `${prefix}/trip-sheets/${safeName}_${ts.id.slice(0, 8)}.json`,
-        JSON.stringify(exportData, null, 2)
-      );
+          if (fs.existsSync(resolved)) {
+            const fileData = fs.readFileSync(resolved);
+            zip.file(`${prefix}/trip-sheets/${filename}`, fileData);
+          }
+        }
+      }
     }
   }
 
@@ -286,10 +312,10 @@ export async function createBackupZip(
     version: "1.0",
     contents: {
       signedInvoices: invoiceFilenames.length,
-      tripSheets: tripSheetIds.length,
+      tripSheets: tripSheetFilenames.length,
     },
     invoiceFilenames,
-    tripSheetIds,
+    tripSheetFilenames,
   };
 
   zip.file(`${prefix}/manifest.json`, JSON.stringify(manifest, null, 2));
@@ -345,30 +371,61 @@ export async function purgeBackedUpInvoices(
 }
 
 /**
- * Delete completed trip sheets and their stops from the database.
- * Cascade deletes handle stops automatically.
+ * Delete completed trip sheet files from the processed/ folder.
+ * Removes from OneDrive if configured, otherwise from the local filesystem.
  */
 export async function purgeBackedUpTripSheets(
-  tripSheetIds: string[],
-  tenantId?: string
+  tripSheetFilenames: string[]
 ): Promise<{ deleted: number; failed: string[] }> {
   let deleted = 0;
   const failed: string[] = [];
 
-  for (const id of tripSheetIds) {
-    try {
-      // Verify ownership before deleting
-      if (tenantId) {
-        const ts = await prisma.tripSheet.findUnique({ where: { id } });
-        if (!ts || ts.tenantId !== tenantId) {
-          failed.push(id);
-          continue;
-        }
+  const onedrive = await getOneDriveSource();
+  if (onedrive) {
+    const items = await listOneDriveProcessedTripSheets();
+    for (const filename of tripSheetFilenames) {
+      const item = items.find((i) => i.name === filename);
+      if (!item) {
+        // Already gone — count as success
+        deleted++;
+        continue;
       }
-      await prisma.tripSheet.delete({ where: { id } });
-      deleted++;
+      try {
+        await deleteFileById(item.id);
+        deleted++;
+      } catch {
+        failed.push(filename);
+      }
+    }
+    return { deleted, failed };
+  }
+
+  const folderPath = await getTripSheetFolderPath();
+  if (!folderPath) {
+    return { deleted: 0, failed: tripSheetFilenames };
+  }
+
+  const processedFolder = path.join(folderPath, "processed");
+  for (const filename of tripSheetFilenames) {
+    const filePath = path.join(processedFolder, filename);
+    const resolved = path.resolve(filePath);
+    const resolvedFolder = path.resolve(processedFolder);
+
+    if (!resolved.startsWith(resolvedFolder)) {
+      failed.push(filename);
+      continue;
+    }
+
+    try {
+      if (fs.existsSync(resolved)) {
+        fs.unlinkSync(resolved);
+        deleted++;
+      } else {
+        // Already gone — count as success
+        deleted++;
+      }
     } catch {
-      failed.push(id);
+      failed.push(filename);
     }
   }
 

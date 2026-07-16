@@ -9,13 +9,9 @@ interface BackupInvoice {
 }
 
 interface BackupTripSheet {
-  id: string;
-  driverName: string;
-  regNo: string;
-  date: string;
-  sourceFilename: string;
-  stopCount: number;
-  uploadedBy: string;
+  filename: string;
+  sizeBytes: number;
+  processedAt: string;
 }
 
 type DatePreset = "ALL" | "7D" | "30D" | "90D" | "CUSTOM";
@@ -90,31 +86,31 @@ export default function BackupsPage() {
   const toggleInvoice = (f: string) => {
     setSelectedInvoices((prev) => { const n = new Set(prev); n.has(f) ? n.delete(f) : n.add(f); return n; });
   };
-  const toggleTrip = (id: string) => {
-    setSelectedTrips((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleTrip = (filename: string) => {
+    setSelectedTrips((prev) => { const n = new Set(prev); n.has(filename) ? n.delete(filename) : n.add(filename); return n; });
   };
   const toggleAllInvoices = () => {
     setSelectedInvoices((prev) => prev.size === invoices.length ? new Set() : new Set(invoices.map((i) => i.filename)));
   };
   const toggleAllTrips = () => {
-    setSelectedTrips((prev) => prev.size === tripSheets.length ? new Set() : new Set(tripSheets.map((t) => t.id)));
+    setSelectedTrips((prev) => prev.size === tripSheets.length ? new Set() : new Set(tripSheets.map((t) => t.filename)));
   };
   const selectAll = () => {
     setSelectedInvoices(new Set(invoices.map((i) => i.filename)));
-    setSelectedTrips(new Set(tripSheets.map((t) => t.id)));
+    setSelectedTrips(new Set(tripSheets.map((t) => t.filename)));
   };
 
   const handleDownload = async (mode: "invoices" | "trips" | "both") => {
     const invFiles = mode === "trips" ? [] : Array.from(selectedInvoices);
-    const tripIds = mode === "invoices" ? [] : Array.from(selectedTrips);
-    if (invFiles.length === 0 && tripIds.length === 0) return;
+    const tripFiles = mode === "invoices" ? [] : Array.from(selectedTrips);
+    if (invFiles.length === 0 && tripFiles.length === 0) return;
     setDownloading(true);
     setError(null);
     try {
       const res = await fetch("/api/backups", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invoiceFilenames: invFiles, tripSheetIds: tripIds }),
+        body: JSON.stringify({ invoiceFilenames: invFiles, tripSheetFilenames: tripFiles }),
       });
       if (!res.ok) { const j = await res.json(); setError(j.error || "Download failed"); return; }
       const blob = await res.blob();
@@ -139,7 +135,7 @@ export default function BackupsPage() {
       const res = await fetch("/api/backups", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invoiceFilenames: Array.from(selectedInvoices), tripSheetIds: Array.from(selectedTrips) }),
+        body: JSON.stringify({ invoiceFilenames: Array.from(selectedInvoices), tripSheetFilenames: Array.from(selectedTrips) }),
       });
       const json = await res.json();
       if (!res.ok) { setError(json.error || "Purge failed"); return; }
@@ -298,7 +294,7 @@ export default function BackupsPage() {
                 className="flex items-center gap-3 w-full px-5 py-3.5 text-left hover:bg-ink-surface/50 transition-colors">
                 <Chevron open={tripsOpen} />
                 <span className="font-mono text-sm font-medium text-ink-black">Completed Trip Sheets</span>
-                <span className="ml-auto text-xs font-mono text-ink-muted">{tripSheets.length} sheets · {tripSheets.reduce((s, t) => s + t.stopCount, 0)} stops</span>
+                <span className="ml-auto text-xs font-mono text-ink-muted">{tripSheets.length} files · {formatSize(tripSheets.reduce((s, t) => s + t.sizeBytes, 0))}</span>
                 {selectedTrips.size > 0 && (
                   <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-green-dim text-ink-green">{selectedTrips.size} selected</span>
                 )}
@@ -313,29 +309,23 @@ export default function BackupsPage() {
                           <input type="checkbox" checked={tripSheets.length > 0 && selectedTrips.size === tripSheets.length} onChange={toggleAllTrips}
                             className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F] cursor-pointer" />
                         </th>
-                        <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Driver</th>
-                        <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide hidden md:table-cell">Reg No</th>
-                        <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Stops</th>
-                        <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide hidden sm:table-cell">Source</th>
-                        <th className="text-right px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Date</th>
+                        <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Filename</th>
+                        <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Size</th>
+                        <th className="text-right px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide hidden sm:table-cell">Processed</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-ink-border">
                       {tripSheets.map((ts) => (
-                        <tr key={ts.id}
-                          className={`hover:bg-ink-surface/50 transition-colors cursor-pointer ${selectedTrips.has(ts.id) ? "bg-ink-green-dim/20" : ""}`}
-                          onClick={() => toggleTrip(ts.id)}>
+                        <tr key={ts.filename}
+                          className={`hover:bg-ink-surface/50 transition-colors cursor-pointer ${selectedTrips.has(ts.filename) ? "bg-ink-green-dim/20" : ""}`}
+                          onClick={() => toggleTrip(ts.filename)}>
                           <td className="px-5 py-3 w-10" onClick={(e) => e.stopPropagation()}>
-                            <input type="checkbox" checked={selectedTrips.has(ts.id)} onChange={() => toggleTrip(ts.id)}
+                            <input type="checkbox" checked={selectedTrips.has(ts.filename)} onChange={() => toggleTrip(ts.filename)}
                               className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F] cursor-pointer" />
                           </td>
-                          <td className="px-5 py-3 font-mono text-xs font-medium text-ink-black">{ts.driverName}</td>
-                          <td className="px-5 py-3 font-mono text-xs text-ink-muted hidden md:table-cell">{ts.regNo}</td>
-                          <td className="px-5 py-3">
-                            <span className="badge-signed">{ts.stopCount} stops</span>
-                          </td>
-                          <td className="px-5 py-3 font-mono text-xs text-ink-muted hidden sm:table-cell truncate max-w-[160px]">{ts.sourceFilename}</td>
-                          <td className="px-5 py-3 text-right text-xs text-ink-muted">{formatDate(ts.date)}</td>
+                          <td className="px-5 py-3 font-mono text-xs text-ink-black">{ts.filename}</td>
+                          <td className="px-5 py-3 font-mono text-xs text-ink-muted">{formatSize(ts.sizeBytes)}</td>
+                          <td className="px-5 py-3 text-right text-xs text-ink-muted hidden sm:table-cell">{formatDate(ts.processedAt)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -441,8 +431,8 @@ export default function BackupsPage() {
                   <div className="bg-ink-surface rounded p-2">
                     <p className="text-xs font-mono text-ink-muted mb-1">Trip Sheets ({selectedTrips.size})</p>
                     <div className="max-h-20 overflow-y-auto">
-                      {tripSheets.filter((t) => selectedTrips.has(t.id)).map((t) => (
-                        <p key={t.id} className="text-xs font-mono text-ink-black py-0.5 truncate">{t.driverName} — {t.sourceFilename}</p>
+                      {tripSheets.filter((t) => selectedTrips.has(t.filename)).map((t) => (
+                        <p key={t.filename} className="text-xs font-mono text-ink-black py-0.5 truncate">{t.filename}</p>
                       ))}
                     </div>
                   </div>

@@ -16,7 +16,7 @@ export const GET = withAuth(async (request: NextRequest) => {
   const beforeParam = searchParams.get("before");
   const beforeDate = beforeParam ? new Date(beforeParam) : undefined;
 
-  const summary = await getBackupSummary(beforeDate, ctx.tenantId);
+  const summary = await getBackupSummary(beforeDate);
   return NextResponse.json(summary);
 });
 
@@ -25,16 +25,16 @@ export const POST = withAuth(async (request: NextRequest) => {
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
-  const { invoiceFilenames = [], tripSheetIds = [] } = body;
+  const { invoiceFilenames = [], tripSheetFilenames = [] } = body;
 
-  if (invoiceFilenames.length === 0 && tripSheetIds.length === 0) {
+  if (invoiceFilenames.length === 0 && tripSheetFilenames.length === 0) {
     return NextResponse.json(
       { error: "No items selected for backup" },
       { status: 400 }
     );
   }
 
-  const buffer = await createBackupZip(invoiceFilenames, tripSheetIds, ctx.tenantId);
+  const buffer = await createBackupZip(invoiceFilenames, tripSheetFilenames);
 
   const datestamp = new Date().toISOString().slice(0, 10);
   const filename = `signex-backup-${datestamp}.zip`;
@@ -54,9 +54,9 @@ export const DELETE = withAuth(async (request: NextRequest) => {
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
-  const { invoiceFilenames = [], tripSheetIds = [] } = body;
+  const { invoiceFilenames = [], tripSheetFilenames = [] } = body;
 
-  if (invoiceFilenames.length === 0 && tripSheetIds.length === 0) {
+  if (invoiceFilenames.length === 0 && tripSheetFilenames.length === 0) {
     return NextResponse.json(
       { error: "No items selected for purge" },
       { status: 400 }
@@ -72,8 +72,8 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     results.invoices = await purgeBackedUpInvoices(invoiceFilenames);
   }
 
-  if (tripSheetIds.length > 0) {
-    results.tripSheets = await purgeBackedUpTripSheets(tripSheetIds, ctx.tenantId);
+  if (tripSheetFilenames.length > 0) {
+    results.tripSheets = await purgeBackedUpTripSheets(tripSheetFilenames);
   }
 
   return NextResponse.json({

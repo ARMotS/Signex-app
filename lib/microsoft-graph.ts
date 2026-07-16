@@ -556,6 +556,33 @@ export async function deleteFileById(itemId: string): Promise<void> {
 }
 
 /**
+ * List completed trip sheet files from the OneDrive "processed" subfolder
+ * (inside the configured trip sheet folder). Completed trip sheets are moved
+ * here by moveToProcessed(). Filters for CSV/Excel files only.
+ */
+export async function listOneDriveProcessedTripSheets(): Promise<OneDriveItem[]> {
+  const account = await prisma.cloudAccount.findUnique({
+    where: { provider: "onedrive" },
+  });
+
+  if (!account?.folderItemId) return [];
+
+  const children = await listFolderById(account.folderItemId);
+  const processedFolder = children.find(
+    (item) => item.folder && item.name.toLowerCase() === "processed"
+  );
+  if (!processedFolder) return [];
+
+  const items = await listFolderById(processedFolder.id);
+  const extensions = [".csv", ".xlsx", ".xls"];
+  return items.filter((item) => {
+    if (item.folder) return false;
+    const ext = item.name.toLowerCase().slice(item.name.lastIndexOf("."));
+    return extensions.includes(ext);
+  });
+}
+
+/**
  * List signed invoice files from the OneDrive "signed" subfolder.
  */
 export async function listOneDriveSignedInvoices(): Promise<OneDriveItem[]> {
