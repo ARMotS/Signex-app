@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import PasswordInput from "@/components/PasswordInput";
 
 interface User {
   id: string;
@@ -228,8 +229,7 @@ export default function UsersPage() {
             <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
               Password
             </label>
-            <input
-              type="password"
+            <PasswordInput
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
@@ -344,8 +344,7 @@ export default function UsersPage() {
                 <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
                   New Password <span className="text-ink-muted-light normal-case">(leave blank to keep current)</span>
                 </label>
-                <input
-                  type="password"
+                <PasswordInput
                   value={editPassword}
                   onChange={(e) => setEditPassword(e.target.value)}
                   minLength={6}

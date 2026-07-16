@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import PasswordInput from "@/components/PasswordInput";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -194,8 +195,7 @@ export default function LoginPage() {
                 <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
                   Password
                 </label>
-                <input
-                  type="password"
+                <PasswordInput
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
@@ -243,8 +243,7 @@ export default function LoginPage() {
                 <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
                   Password
                 </label>
-                <input
-                  type="password"
+                <PasswordInput
                   value={signupPassword}
                   onChange={(e) => setSignupPassword(e.target.value)}
                   required
@@ -256,8 +255,7 @@ export default function LoginPage() {
                 <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
                   Confirm Password
                 </label>
-                <input
-                  type="password"
+                <PasswordInput
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   required
