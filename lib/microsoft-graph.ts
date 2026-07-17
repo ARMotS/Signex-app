@@ -252,19 +252,40 @@ export interface OneDriveFolder {
 }
 
 /**
+ * Fetch every item from a Graph collection endpoint, following the
+ * `@odata.nextLink` pagination links until the collection is exhausted.
+ *
+ * The /children endpoint returns at most ~200 items per page, so callers that
+ * only read the first page under-count folders with more than ~200 files
+ * (e.g. the invoice count would cap out and never match the real folder).
+ */
+async function graphGetAllItems(endpoint: string): Promise<OneDriveItem[]> {
+  const items: OneDriveItem[] = [];
+  let next: string | null = endpoint;
+
+  while (next) {
+    const data = await graphGet(next);
+    if (Array.isArray(data.value)) {
+      items.push(...(data.value as OneDriveItem[]));
+    }
+    next = (data["@odata.nextLink"] as string | undefined) ?? null;
+  }
+
+  return items;
+}
+
+/**
  * List the root folders in OneDrive.
  */
 export async function listRootFolders(): Promise<OneDriveItem[]> {
-  const data = await graphGet("/me/drive/root/children");
-  return data.value || [];
+  return graphGetAllItems("/me/drive/root/children?$top=200");
 }
 
 /**
  * List children of a specific folder by item ID.
  */
 export async function listFolderById(itemId: string): Promise<OneDriveItem[]> {
-  const data = await graphGet(`/me/drive/items/${itemId}/children`);
-  return data.value || [];
+  return graphGetAllItems(`/me/drive/items/${itemId}/children?$top=200`);
 }
 
 /**
@@ -273,8 +294,7 @@ export async function listFolderById(itemId: string): Promise<OneDriveItem[]> {
  */
 export async function listFolderByPath(folderPath: string): Promise<OneDriveItem[]> {
   const encodedPath = encodeURIComponent(folderPath).replace(/%2F/g, "/");
-  const data = await graphGet(`/me/drive/root:/${encodedPath}:/children`);
-  return data.value || [];
+  return graphGetAllItems(`/me/drive/root:/${encodedPath}:/children?$top=200`);
 }
 
 /**
