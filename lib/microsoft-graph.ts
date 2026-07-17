@@ -507,11 +507,17 @@ export async function uploadSignedInvoiceToOneDrive(
  * Move a file to a subfolder within the same parent folder.
  * Creates the subfolder if it doesn't exist.
  * Used to move completed trip sheets to processed/.
+ *
+ * If a file with the same name already exists in the destination, OneDrive
+ * returns 409 Conflict. When `filename` is provided we retry with a
+ * timestamped name so the move still succeeds (mirrors the local filesystem
+ * behaviour) rather than failing and leaving the file un-archived.
  */
 export async function moveFileToSubfolder(
   fileItemId: string,
   parentFolderItemId: string,
-  subfolderName: string
+  subfolderName: string,
+  filename?: string
 ): Promise<void> {
   const token = await getValidAccessToken();
   if (!token) throw new Error("No valid OneDrive access token");
@@ -519,16 +525,29 @@ export async function moveFileToSubfolder(
   const subfolderId = await ensureSubfolder(parentFolderItemId, subfolderName);
 
   const url = `${GRAPH_API_URL}/me/drive/items/${fileItemId}`;
-  const res = await fetch(url, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  const move = (body: Record<string, unknown>) =>
+    fetch(url, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+  let res = await move({ parentReference: { id: subfolderId } });
+
+  // On a name conflict in the destination, retry with a timestamped name.
+  if (res.status === 409 && filename) {
+    const dot = filename.lastIndexOf(".");
+    const base = dot > 0 ? filename.slice(0, dot) : filename;
+    const ext = dot > 0 ? filename.slice(dot) : "";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    res = await move({
       parentReference: { id: subfolderId },
-    }),
-  });
+      name: `${base}_${stamp}${ext}`,
+    });
+  }
 
   if (!res.ok) {
     const err = await res.text();
