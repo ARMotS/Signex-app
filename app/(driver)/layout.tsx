@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { useEffect } from "react";
 
 export default function DriverLayout({
@@ -10,8 +10,21 @@ export default function DriverLayout({
   children: React.ReactNode;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
+
+  /**
+   * /select and /select/<slug> are the SIGN-IN pages — a driver arriving there
+   * has no session yet, by definition. Without this guard the session poll below
+   * fired on arrival, found nothing, and redirected the driver straight off their
+   * company's sign-in link back to bare /select, which looked exactly like a
+   * broken link. It only appeared to work for an admin, whose existing session
+   * satisfied the check.
+   */
+  const isSignInPage = pathname === "/select" || pathname.startsWith("/select/");
 
   useEffect(() => {
+    if (isSignInPage) return;
+
     const checkSession = () => {
       fetch("/api/auth/session")
         .then((r) => r.json())
@@ -27,7 +40,7 @@ export default function DriverLayout({
     checkSession();
     const interval = setInterval(checkSession, 30000);
     return () => clearInterval(interval);
-  }, [router]);
+  }, [router, isSignInPage]);
 
   const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -62,23 +75,29 @@ export default function DriverLayout({
           </span>
         </Link>
         <div className="flex items-center gap-3">
-          <Link
-            href="/select"
-            className="text-xs font-mono text-ink-muted hover:text-ink-black transition-colors"
-          >
-            Switch Driver
-          </Link>
-          <button
-            onClick={handleLogout}
-            className="text-xs font-mono px-2 py-1 text-ink-muted hover:text-ink-red transition-colors"
-            title="Sign out"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-              <polyline points="16 17 21 12 16 7" />
-              <line x1="21" y1="12" x2="9" y2="12" />
-            </svg>
-          </button>
+          {/* Sign-out and switch-driver are meaningless before signing in, and
+              "Switch Driver" would drop a driver off their company's link. */}
+          {!isSignInPage && (
+            <>
+              <Link
+                href="/select"
+                className="text-xs font-mono text-ink-muted hover:text-ink-black transition-colors"
+              >
+                Switch Driver
+              </Link>
+              <button
+                onClick={handleLogout}
+                className="text-xs font-mono px-2 py-1 text-ink-muted hover:text-ink-red transition-colors"
+                title="Sign out"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                  <polyline points="16 17 21 12 16 7" />
+                  <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+              </button>
+            </>
+          )}
           <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-ink-green-dim text-ink-green uppercase tracking-wider">
             Driver
           </span>

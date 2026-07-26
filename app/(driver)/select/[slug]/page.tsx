@@ -216,6 +216,29 @@ export default function DriverSelectForCompanyPage() {
     );
   }
 
+  // ── Valid link, but this operator has no drivers set up yet ─────────
+  //
+  // Distinct from an unknown link: the slug resolved and we know the company
+  // name, so telling the driver their link is broken would send them chasing the
+  // wrong problem. The fix is for their dispatcher to add them.
+  if (drivers.length === 0 && companyName) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center text-center px-6 py-10">
+        <div className="text-4xl mb-4">👤</div>
+        <p className="font-mono text-sm font-medium text-ink-black mb-1">
+          {companyName}
+        </p>
+        <p className="font-mono text-sm text-ink-black mb-2">
+          No drivers set up yet
+        </p>
+        <p className="text-xs text-ink-muted max-w-sm">
+          Your link is correct, but no drivers have been added to this company
+          yet. Ask your dispatcher to add you from the Drivers page.
+        </p>
+      </div>
+    );
+  }
+
   // ── Unknown link, or operator deactivated (indistinguishable) ───────
   if (drivers.length === 0) {
     return (
@@ -225,8 +248,8 @@ export default function DriverSelectForCompanyPage() {
           This sign-in link isn&apos;t available
         </p>
         <p className="text-xs text-ink-muted max-w-sm">
-          The link may be incorrect, or no drivers have been set up yet. Ask your
-          dispatcher for your company&apos;s sign-in link.
+          The link may be incorrect or out of date. Ask your dispatcher for your
+          company&apos;s sign-in link.
         </p>
       </div>
     );
