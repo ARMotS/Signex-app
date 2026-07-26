@@ -53,14 +53,39 @@ const serwist = new Serwist({
         ],
       }),
     },
-    // App pages — stale-while-revalidate
+    // Entry points — always network first.
+    //
+    // /select/<slug> is the per-operator driver sign-in link and /login is the
+    // admin one. These must never be served from a stale cache: a phone that had
+    // cached this app before /select/<slug> existed would resolve the navigation
+    // against its old route manifest and land on bare /select instead, which is
+    // exactly the "your link doesn't work" symptom. Auth entry points are also the
+    // last place a day-old response is acceptable.
+    {
+      matcher: ({ url }) => /^\/(select|login)(\/|$)/.test(url.pathname),
+      handler: new NetworkFirst({
+        cacheName: "signex-entry-v2",
+        networkTimeoutSeconds: 10,
+        plugins: [
+          new ExpirationPlugin({
+            maxEntries: 10,
+            maxAgeSeconds: 60 * 60, // 1 hour
+          }),
+        ],
+      }),
+    },
+    // Remaining app pages — stale-while-revalidate.
+    //
+    // Cache name is versioned: renaming it discards entries written by an earlier
+    // deployment instead of revalidating them, which is what lets a route added
+    // after a phone last loaded the app actually resolve.
     {
       matcher: ({ url }) =>
-        /^\/(dashboard|run|select|sign|drivers|invoices|settings|trip-sheet)/.test(
+        /^\/(dashboard|run|sign|drivers|contacts|invoices|settings|trip-sheet|backups|users)/.test(
           url.pathname
         ),
       handler: new StaleWhileRevalidate({
-        cacheName: "signex-pages",
+        cacheName: "signex-pages-v2",
         plugins: [
           new ExpirationPlugin({
             maxEntries: 30,
@@ -75,3 +100,38 @@ const serwist = new Serwist({
 });
 
 serwist.addEventListeners();
+
+/**
+ * Drop runtime caches this service worker no longer uses.
+ *
+ * Serwist's precache is versioned automatically, but runtime caches are not — a
+ * renamed cache leaves the old one on disk, still holding responses from an
+ * earlier deployment. Without this, a phone that cached the app before
+ * /select/<slug> existed would keep serving the stale pages that made the driver
+ * sign-in link appear broken.
+ *
+ * Anything not named here is deleted on activation. With skipWaiting and
+ * clientsClaim already set, that happens on the user's next load.
+ */
+const EXPECTED_RUNTIME_CACHES = new Set([
+  "signex-api-cache",
+  "signex-static-assets",
+  "signex-entry-v2",
+  "signex-pages-v2",
+]);
+
+self.addEventListener("activate", (event) => {
+  (event as ExtendableEvent).waitUntil(
+    (async () => {
+      const names = await caches.keys();
+      await Promise.all(
+        names
+          .filter(
+            (name) =>
+              name.startsWith("signex-") && !EXPECTED_RUNTIME_CACHES.has(name)
+          )
+          .map((name) => caches.delete(name))
+      );
+    })()
+  );
+});
