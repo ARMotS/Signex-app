@@ -260,6 +260,31 @@ async function graphGet(tenantId: string, endpoint: string): Promise<any> {
   return graphGetWithToken(endpoint, await requireToken(tenantId));
 }
 
+/**
+ * Follow Graph's @odata.nextLink until the whole collection is retrieved.
+ *
+ * Graph pages children at ~200 items, so a single request silently truncated
+ * large folders. Every page is fetched with THIS scope's token.
+ */
+async function graphGetAllItems(
+  tenantId: string,
+  endpoint: string
+): Promise<OneDriveItem[]> {
+  const items: OneDriveItem[] = [];
+  let next: string | null = endpoint;
+
+  while (next) {
+    const data = await graphGet(tenantId, next);
+    if (Array.isArray(data.value)) {
+      items.push(...(data.value as OneDriveItem[]));
+    }
+    // nextLink is an absolute URL; graphGet passes it through unchanged.
+    next = (data["@odata.nextLink"] as string | undefined) ?? null;
+  }
+
+  return items;
+}
+
 async function graphGetBuffer(tenantId: string, endpoint: string): Promise<Buffer> {
   const token = await requireToken(tenantId);
 
@@ -300,8 +325,7 @@ export interface OneDriveFolder {
  * List the root folders in this scope's OneDrive.
  */
 export async function listRootFolders(tenantId: string): Promise<OneDriveItem[]> {
-  const data = await graphGet(tenantId, "/me/drive/root/children");
-  return data.value || [];
+  return graphGetAllItems(tenantId, "/me/drive/root/children?$top=200");
 }
 
 /**
@@ -314,8 +338,7 @@ export async function listFolderById(
   tenantId: string,
   itemId: string
 ): Promise<OneDriveItem[]> {
-  const data = await graphGet(tenantId, `/me/drive/items/${itemId}/children`);
-  return data.value || [];
+  return graphGetAllItems(tenantId, `/me/drive/items/${itemId}/children?$top=200`);
 }
 
 /**
@@ -327,8 +350,10 @@ export async function listFolderByPath(
   folderPath: string
 ): Promise<OneDriveItem[]> {
   const encodedPath = encodeURIComponent(folderPath).replace(/%2F/g, "/");
-  const data = await graphGet(tenantId, `/me/drive/root:/${encodedPath}:/children`);
-  return data.value || [];
+  return graphGetAllItems(
+    tenantId,
+    `/me/drive/root:/${encodedPath}:/children?$top=200`
+  );
 }
 
 /**
@@ -615,23 +640,37 @@ export async function moveFileToSubfolder(
   tenantId: string,
   fileItemId: string,
   parentFolderItemId: string,
-  subfolderName: string
+  subfolderName: string,
+  filename?: string
 ): Promise<void> {
   const token = await requireToken(tenantId);
 
   const subfolderId = await ensureSubfolder(tenantId, parentFolderItemId, subfolderName);
 
   const url = `${GRAPH_API_URL}/me/drive/items/${fileItemId}`;
-  const res = await fetch(url, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  const move = (body: Record<string, unknown>) =>
+    fetch(url, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+  let res = await move({ parentReference: { id: subfolderId } });
+
+  // On a name conflict in the destination, retry with a timestamped name.
+  if (res.status === 409 && filename) {
+    const dot = filename.lastIndexOf(".");
+    const base = dot > 0 ? filename.slice(0, dot) : filename;
+    const ext = dot > 0 ? filename.slice(dot) : "";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    res = await move({
       parentReference: { id: subfolderId },
-    }),
-  });
+      name: `${base}_${stamp}${ext}`,
+    });
+  }
 
   if (!res.ok) {
     const err = await res.text();
@@ -658,6 +697,32 @@ export async function deleteFileById(
     const err = await res.text();
     throw new Error(`Graph API delete error (${res.status}): ${err}`);
   }
+}
+
+/**
+ * List trip sheet files already moved to this scope's "processed" subfolder.
+ * Used by the backup flow, which archives completed trip sheets from there.
+ */
+export async function listOneDriveProcessedTripSheets(
+  tenantId: string
+): Promise<OneDriveItem[]> {
+  const account = await getAccount(tenantId);
+
+  if (!account?.folderItemId) return [];
+
+  const children = await listFolderById(tenantId, account.folderItemId);
+  const processedFolder = children.find(
+    (item) => item.folder && item.name.toLowerCase() === "processed"
+  );
+  if (!processedFolder) return [];
+
+  const items = await listFolderById(tenantId, processedFolder.id);
+  const extensions = [".csv", ".xlsx", ".xls"];
+  return items.filter((item) => {
+    if (item.folder) return false;
+    const ext = item.name.toLowerCase().slice(item.name.lastIndexOf("."));
+    return extensions.includes(ext);
+  });
 }
 
 /**

@@ -86,6 +86,100 @@ export async function createAdminAccount(
   }
 }
 
+/**
+ * Update an admin credential row, matched by its current email.
+ * Only touches the Admin table (email/password/name live here); the
+ * companion User row is updated separately by the caller.
+ */
+export async function updateAdminAccount(
+  tenantId: string,
+  currentEmail: string,
+  updates: { name?: string; email?: string; password?: string }
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const db = scopedPrisma(tenantId);
+
+    // Scoped lookup: an admin outside this scope is simply not found, so a
+    // SUPER_ADMIN cannot rewrite another scope's credentials by guessing an email.
+    const admin = await db.admin.findFirst({
+      where: { email: currentEmail.toLowerCase() },
+    });
+    if (!admin) {
+      return { success: false, error: "Admin credentials not found" };
+    }
+
+    // SCOPE-EXEMPT: Admin.email is globally unique, so a rename must not collide
+    // with an account in another scope. Only existence is used.
+    if (updates.email !== undefined && updates.email.toLowerCase() !== admin.email) {
+      const clash = await UNSAFE_unscopedPrisma.admin.findUnique({
+        where: { email: updates.email.toLowerCase() },
+      });
+      if (clash) {
+        return { success: false, error: "An account with this email already exists" };
+      }
+    }
+
+    await db.admin.update({
+      where: { id: admin.id },
+      data: {
+        ...(updates.name !== undefined && { name: updates.name }),
+        ...(updates.email !== undefined && { email: updates.email.toLowerCase() }),
+        ...(updates.password !== undefined &&
+          updates.password !== "" && {
+            passwordHash: hashPassword(updates.password),
+          }),
+      },
+    });
+
+    await logAudit({
+      action: "CONFIG_UPDATE",
+      entity: "admin",
+      entityId: admin.id,
+      userName: updates.name || admin.name,
+      details: `Admin account updated: ${(updates.email || admin.email).toLowerCase()}`,
+      tenantId,
+    });
+
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to update admin:", err);
+    return { success: false, error: "Failed to update admin credentials" };
+  }
+}
+
+/**
+ * Delete an admin credential row by email.
+ * The companion User row is deleted separately by the caller.
+ */
+export async function deleteAdminAccount(
+  tenantId: string,
+  email: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Scoped delete: an email belonging to another scope matches zero rows rather
+    // than deleting that scope's admin.
+    const res = await scopedPrisma(tenantId).admin.deleteMany({
+      where: { email: email.toLowerCase() },
+    });
+
+    if (res.count === 0) {
+      return { success: false, error: "Admin credentials not found" };
+    }
+
+    await logAudit({
+      action: "CONFIG_UPDATE",
+      entity: "admin",
+      details: `Admin account deleted: ${email.toLowerCase()}`,
+      tenantId,
+    });
+
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to delete admin:", err);
+    return { success: false, error: "Failed to delete admin credentials" };
+  }
+}
+
 export async function loginAdmin(
   email: string,
   password: string

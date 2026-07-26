@@ -4,7 +4,6 @@ import {
   listTripSheetFiles,
   readTripSheetFile,
   markFileImported,
-  moveToProcessed,
   deleteTripSheetFiles,
   findDuplicateTripSheetFiles,
 } from "@/lib/trip-sheet-folder";
@@ -128,8 +127,10 @@ export const POST = withAuth(async (request: NextRequest) => {
     }
 
     const tripSheetId = savedTrips.length > 0 ? savedTrips[0].id : null;
+    // Note: the source file is NOT archived to processed/ here. That happens
+    // when the trip sheet is completed (see completeTripSheet), because the
+    // processed/ folder is what the backup flow treats as "completed".
     await markFileImported(ctx.tenantId, filename, tripSheetId, "imported");
-    await moveToProcessed(ctx.tenantId, filename);
 
     return NextResponse.json({
       success: true,

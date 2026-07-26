@@ -25,16 +25,20 @@ export const POST = withAuth(async (request: NextRequest) => {
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
-  const { invoiceFilenames = [], tripSheetIds = [] } = body;
+  const { invoiceFilenames = [], tripSheetFilenames = [] } = body;
 
-  if (invoiceFilenames.length === 0 && tripSheetIds.length === 0) {
+  if (invoiceFilenames.length === 0 && tripSheetFilenames.length === 0) {
     return NextResponse.json(
       { error: "No items selected for backup" },
       { status: 400 }
     );
   }
 
-  const buffer = await createBackupZip(ctx.tenantId, invoiceFilenames, tripSheetIds);
+  const buffer = await createBackupZip(
+    ctx.tenantId,
+    invoiceFilenames,
+    tripSheetFilenames
+  );
 
   const datestamp = new Date().toISOString().slice(0, 10);
   const filename = `signex-backup-${datestamp}.zip`;
@@ -54,9 +58,9 @@ export const DELETE = withAuth(async (request: NextRequest) => {
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
-  const { invoiceFilenames = [], tripSheetIds = [] } = body;
+  const { invoiceFilenames = [], tripSheetFilenames = [] } = body;
 
-  if (invoiceFilenames.length === 0 && tripSheetIds.length === 0) {
+  if (invoiceFilenames.length === 0 && tripSheetFilenames.length === 0) {
     return NextResponse.json(
       { error: "No items selected for purge" },
       { status: 400 }
@@ -72,8 +76,11 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     results.invoices = await purgeBackedUpInvoices(ctx.tenantId, invoiceFilenames);
   }
 
-  if (tripSheetIds.length > 0) {
-    results.tripSheets = await purgeBackedUpTripSheets(ctx.tenantId, tripSheetIds);
+  if (tripSheetFilenames.length > 0) {
+    results.tripSheets = await purgeBackedUpTripSheets(
+      ctx.tenantId,
+      tripSheetFilenames
+    );
   }
 
   return NextResponse.json({

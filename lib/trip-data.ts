@@ -385,10 +385,16 @@ export async function completeTripSheet(
     const driver = await db.driver.findFirst({ where: { id: trip.driverId } });
 
     // Move source file to processed/ subfolder — in this scope's own folder or
-    // OneDrive connection, never another admin's.
+    // OneDrive connection, never another admin's. This is what backups read as
+    // the set of "completed" trip sheets, so a failure here must be visible.
     let archivedFile: string | null = null;
     if (trip.sourceFilename) {
       archivedFile = await moveToProcessed(tenantId, trip.sourceFilename);
+      if (!archivedFile) {
+        console.warn(
+          `completeTripSheet: source file "${trip.sourceFilename}" was not archived to processed/ (not found or move failed) — it will not appear in backups`
+        );
+      }
     }
 
     // Delete the trip sheet (cascades to stops)
@@ -399,7 +405,13 @@ export async function completeTripSheet(
       entity: "trip_sheet",
       entityId: tripId,
       userName: trip.uploadedBy,
-      details: `Trip sheet completed and archived for driver ${driver?.name || "Unknown"} (${stops.length} stops, all signed)`,
+      details: `Trip sheet completed for driver ${driver?.name || "Unknown"} (${stops.length} stops, all signed)${
+        trip.sourceFilename
+          ? archivedFile
+            ? ` — archived ${trip.sourceFilename} to processed/`
+            : ` — WARNING: ${trip.sourceFilename} could not be archived to processed/`
+          : ""
+      }`,
       tenantId,
     });
 

@@ -28,6 +28,7 @@ import { detectCloudProvider, type CloudProvider } from "./cloud-detect";
 import {
   getCloudAccountStatus,
   listOneDriveTripSheetFiles,
+  listOneDriveProcessedTripSheets,
   downloadFileById,
   deleteFileById,
   uploadFileToFolder,
@@ -362,7 +363,14 @@ export async function markFileImported(
  * Move a processed file to the processed/ subfolder.
  * Creates the subfolder if it doesn't exist.
  * Uses OneDrive Graph API if connected, otherwise local filesystem.
- * Returns the new path, or null if the move failed.
+ *
+ * Idempotent: if the file is no longer in the root folder but already exists
+ * in processed/ (e.g. a sibling trip sheet from the same source file was
+ * completed first), the existing archived path is returned as success rather
+ * than reporting failure.
+ *
+ * Returns the archived path, or null if the file could not be located or the
+ * move failed.
  */
 export async function moveToProcessed(
   tenantId: string,
@@ -375,7 +383,19 @@ export async function moveToProcessed(
       const items = await listOneDriveTripSheetFiles(tenantId);
       const match = items.find((i) => i.name === filename);
       if (match) {
-        await moveFileToSubfolder(tenantId, match.id, onedrive.folderItemId, "processed");
+        await moveFileToSubfolder(
+          tenantId,
+          match.id,
+          onedrive.folderItemId,
+          "processed",
+          filename
+        );
+        return `onedrive://processed/${filename}`;
+      }
+
+      // Not in root — treat as already archived if present in processed/.
+      const processed = await listOneDriveProcessedTripSheets(tenantId);
+      if (processed.some((i) => i.name === filename)) {
         return `onedrive://processed/${filename}`;
       }
     } catch (err) {
@@ -397,6 +417,11 @@ export async function moveToProcessed(
   const resolvedFolder = path.resolve(folderPath);
   if (!resolvedSource.startsWith(resolvedFolder)) {
     throw new Error("Invalid filename — directory traversal detected");
+  }
+
+  // Idempotent: source already gone but present in processed/ → success.
+  if (!fs.existsSync(resolvedSource)) {
+    return fs.existsSync(destPath) ? destPath : null;
   }
 
   try {
