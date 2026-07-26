@@ -32,6 +32,10 @@ model Tenant {
   id            String         @id @default(cuid())
   name          String
   slug          String         @unique
+  // Shown in the public driver-login company picker. The only field of a scope
+  // that is ever exposed pre-authentication, and only for scopes whose owning
+  // ADMIN is active.
+  companyName   String?
   // The ADMIN this scope belongs to. Null for the root (SUPER_ADMIN) scope.
   ownerAdminId  String?        @unique
   createdAt     DateTime       @default(now())
@@ -74,6 +78,9 @@ model Admin {
   name         String
   email        String      @unique
   passwordHash String
+  // A deactivated ADMIN cannot log in. Their drivers are unaffected and keep
+  // signing in and completing deliveries; see loginAdmin / loginDriver.
+  active       Boolean     @default(true)
   sessionToken String?
   tenantId     String      @default("")
   tenant       Tenant      @relation(fields: [tenantId], references: [id])
@@ -84,6 +91,7 @@ model Admin {
   // Composite-FK target so TripSheet.adminId cannot cross a scope boundary.
   @@unique([tenantId, id])
   @@index([tenantId])
+  @@index([active])
 }
 
 model Driver {

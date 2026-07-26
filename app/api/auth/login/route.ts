@@ -72,7 +72,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (role === "driver") {
-      const { name, pin } = body;
+      const { name, pin, company } = body;
       if (!pin || !name) {
         return NextResponse.json(
           { error: "Name and PIN are required" },
@@ -82,8 +82,13 @@ export async function POST(request: NextRequest) {
 
       // Driver names are unique per scope, so loginDriver verifies the PIN
       // against every same-named candidate and accepts only a unique match. The
-      // resulting scope comes from that row.
-      const result = await loginDriver(name, pin);
+      // resulting scope comes from that row, never from `company` — that is only
+      // a hint used to narrow the candidate set.
+      const result = await loginDriver(
+        name,
+        pin,
+        typeof company === "string" && company ? company : undefined
+      );
       if (!result.success) {
         recordFailedAttempt(ip, "auth", RATE_LIMITS.auth);
         return NextResponse.json({ error: result.error }, { status: 401 });

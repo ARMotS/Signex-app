@@ -202,6 +202,15 @@ export async function loginAdmin(
     return { success: false, error: "Invalid email or password" };
   }
 
+  // A deactivated ADMIN cannot log in. Checked AFTER the password so the message
+  // cannot be used to discover which emails exist.
+  if (!admin.active) {
+    return {
+      success: false,
+      error: "This account has been deactivated. Contact your administrator.",
+    };
+  }
+
   await logAudit({
     action: "LOGIN",
     entity: "admin",
@@ -282,7 +291,8 @@ export async function createDriverAccount(
  */
 export async function loginDriver(
   name: string,
-  pin: string
+  pin: string,
+  companyTenantId?: string
 ): Promise<{
   success: boolean;
   error?: string;
@@ -293,8 +303,16 @@ export async function loginDriver(
   // SCOPE-EXEMPT: pre-session. No scope exists yet; the scope is the *output* of
   // this function. Narrowed to a single row by PIN verification below, and
   // nothing about the non-matching candidates is ever returned.
+  //
+  // When the sign-in page supplied the company the driver picked, the candidate
+  // set is narrowed to that scope. That is not a trust decision — the PIN is
+  // still verified — but it removes the ambiguity that arises when two operators
+  // happen to employ a same-named driver with the same PIN.
   const candidates = await UNSAFE_unscopedPrisma.driver.findMany({
-    where: { name },
+    where: {
+      name,
+      ...(companyTenantId ? { tenantId: companyTenantId } : {}),
+    },
   });
 
   const verified = candidates.filter((d) => verifyPassword(pin, d.pinHash));
@@ -432,6 +450,55 @@ export async function deleteDriver(
   } catch (err) {
     console.error("Failed to delete driver:", err);
     return { success: false, error: "Failed to delete driver" };
+  }
+}
+
+/**
+ * Set an ADMIN's active flag. SUPER_ADMIN-only operation, so it deliberately
+ * spans scopes: the Users console manages ADMINs who each live in their own
+ * tenant. Callers MUST have already checked the role.
+ *
+ * Drivers under the ADMIN are untouched by design — deactivating an office
+ * account should not strand drivers mid-route.
+ */
+export async function setAdminActive(
+  adminId: string,
+  active: boolean,
+  actorName: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // SCOPE-EXEMPT: SUPER_ADMIN admin-management across scopes. Role-gated by
+    // the caller; the target is addressed by primary key, never by a filter that
+    // could sweep up rows the caller did not name.
+    const admin = await UNSAFE_unscopedPrisma.admin.findUnique({
+      where: { id: adminId },
+      select: { id: true, name: true, email: true, tenantId: true },
+    });
+    if (!admin) return { success: false, error: "Admin not found" };
+
+    await UNSAFE_unscopedPrisma.admin.update({
+      where: { id: adminId },
+      data: {
+        active,
+        // Revoking the session token logs a deactivated admin out immediately
+        // rather than letting their current cookie run to expiry.
+        ...(active ? {} : { sessionToken: null }),
+      },
+    });
+
+    await logAudit({
+      action: "CONFIG_UPDATE",
+      entity: "admin",
+      entityId: admin.id,
+      userName: actorName,
+      details: `Admin ${active ? "reactivated" : "deactivated"}: ${admin.email}`,
+      tenantId: admin.tenantId,
+    });
+
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to change admin active state:", err);
+    return { success: false, error: "Failed to update admin" };
   }
 }
 

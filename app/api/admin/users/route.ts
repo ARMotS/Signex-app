@@ -5,32 +5,150 @@ import { withAuth } from "@/lib/api-handler";
 import {
   createAdminAccount,
   updateAdminAccount,
-  deleteAdminAccount,
+  setAdminActive,
 } from "@/lib/accounts";
 import { logAudit } from "@/lib/audit";
 import crypto from "crypto";
 
 /**
  * GET /api/admin/users
- * Users inside the currently-active scope. For a SUPER_ADMIN using the scope
- * switcher, that is the scope being viewed.
+ *
+ * Every ADMIN in the installation, with the scope each one owns.
+ *
+ * This is the deliberate exception to scoping. Each ADMIN now lives in its own
+ * tenant, so a scoped query here would show the SUPER_ADMIN only itself and the
+ * console would be empty — which is exactly the regression this replaces. The
+ * cross-scope read is safe because it is SUPER_ADMIN-gated and returns only
+ * account metadata: no drivers, contacts, trip sheets or OneDrive details ever
+ * cross a scope boundary through this endpoint.
  */
 export const GET = withAuth(async () => {
   const ctx = await getScope();
   requireRole(ctx, "SUPER_ADMIN");
 
-  const users = await ctx.db.user.findMany({
-    orderBy: { createdAt: "desc" },
+  // SCOPE-EXEMPT: SUPER_ADMIN account-management console. Returns account
+  // metadata across scopes by design; no scoped business data is included.
+  const admins = await UNSAFE_unscopedPrisma.admin.findMany({
+    orderBy: { createdAt: "asc" },
     select: {
       id: true,
       name: true,
       email: true,
-      role: true,
+      active: true,
       createdAt: true,
+      tenantId: true,
+      tenant: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          companyName: true,
+          _count: { select: { drivers: true, contacts: true, tripSheets: true } },
+        },
+      },
     },
   });
 
-  return NextResponse.json({ users });
+  // Role lives on User, keyed by the same email.
+  const users = await UNSAFE_unscopedPrisma.user.findMany({
+    select: { id: true, email: true, role: true },
+  });
+  const userByEmail = new Map(users.map((u) => [u.email.toLowerCase(), u]));
+
+  const rows = admins.map((a) => {
+    const u = userByEmail.get(a.email.toLowerCase());
+    return {
+      // The Users page acts on the Admin row; expose that as the id.
+      id: a.id,
+      userId: u?.id ?? null,
+      name: a.name,
+      email: a.email,
+      role: u?.role ?? "ADMIN",
+      active: a.active,
+      createdAt: a.createdAt,
+      isSelf: a.id === ctx.userId,
+      scope: {
+        tenantId: a.tenantId,
+        slug: a.tenant?.slug ?? null,
+        companyName: a.tenant?.companyName ?? a.tenant?.name ?? null,
+        isRoot: a.tenantId === ctx.homeTenantId,
+        counts: a.tenant?._count ?? { drivers: 0, contacts: 0, tripSheets: 0 },
+      },
+    };
+  });
+
+  return NextResponse.json({ users: rows });
+});
+
+/**
+ * POST /api/admin/users/active is not a route in Next's file router, so
+ * activation is folded into PUT here.
+ *
+ * PUT /api/admin/users
+ * Body: { id: string, active: boolean }
+ * Deactivate or reactivate an ADMIN. Their drivers are unaffected.
+ */
+export const PUT = withAuth(async (request: NextRequest) => {
+  const ctx = await getScope();
+  requireRole(ctx, "SUPER_ADMIN");
+
+  const { id, active } = await request.json();
+
+  if (!id || typeof active !== "boolean") {
+    return NextResponse.json(
+      { error: "id and active (boolean) are required" },
+      { status: 400 }
+    );
+  }
+
+  if (id === ctx.userId) {
+    return NextResponse.json(
+      { error: "You cannot deactivate your own account" },
+      { status: 400 }
+    );
+  }
+
+  // SCOPE-EXEMPT: SUPER_ADMIN account management; the target is addressed by
+  // primary key and only its active flag is read here.
+  const target = await UNSAFE_unscopedPrisma.admin.findUnique({
+    where: { id },
+    select: { id: true, email: true },
+  });
+  if (!target) {
+    return NextResponse.json({ error: "Admin not found" }, { status: 404 });
+  }
+
+  // Never deactivate the last active SUPER_ADMIN, or nobody can administer.
+  if (!active) {
+    const targetUser = await UNSAFE_unscopedPrisma.user.findUnique({
+      where: { email: target.email.toLowerCase() },
+      select: { role: true },
+    });
+    if (targetUser?.role === "SUPER_ADMIN") {
+      const superEmails = (
+        await UNSAFE_unscopedPrisma.user.findMany({
+          where: { role: "SUPER_ADMIN" },
+          select: { email: true },
+        })
+      ).map((u) => u.email.toLowerCase());
+      const activeSupers = await UNSAFE_unscopedPrisma.admin.count({
+        where: { active: true, email: { in: superEmails } },
+      });
+      if (activeSupers <= 1) {
+        return NextResponse.json(
+          { error: "Cannot deactivate the last active super admin" },
+          { status: 400 }
+        );
+      }
+    }
+  }
+
+  const result = await setAdminActive(id, active, ctx.name);
+  if (!result.success) {
+    return NextResponse.json({ error: result.error }, { status: 400 });
+  }
+
+  return NextResponse.json({ success: true, active });
 });
 
 /**
@@ -49,7 +167,7 @@ export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireRole(ctx, "SUPER_ADMIN");
 
-  const { name, email, password } = await request.json();
+  const { name, email, password, companyName } = await request.json();
 
   if (!name || !email || !password) {
     return NextResponse.json(
@@ -84,7 +202,9 @@ export const POST = withAuth(async (request: NextRequest) => {
   // Mint the new ADMIN's own isolation scope.
   const slug = `admin-${crypto.randomBytes(6).toString("hex")}`;
   const tenant = await UNSAFE_unscopedPrisma.tenant.create({
-    data: { name: `${name}`, slug },
+    // companyName is what drivers see in the sign-in picker. Defaults to the
+    // admin's name; the SUPER_ADMIN can rename it from the Users page.
+    data: { name: `${name}`, slug, companyName: companyName?.trim() || name },
   });
 
   // createAdminAccount writes into the NEW tenant, not the caller's.
@@ -131,15 +251,14 @@ export const POST = withAuth(async (request: NextRequest) => {
     scope: { tenantId: tenant.id, slug: tenant.slug },
   });
 });
-
 /**
  * PATCH /api/admin/users
- * Edit a user inside the currently-active scope.
+ * Body: { id: <Admin.id>, name?, email?, password?, role? }
  *
- * Scoping note: `ctx.db` is locked to the active scope, so a SUPER_ADMIN using
- * the scope switcher edits users in the scope they are viewing, and an id from
- * any other scope is simply not found (404). The `Admin` credential row is
- * updated through updateAdminAccount, which is scoped the same way.
+ * Edit an ADMIN account. Addressed by Admin.id across scopes, matching what the
+ * Users console lists — each ADMIN owns its own tenant, so a scoped lookup would
+ * find nothing. SUPER_ADMIN-gated, and only account fields are touched; no
+ * scoped business data is read or written.
  */
 export const PATCH = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
@@ -148,28 +267,28 @@ export const PATCH = withAuth(async (request: NextRequest) => {
   const { id, name, email, password, role } = await request.json();
 
   if (!id) {
-    return NextResponse.json({ error: "User ID is required" }, { status: 400 });
+    return NextResponse.json({ error: "Admin ID is required" }, { status: 400 });
   }
 
-  // Scoped read — a user in another scope is indistinguishable from one that
-  // does not exist.
-  const target = await ctx.db.user.findFirst({ where: { id } });
-  if (!target) {
-    return NextResponse.json({ error: "User not found" }, { status: 404 });
-  }
-
-  // The admin session id is the Admin.id — resolve the caller's email so we
-  // can protect them against locking themselves out.
-  const currentAdmin = await ctx.db.admin.findFirst({
-    where: { id: ctx.userId },
-    select: { email: true },
+  // SCOPE-EXEMPT: SUPER_ADMIN account management. Addressed by primary key.
+  const target = await UNSAFE_unscopedPrisma.admin.findUnique({
+    where: { id },
+    select: { id: true, name: true, email: true, tenantId: true },
   });
-  const isSelf =
-    currentAdmin?.email?.toLowerCase() === target.email.toLowerCase();
+  if (!target) {
+    return NextResponse.json({ error: "Admin not found" }, { status: 404 });
+  }
+
+  const targetUser = await UNSAFE_unscopedPrisma.user.findUnique({
+    where: { email: target.email.toLowerCase() },
+    select: { id: true, role: true },
+  });
+
+  const isSelf = target.id === ctx.userId;
 
   // Validate role change
-  let newRole = target.role;
-  if (role !== undefined && role !== target.role) {
+  let newRole = targetUser?.role ?? "ADMIN";
+  if (role !== undefined && role !== newRole) {
     if (role !== "ADMIN" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ error: "Invalid role" }, { status: 400 });
     }
@@ -179,12 +298,12 @@ export const PATCH = withAuth(async (request: NextRequest) => {
         { status: 400 }
       );
     }
-    // Never demote the last super admin in this scope
-    if (target.role === "SUPER_ADMIN" && role !== "SUPER_ADMIN") {
-      const superAdmins = await ctx.db.user.count({
+    // Never demote the last super admin, or nobody can administer.
+    if (newRole === "SUPER_ADMIN" && role !== "SUPER_ADMIN") {
+      const supers = await UNSAFE_unscopedPrisma.user.count({
         where: { role: "SUPER_ADMIN" },
       });
-      if (superAdmins <= 1) {
+      if (supers <= 1) {
         return NextResponse.json(
           { error: "Cannot demote the last super admin" },
           { status: 400 }
@@ -194,7 +313,6 @@ export const PATCH = withAuth(async (request: NextRequest) => {
     newRole = role;
   }
 
-  // Validate password (only when provided)
   if (password !== undefined && password !== "" && password.length < 6) {
     return NextResponse.json(
       { error: "Password must be at least 6 characters" },
@@ -202,18 +320,28 @@ export const PATCH = withAuth(async (request: NextRequest) => {
     );
   }
 
-  // Validate email uniqueness when changing.
   const newEmail =
-    email !== undefined && email !== "" ? email.toLowerCase() : target.email;
+    email !== undefined && email !== ""
+      ? String(email).toLowerCase().trim()
+      : target.email;
+
   if (newEmail !== target.email) {
-    // SCOPE-EXEMPT: User.email is globally unique, so a rename must not collide
-    // with an account in another scope. Only existence is used; the other
-    // scope's row is never returned or described.
-    const existing = await UNSAFE_unscopedPrisma.user.findUnique({
-      where: { email: newEmail },
-      select: { id: true },
-    });
-    if (existing && existing.id !== target.id) {
+    // SCOPE-EXEMPT: Admin.email and User.email are globally unique, so a rename
+    // must not collide with an account in another scope. Existence only.
+    const [clashAdmin, clashUser] = await Promise.all([
+      UNSAFE_unscopedPrisma.admin.findUnique({
+        where: { email: newEmail },
+        select: { id: true },
+      }),
+      UNSAFE_unscopedPrisma.user.findUnique({
+        where: { email: newEmail },
+        select: { id: true },
+      }),
+    ]);
+    if (
+      (clashAdmin && clashAdmin.id !== target.id) ||
+      (clashUser && clashUser.id !== targetUser?.id)
+    ) {
       return NextResponse.json(
         { error: "A user with this email already exists" },
         { status: 400 }
@@ -221,8 +349,8 @@ export const PATCH = withAuth(async (request: NextRequest) => {
     }
   }
 
-  // Update the credential row first (matched by the original email, scoped)
-  const adminResult = await updateAdminAccount(ctx.tenantId, target.email, {
+  // The credential row lives in the ADMIN's own scope.
+  const adminResult = await updateAdminAccount(target.tenantId, target.email, {
     name,
     email: newEmail,
     password,
@@ -231,73 +359,106 @@ export const PATCH = withAuth(async (request: NextRequest) => {
     return NextResponse.json({ error: adminResult.error }, { status: 400 });
   }
 
-  const user = await ctx.db.user.update({
-    where: { id: target.id },
-    data: {
-      ...(name !== undefined && { name }),
-      email: newEmail,
-      role: newRole,
-    },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      role: true,
-      createdAt: true,
-    },
-  });
+  if (targetUser) {
+    await UNSAFE_unscopedPrisma.user.update({
+      where: { id: targetUser.id },
+      data: {
+        ...(name !== undefined && { name }),
+        email: newEmail,
+        role: newRole,
+      },
+    });
+  }
+
+  // Keep the scope's label in step with the admin's name.
+  if (name !== undefined) {
+    await UNSAFE_unscopedPrisma.tenant.updateMany({
+      where: { ownerAdminId: target.id },
+      data: { name },
+    });
+  }
 
   await logAudit({
     action: "CONFIG_UPDATE",
     entity: "admin",
     entityId: target.id,
     userName: ctx.name,
-    details: `User updated: ${newEmail}`,
-    tenantId: ctx.tenantId,
+    details: `Admin updated: ${newEmail}`,
+    tenantId: target.tenantId,
   });
 
-  return NextResponse.json({ user });
+  return NextResponse.json({
+    user: {
+      id: target.id,
+      name: name ?? target.name,
+      email: newEmail,
+      role: newRole,
+    },
+  });
 });
 
 /**
  * DELETE /api/admin/users
- * Delete a user inside the currently-active scope.
+ * Body: { id: <Admin.id>, deleteScopeData?: boolean }
+ *
+ * Delete an ADMIN and the scope they own.
+ *
+ * Refuses by default when their scope still holds drivers, contacts or trip
+ * sheets: deleting the ADMIN would otherwise strand that data where nothing but
+ * the scope switcher can reach it. Deactivation is the reversible option and is
+ * what the 409 points at. Pass deleteScopeData: true to delete the workspace and
+ * everything in it.
  */
 export const DELETE = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireRole(ctx, "SUPER_ADMIN");
 
-  const { id } = await request.json();
+  const { id, deleteScopeData } = await request.json();
 
   if (!id) {
-    return NextResponse.json({ error: "User ID is required" }, { status: 400 });
+    return NextResponse.json({ error: "Admin ID is required" }, { status: 400 });
   }
 
-  const target = await ctx.db.user.findFirst({ where: { id } });
-  if (!target) {
-    return NextResponse.json({ error: "User not found" }, { status: 404 });
-  }
-
-  const currentAdmin = await ctx.db.admin.findFirst({
-    where: { id: ctx.userId },
-    select: { email: true },
-  });
-  const isSelf =
-    currentAdmin?.email?.toLowerCase() === target.email.toLowerCase();
-
-  if (isSelf) {
+  if (id === ctx.userId) {
     return NextResponse.json(
       { error: "You cannot delete your own account" },
       { status: 400 }
     );
   }
 
-  // Never delete the last super admin in this scope
-  if (target.role === "SUPER_ADMIN") {
-    const superAdmins = await ctx.db.user.count({
+  // SCOPE-EXEMPT: SUPER_ADMIN account management. Addressed by primary key.
+  const target = await UNSAFE_unscopedPrisma.admin.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      email: true,
+      tenantId: true,
+      tenant: {
+        select: {
+          id: true,
+          slug: true,
+          _count: {
+            select: { drivers: true, contacts: true, tripSheets: true },
+          },
+        },
+      },
+    },
+  });
+  if (!target) {
+    return NextResponse.json({ error: "Admin not found" }, { status: 404 });
+  }
+
+  const targetUser = await UNSAFE_unscopedPrisma.user.findUnique({
+    where: { email: target.email.toLowerCase() },
+    select: { id: true, role: true },
+  });
+
+  // Never delete the last super admin.
+  if (targetUser?.role === "SUPER_ADMIN") {
+    const supers = await UNSAFE_unscopedPrisma.user.count({
       where: { role: "SUPER_ADMIN" },
     });
-    if (superAdmins <= 1) {
+    if (supers <= 1) {
       return NextResponse.json(
         { error: "Cannot delete the last super admin" },
         { status: 400 }
@@ -305,17 +466,81 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     }
   }
 
-  // Remove the credential row (scoped, matched by email), then the user record.
-  await deleteAdminAccount(ctx.tenantId, target.email);
-  await ctx.db.user.delete({ where: { id: target.id } });
+  const counts = target.tenant?._count ?? {
+    drivers: 0,
+    contacts: 0,
+    tripSheets: 0,
+  };
+  const hasData = counts.drivers + counts.contacts + counts.tripSheets > 0;
+
+  if (hasData && !deleteScopeData) {
+    return NextResponse.json(
+      {
+        error:
+          "This admin's workspace still contains data. Deactivate them instead, " +
+          "or confirm deletion of the workspace and everything in it.",
+        requiresConfirmation: true,
+        counts,
+      },
+      { status: 409 }
+    );
+  }
+
+  const tenantId = target.tenantId;
+  const isRootScope = tenantId === ctx.homeTenantId;
+
+  await UNSAFE_unscopedPrisma.$transaction(async (tx) => {
+    if (hasData && deleteScopeData) {
+      // Order matters: Stop is Restrict-referenced to Contact, and TripSheet
+      // cascades to Stop, so stops and sheets go before contacts and drivers.
+      await tx.stop.deleteMany({ where: { tenantId } });
+      await tx.tripSheet.deleteMany({ where: { tenantId } });
+      await tx.contact.deleteMany({ where: { tenantId } });
+      await tx.driver.deleteMany({ where: { tenantId } });
+      await tx.importedFile.deleteMany({ where: { tenantId } });
+      await tx.cloudAccount.deleteMany({ where: { tenantId } });
+      await tx.appConfig.deleteMany({ where: { tenantId } });
+    }
+
+    if (targetUser) {
+      await tx.user.delete({ where: { id: targetUser.id } });
+    }
+
+    // Release the ownership pointer before removing the Admin it references.
+    await tx.tenant.updateMany({
+      where: { ownerAdminId: target.id },
+      data: { ownerAdminId: null },
+    });
+
+    await tx.admin.delete({ where: { id: target.id } });
+
+    // Drop the now-empty scope, unless it is the root scope or still shared.
+    if (!isRootScope) {
+      const remainingAdmins = await tx.admin.count({ where: { tenantId } });
+      const remainingUsers = await tx.user.count({ where: { tenantId } });
+      if (remainingAdmins === 0 && remainingUsers === 0) {
+        // AuditLog.tenantId is nullable by design; detach rather than delete so
+        // the trail of what happened in that scope survives.
+        await tx.auditLog.updateMany({
+          where: { tenantId },
+          data: { tenantId: null },
+        });
+        await tx.tenant.delete({ where: { id: tenantId } });
+      }
+    }
+  });
 
   await logAudit({
     action: "CONFIG_UPDATE",
     entity: "admin",
     entityId: target.id,
     userName: ctx.name,
-    details: `User deleted: ${target.email}`,
-    tenantId: ctx.tenantId,
+    details: `Admin deleted: ${target.email}${
+      hasData && deleteScopeData
+        ? ` (workspace purged: ${counts.drivers} drivers, ${counts.contacts} contacts, ${counts.tripSheets} trip sheets)`
+        : ""
+    }`,
+    tenantId: ctx.homeTenantId,
   });
 
   return NextResponse.json({ success: true });

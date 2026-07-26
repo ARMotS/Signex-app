@@ -722,18 +722,63 @@ suite("cross-ADMIN isolation", () => {
 
   // ── Backups ──────────────────────────────────────────────────────────
   describe("backups", () => {
-    it("a purge cannot delete another scope's trip sheet", async () => {
+    // Backups no longer read trip sheets from the database — they archive the
+    // source files sitting in the trip-sheet `processed/` folder. Isolation
+    // therefore comes from that folder resolving per scope: each ADMIN has their
+    // own OneDrive connection and their own configured path.
+
+    it("listing backupable trip sheets reads the caller's own folder", async () => {
+      const { getBackupableTripSheets } = await import("@/lib/backup");
+
+      await getBackupableTripSheets(f.a.tenantId);
+
+      const urls = graphCalls.map((c) => c.url).join(" ");
+      expect(urls).toContain("folder-item-A");
+      expect(urls).not.toContain("folder-item-B");
+      expect(graphCalls.every((c) => c.token === "access-token-A")).toBe(true);
+    });
+
+    it("listing backupable invoices reads the caller's own invoice folder", async () => {
+      const { getBackupableInvoices } = await import("@/lib/backup");
+
+      await getBackupableInvoices(f.b.tenantId);
+
+      const urls = graphCalls.map((c) => c.url).join(" ");
+      expect(urls).toContain("invoice-folder-B");
+      expect(urls).not.toContain("invoice-folder-A");
+      expect(graphCalls.every((c) => c.token === "access-token-B")).toBe(true);
+    });
+
+    it("a purge acts only through the caller's own OneDrive connection", async () => {
       const { purgeBackedUpTripSheets } = await import("@/lib/backup");
 
+      // Naming a file that lives in another ADMIN's processed/ folder resolves
+      // against THIS scope's drive with THIS scope's token, so it matches
+      // nothing and no delete is ever issued.
+      //
+      // `deleted` counts 1 because the purge is deliberately idempotent —
+      // "already gone" is treated as success. The isolation guarantee is not the
+      // count, it's that no request ever reached B's drive, so assert that.
       const result = await purgeBackedUpTripSheets(f.a.tenantId, [
-        f.b.tripSheet.id,
+        "route-b.csv",
       ]);
 
-      expect(result.deleted).toBe(0);
-      expect(result.failed).toContain(f.b.tripSheet.id);
-      expect(
-        await db().tripSheet.findUnique({ where: { id: f.b.tripSheet.id } })
-      ).not.toBeNull();
+      expect(result.failed).toHaveLength(0);
+      expect(graphCalls.every((c) => c.token === "access-token-A")).toBe(true);
+      expect(graphCalls.map((c) => c.url).join(" ")).not.toContain("folder-item-B");
+      // No DELETE was issued at all — nothing was found to delete.
+      expect(graphCalls.some((c) => c.url.includes("/items/") && c.token === "access-token-B")).toBe(false);
+    });
+
+    it("a backup summary for one scope never reaches the other's drive", async () => {
+      const { getBackupSummary } = await import("@/lib/backup");
+
+      await getBackupSummary(f.a.tenantId);
+
+      const urls = graphCalls.map((c) => c.url).join(" ");
+      expect(urls).not.toContain("folder-item-B");
+      expect(urls).not.toContain("invoice-folder-B");
+      expect(graphCalls.every((c) => c.token === "access-token-A")).toBe(true);
     });
   });
 
@@ -841,6 +886,327 @@ suite("cross-ADMIN isolation", () => {
       });
       expect(entry).not.toBeNull();
       expect(entry?.tenantId).toBe(f.superAdmin.tenantId);
+    });
+  });
+
+  // ── Public driver sign-in surface ─────────────────────────────────────
+  //
+  // The driver sign-in page runs pre-authentication, so these two endpoints are
+  // the only ones that expose anything without a session. Their exposure is
+  // deliberately minimal and these tests pin it down.
+  describe("public driver sign-in endpoints", () => {
+    it("the company list exposes company names and nothing else", async () => {
+      const { GET } = await import("@/app/api/auth/companies/route");
+
+      const body = await (await GET()).json();
+      const serialized = JSON.stringify(body);
+
+      // No driver names, emails, counts or admin identities may appear.
+      expect(serialized).not.toContain("Jane Delivery");
+      expect(serialized).not.toContain("admin-a@example.test");
+      expect(serialized).not.toContain("onedrive-a@example.test");
+      expect(serialized).not.toContain("Acme Trading");
+      for (const c of body.companies) {
+        expect(Object.keys(c).sort()).toEqual(["id", "name"]);
+      }
+    });
+
+    it("the driver list requires a company — there is no list-everything mode", async () => {
+      const { GET } = await import("@/app/api/auth/drivers/route");
+
+      const res = await GET(req("/api/auth/drivers"));
+      expect(res.status).toBe(400);
+    });
+
+    it("the driver list returns only the requested company's drivers", async () => {
+      const { GET } = await import("@/app/api/auth/drivers/route");
+
+      const bodyA = await (
+        await GET(req(`/api/auth/drivers?company=${f.a.tenantId}`))
+      ).json();
+
+      expect(bodyA.drivers.map((d: any) => d.id)).toEqual([f.a.driver.id]);
+      expect(bodyA.drivers.map((d: any) => d.id)).not.toContain(f.b.driver.id);
+    });
+
+    it("the driver list leaks no delivery counts or scope ids", async () => {
+      const { GET } = await import("@/app/api/auth/drivers/route");
+
+      const body = await (
+        await GET(req(`/api/auth/drivers?company=${f.a.tenantId}`))
+      ).json();
+
+      // The old endpoint returned stopCount/signedCount and tenantId. Gone.
+      for (const d of body.drivers) {
+        expect(Object.keys(d).sort()).toEqual(["id", "name"]);
+      }
+      expect(JSON.stringify(body)).not.toContain(f.a.tenantId);
+    });
+
+    it("an unknown company id yields an empty list, not an error", async () => {
+      const { GET } = await import("@/app/api/auth/drivers/route");
+
+      // Same response as a deactivated company, so tenant ids cannot be probed.
+      const body = await (
+        await GET(req("/api/auth/drivers?company=does-not-exist"))
+      ).json();
+      expect(body.drivers).toEqual([]);
+    });
+
+    it("deactivating an ADMIN hides their company and drivers from sign-in", async () => {
+      const companies = await import("@/app/api/auth/companies/route");
+      const driversRoute = await import("@/app/api/auth/drivers/route");
+
+      await db().admin.update({
+        where: { id: f.b.admin.id },
+        data: { active: false },
+      });
+
+      const companyBody = await (await companies.GET()).json();
+      expect(companyBody.companies.map((c: any) => c.id)).not.toContain(
+        f.b.tenantId
+      );
+
+      const driverBody = await (
+        await driversRoute.GET(req(`/api/auth/drivers?company=${f.b.tenantId}`))
+      ).json();
+      expect(driverBody.drivers).toEqual([]);
+
+      await db().admin.update({
+        where: { id: f.b.admin.id },
+        data: { active: true },
+      });
+    });
+  });
+
+  // ── Admin deactivation ───────────────────────────────────────────────
+  describe("admin deactivation", () => {
+    it("a deactivated ADMIN cannot log in", async () => {
+      const { loginAdmin } = await import("@/lib/accounts");
+
+      await db().admin.update({
+        where: { id: f.b.admin.id },
+        data: { active: false },
+      });
+
+      const result = await loginAdmin(f.b.admin.email, "password123");
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/deactivated/i);
+
+      await db().admin.update({
+        where: { id: f.b.admin.id },
+        data: { active: true },
+      });
+    });
+
+    it("their drivers can still sign in — deactivating an office account does not strand drivers", async () => {
+      const { loginDriver } = await import("@/lib/accounts");
+
+      await db().admin.update({
+        where: { id: f.b.admin.id },
+        data: { active: false },
+      });
+
+      const result = await loginDriver("Jane Delivery", "2222", f.b.tenantId);
+      expect(result.success).toBe(true);
+      expect(result.account?.tenantId).toBe(f.b.tenantId);
+
+      await db().admin.update({
+        where: { id: f.b.admin.id },
+        data: { active: true },
+      });
+    });
+
+    it("a wrong password on a deactivated account still says only invalid credentials", async () => {
+      const { loginAdmin } = await import("@/lib/accounts");
+
+      await db().admin.update({
+        where: { id: f.b.admin.id },
+        data: { active: false },
+      });
+
+      // Checked after the password, so the deactivation message cannot be used
+      // to discover which emails exist.
+      const result = await loginAdmin(f.b.admin.email, "wrong-password");
+      expect(result.error).toBe("Invalid email or password");
+
+      await db().admin.update({
+        where: { id: f.b.admin.id },
+        data: { active: true },
+      });
+    });
+
+    it("SUPER_ADMIN can deactivate and reactivate an ADMIN", async () => {
+      const { PUT } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+
+      const off = await PUT(
+        req("/api/admin/users", {
+          method: "PUT",
+          body: { id: f.b.admin.id, active: false },
+        })
+      );
+      expect(off.status).toBe(200);
+      expect(
+        (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.active
+      ).toBe(false);
+
+      const on = await PUT(
+        req("/api/admin/users", {
+          method: "PUT",
+          body: { id: f.b.admin.id, active: true },
+        })
+      );
+      expect(on.status).toBe(200);
+      expect(
+        (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.active
+      ).toBe(true);
+    });
+
+    it("deactivating revokes the session token so the admin is logged out at once", async () => {
+      const { PUT } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+
+      await db().admin.update({
+        where: { id: f.b.admin.id },
+        data: { sessionToken: "live-token" },
+      });
+
+      await PUT(
+        req("/api/admin/users", {
+          method: "PUT",
+          body: { id: f.b.admin.id, active: false },
+        })
+      );
+
+      expect(
+        (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionToken
+      ).toBeNull();
+
+      await db().admin.update({
+        where: { id: f.b.admin.id },
+        data: { active: true },
+      });
+    });
+
+    it("a SUPER_ADMIN cannot deactivate themselves", async () => {
+      const { PUT } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+
+      const res = await PUT(
+        req("/api/admin/users", {
+          method: "PUT",
+          body: { id: f.superAdmin.id, active: false },
+        })
+      );
+      expect(res.status).toBe(400);
+    });
+
+    it("an ADMIN cannot deactivate anyone", async () => {
+      const { PUT } = await import("@/app/api/admin/users/route");
+      useSession(adminSession(f.a));
+
+      const res = await PUT(
+        req("/api/admin/users", {
+          method: "PUT",
+          body: { id: f.b.admin.id, active: false },
+        })
+      );
+      expect(res.status).toBe(403);
+    });
+  });
+
+  // ── The Users console ────────────────────────────────────────────────
+  describe("the Users console", () => {
+    it("lists every ADMIN across all scopes, with the workspace each owns", async () => {
+      // This is the regression that made the console appear empty: each ADMIN now
+      // lives in its own tenant, so a scoped query showed the SUPER_ADMIN only
+      // itself.
+      const { GET } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+
+      const body = await (await GET(req("/api/admin/users"))).json();
+      const emails = body.users.map((u: any) => u.email).sort();
+
+      expect(emails).toContain(f.a.admin.email);
+      expect(emails).toContain(f.b.admin.email);
+      expect(emails).toContain(f.superAdmin.email);
+
+      const rowA = body.users.find((u: any) => u.email === f.a.admin.email);
+      expect(rowA.scope.tenantId).toBe(f.a.tenantId);
+      expect(rowA.active).toBe(true);
+      expect(rowA.scope.counts.drivers).toBe(1);
+    });
+
+    it("marks the caller's own row so the UI can block self-destructive actions", async () => {
+      const { GET } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+
+      const body = await (await GET(req("/api/admin/users"))).json();
+      const self = body.users.filter((u: any) => u.isSelf);
+      expect(self).toHaveLength(1);
+      expect(self[0].email).toBe(f.superAdmin.email);
+    });
+
+    it("exposes no scoped business data through the console", async () => {
+      const { GET } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+
+      const serialized = JSON.stringify(
+        await (await GET(req("/api/admin/users"))).json()
+      );
+
+      // Counts are fine; actual records are not.
+      expect(serialized).not.toContain("Jane Delivery");
+      expect(serialized).not.toContain("Acme Trading");
+      expect(serialized).not.toContain("INV-1001");
+      expect(serialized).not.toContain("onedrive-a@example.test");
+      expect(serialized).not.toContain("access-token");
+    });
+
+    it("an ADMIN cannot list the console", async () => {
+      const { GET } = await import("@/app/api/admin/users/route");
+      useSession(adminSession(f.a));
+
+      expect((await GET(req("/api/admin/users"))).status).toBe(403);
+    });
+
+    it("refuses to delete an ADMIN whose workspace still holds data", async () => {
+      const { DELETE } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+
+      const res = await DELETE(
+        req("/api/admin/users", {
+          method: "DELETE",
+          body: { id: f.b.admin.id },
+        })
+      );
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.requiresConfirmation).toBe(true);
+      expect(body.counts.drivers).toBe(1);
+
+      // Nothing was deleted.
+      expect(
+        await db().admin.findUnique({ where: { id: f.b.admin.id } })
+      ).not.toBeNull();
+      expect(
+        await db().driver.findUnique({ where: { id: f.b.driver.id } })
+      ).not.toBeNull();
+    });
+
+    it("a SUPER_ADMIN cannot delete themselves", async () => {
+      const { DELETE } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+
+      const res = await DELETE(
+        req("/api/admin/users", {
+          method: "DELETE",
+          body: { id: f.superAdmin.id },
+        })
+      );
+      expect(res.status).toBe(400);
     });
   });
 
