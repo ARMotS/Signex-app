@@ -80,15 +80,24 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // `company` is the tenant SLUG from the per-operator sign-in link. Resolve
+      // it to a scope here so the candidate search can be narrowed. It is only a
+      // hint: the PIN is what authenticates, and the resulting session scope comes
+      // from the matched driver row, never from this value.
+      let companyTenantId: string | undefined;
+      if (typeof company === "string" && company) {
+        // SCOPE-EXEMPT: pre-session slug lookup. Returns an id used only to narrow
+        // the candidate set; an unknown slug simply leaves it undefined.
+        const tenant = await UNSAFE_unscopedPrisma.tenant.findFirst({
+          where: { slug: company },
+          select: { id: true },
+        });
+        companyTenantId = tenant?.id;
+      }
+
       // Driver names are unique per scope, so loginDriver verifies the PIN
-      // against every same-named candidate and accepts only a unique match. The
-      // resulting scope comes from that row, never from `company` — that is only
-      // a hint used to narrow the candidate set.
-      const result = await loginDriver(
-        name,
-        pin,
-        typeof company === "string" && company ? company : undefined
-      );
+      // against every same-named candidate and accepts only a unique match.
+      const result = await loginDriver(name, pin, companyTenantId);
       if (!result.success) {
         recordFailedAttempt(ip, "auth", RATE_LIMITS.auth);
         return NextResponse.json({ error: result.error }, { status: 401 });

@@ -2,51 +2,55 @@ import { NextRequest, NextResponse } from "next/server";
 import { UNSAFE_unscopedPrisma, scopedPrisma } from "@/lib/db-scoped";
 
 /**
- * GET /api/auth/drivers?company=<tenantId>
+ * GET /api/auth/drivers?company=<tenant slug>
  *
- * Public. Populates the second dropdown on the driver sign-in page: the active
- * drivers belonging to ONE company.
+ * Public. Backs the per-ADMIN driver sign-in link at /select/<slug>: the active
+ * drivers belonging to ONE operator.
  *
  * ── History, and why this shape ───────────────────────────────────────────
- * The previous version of this endpoint took no parameter and returned every
+ * The original version of this endpoint took no parameter and returned every
  * driver in the installation together with their live delivery counts, so anyone
  * could enumerate all of an operator's drivers and see how much work each had.
- * That was the worst pre-auth leak in the app.
+ * That was the worst pre-authentication leak in the app.
  *
- * This version narrows it as far as the requested UX allows:
- *   - `company` is REQUIRED. There is no "list everything" mode.
- *   - Results are confined to that one scope, via the scoped client.
- *   - Only id and name are returned. Delivery counts, PIN state, tenantId,
- *     userId and timestamps are all withheld — the old counts leak is gone.
- *   - Nothing is returned at all if the company's owning ADMIN is deactivated.
+ * There is no longer a public list of operators either — the previous
+ * /api/auth/companies endpoint is gone. Reaching this one requires already
+ * knowing an operator's slug, which is a random token distributed by that ADMIN.
  *
- * A `company` value from the client is acceptable here precisely because it
- * grants nothing: it selects which names appear on a login form, and a name
- * without the matching PIN is not a credential. Every authenticated request
- * still derives its scope from the signed session cookie, never from this.
+ * What remains exposed, and to whom:
+ *   - `company` is REQUIRED. There is no list-everything mode.
+ *   - Only id and name per driver. No delivery counts, no PIN state, no tenantId,
+ *     no userId, no timestamps.
+ *   - Nothing at all if the operator's owning ADMIN is deactivated, and the
+ *     response is identical to an unknown slug so slugs cannot be probed.
+ *
+ * A slug from the client is acceptable precisely because it grants nothing: it
+ * selects which names appear on a login form, and a name without the matching PIN
+ * is not a credential. Every authenticated request still derives its scope from
+ * the signed session cookie, never from this.
  */
 export async function GET(request: NextRequest) {
-  const company = request.nextUrl.searchParams.get("company")?.trim();
+  const slug = request.nextUrl.searchParams.get("company")?.trim();
 
-  if (!company) {
+  if (!slug) {
     return NextResponse.json(
-      { error: "A company must be selected" },
+      { error: "A company link is required" },
       { status: 400 }
     );
   }
 
-  // SCOPE-EXEMPT: pre-session gate. Confirms the requested scope exists and its
+  // SCOPE-EXEMPT: pre-session gate. Resolves the slug to a scope and confirms its
   // owning ADMIN is active, before any driver name is revealed. Returns nothing
   // about the scope itself.
   const tenant = await UNSAFE_unscopedPrisma.tenant.findFirst({
-    where: { id: company, admins: { some: { active: true } } },
-    select: { id: true },
+    where: { slug, admins: { some: { active: true } } },
+    select: { id: true, companyName: true, name: true },
   });
 
-  // Same empty response for "no such company" and "company deactivated", so this
-  // cannot be used to probe which tenant ids exist.
+  // Same empty response for "no such slug" and "operator deactivated", so this
+  // cannot be used to discover which links are valid.
   if (!tenant) {
-    return NextResponse.json({ drivers: [] });
+    return NextResponse.json({ drivers: [], companyName: null });
   }
 
   const drivers = await scopedPrisma(tenant.id).driver.findMany({
@@ -55,5 +59,9 @@ export async function GET(request: NextRequest) {
     orderBy: { name: "asc" },
   });
 
-  return NextResponse.json({ drivers });
+  return NextResponse.json({
+    // Shown as a heading so a driver can tell they opened the right link.
+    companyName: tenant.companyName || tenant.name || null,
+    drivers,
+  });
 }

@@ -11,6 +11,13 @@ interface Driver {
 
 export default function DriversPage() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
+  // The per-operator sign-in link this admin gives their own drivers.
+  const [signInLink, setSignInLink] = useState<{
+    slug: string;
+    path: string;
+    companyName: string | null;
+  } | null>(null);
+  const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -32,6 +39,7 @@ export default function DriversPage() {
       const res = await fetch("/api/drivers");
       const data = await res.json();
       setDrivers(data.drivers || []);
+      setSignInLink(data.signInLink ?? null);
     } catch {
       // ignore
     } finally {
@@ -143,6 +151,22 @@ export default function DriversPage() {
   const activeDrivers = drivers.filter((d) => d.active);
   const inactiveDrivers = drivers.filter((d) => !d.active);
 
+  const fullSignInUrl =
+    signInLink && typeof window !== "undefined"
+      ? `${window.location.origin}${signInLink.path}`
+      : (signInLink?.path ?? "");
+
+  const copySignInLink = async () => {
+    if (!fullSignInUrl) return;
+    try {
+      await navigator.clipboard.writeText(fullSignInUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can be blocked; the link is selectable on screen anyway.
+    }
+  };
+
   return (
     <div className="animate-fade-in">
       <div className="flex items-start justify-between mb-8 gap-4">
@@ -170,6 +194,46 @@ export default function DriversPage() {
           Add Driver
         </button>
       </div>
+
+      {/* ─── Driver sign-in link ──────────────────────────────────────────
+          Drivers reach this workspace through a link unique to it. There is no
+          public list of companies, so holding this link is what lets a driver
+          see these names at all — share it with your drivers, not publicly. */}
+      {signInLink && (
+        <div className="bg-ink-card border border-ink-border rounded p-4 mb-6">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div className="min-w-0">
+              <p className="font-mono text-xs uppercase tracking-wide text-ink-muted mb-1.5">
+                Your drivers&apos; sign-in link
+              </p>
+              <code className="font-mono text-sm text-ink-black break-all">
+                {fullSignInUrl}
+              </code>
+              <p className="text-xs text-ink-muted mt-2 max-w-lg">
+                Send this to your drivers so they can sign in. Only your drivers
+                appear on it. Anyone with the link can see your drivers&apos;
+                names, so share it with them rather than publishing it.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={copySignInLink}
+                className="px-3 py-2 text-xs font-mono text-ink-black border border-ink-border rounded hover:bg-ink-surface transition-colors"
+              >
+                {copied ? "Copied" : "Copy link"}
+              </button>
+              <a
+                href={signInLink.path}
+                target="_blank"
+                rel="noreferrer"
+                className="px-3 py-2 text-xs font-mono text-ink-muted border border-ink-border rounded hover:text-ink-black hover:bg-ink-surface transition-colors"
+              >
+                Open
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ─── Add Driver Form ──────────────────────────────────────────── */}
       {showAdd && (

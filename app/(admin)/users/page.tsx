@@ -238,7 +238,7 @@ export default function UsersPage() {
   const isSelf = (user: User) => user.isSelf;
 
   return (
-    <div className="max-w-3xl">
+    <div className="max-w-6xl">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="font-mono text-lg font-medium text-ink-black">Users</h1>
@@ -341,8 +341,12 @@ export default function UsersPage() {
       ) : users.length === 0 ? (
         <div className="text-sm font-mono text-ink-muted py-8 text-center">No users found</div>
       ) : (
-        <div className="bg-ink-card border border-ink-border rounded overflow-hidden">
-          <table className="w-full text-sm font-mono">
+        // overflow-x-auto rather than overflow-hidden, and a min-width on the
+        // table: with six columns and three action buttons the Actions cell was
+        // being clipped, which made Deactivate and Delete look like they were
+        // missing entirely.
+        <div className="bg-ink-card border border-ink-border rounded overflow-x-auto">
+          <table className="w-full text-sm font-mono min-w-[880px]">
             <thead>
               <tr className="border-b border-ink-border bg-ink-surface">
                 <th className="text-left px-4 py-3 text-xs text-ink-muted uppercase tracking-wide">Name</th>
@@ -390,7 +394,7 @@ export default function UsersPage() {
                       {user.active ? "Active" : "Deactivated"}
                     </span>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-3 whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
                       <button
                         onClick={() => openEdit(user)}

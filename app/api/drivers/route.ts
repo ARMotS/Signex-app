@@ -22,7 +22,24 @@ export const GET = withAuth(async () => {
     orderBy: { name: "asc" },
   });
 
-  return NextResponse.json({ drivers });
+  // The sign-in link this ADMIN gives their drivers. The slug is a random token,
+  // and there is no public directory of operators, so holding the link is what
+  // grants sight of these driver names.
+  const scope = await ctx.db.tenant.findFirst({
+    where: { id: ctx.tenantId },
+    select: { slug: true, companyName: true, name: true },
+  });
+
+  return NextResponse.json({
+    drivers,
+    signInLink: scope
+      ? {
+          slug: scope.slug,
+          path: `/select/${scope.slug}`,
+          companyName: scope.companyName || scope.name || null,
+        }
+      : null,
+  });
 });
 
 export const POST = withAuth(async (request: NextRequest) => {

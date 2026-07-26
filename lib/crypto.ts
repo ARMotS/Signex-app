@@ -31,15 +31,31 @@ function loadKey(): Buffer {
   return key;
 }
 
-// Fail fast at import time, matching lib/session.ts's treatment of SESSION_SECRET.
-const KEY: Buffer = loadKey();
+/**
+ * Resolved on first use, not at import.
+ *
+ * Validating at import time made the key a BUILD dependency: Next's page-data
+ * collection imports every route module, so a missing or malformed key failed
+ * `next build` outright rather than failing the request that actually needed it.
+ * That also meant a preview deployment without the variable set could not build.
+ *
+ * Lazy resolution keeps the fail-fast behaviour where it belongs — the first
+ * encrypt or decrypt throws a clear error — while letting the app build and serve
+ * every route that does not touch stored tokens.
+ */
+let cachedKey: Buffer | null = null;
+
+function key(): Buffer {
+  if (!cachedKey) cachedKey = loadKey();
+  return cachedKey;
+}
 
 /**
  * Encrypt a secret for storage. Returns `v1:<iv>:<authTag>:<ciphertext>`.
  */
 export function encryptToken(plaintext: string): string {
   const iv = crypto.randomBytes(IV_BYTES);
-  const cipher = crypto.createCipheriv(ALGORITHM, KEY, iv);
+  const cipher = crypto.createCipheriv(ALGORITHM, key(), iv);
   const encrypted = Buffer.concat([
     cipher.update(plaintext, "utf8"),
     cipher.final(),
@@ -67,7 +83,7 @@ export function decryptToken(stored: string): string {
   const [, ivHex, authTagHex, payloadHex] = parts;
   const decipher = crypto.createDecipheriv(
     ALGORITHM,
-    KEY,
+    key(),
     Buffer.from(ivHex, "hex")
   );
   decipher.setAuthTag(Buffer.from(authTagHex, "hex"));

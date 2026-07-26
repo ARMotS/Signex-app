@@ -891,91 +891,105 @@ suite("cross-ADMIN isolation", () => {
 
   // ── Public driver sign-in surface ─────────────────────────────────────
   //
-  // The driver sign-in page runs pre-authentication, so these two endpoints are
-  // the only ones that expose anything without a session. Their exposure is
-  // deliberately minimal and these tests pin it down.
-  describe("public driver sign-in endpoints", () => {
-    it("the company list exposes company names and nothing else", async () => {
-      const { GET } = await import("@/app/api/auth/companies/route");
-
-      const body = await (await GET()).json();
-      const serialized = JSON.stringify(body);
-
-      // No driver names, emails, counts or admin identities may appear.
-      expect(serialized).not.toContain("Jane Delivery");
-      expect(serialized).not.toContain("admin-a@example.test");
-      expect(serialized).not.toContain("onedrive-a@example.test");
-      expect(serialized).not.toContain("Acme Trading");
-      for (const c of body.companies) {
-        expect(Object.keys(c).sort()).toEqual(["id", "name"]);
-      }
-    });
-
-    it("the driver list requires a company — there is no list-everything mode", async () => {
+  // Drivers sign in through a link unique to their operator: /select/<slug>.
+  // This is the only endpoint that exposes anything without a session, and
+  // reaching it requires already holding that operator's slug — there is no
+  // public directory of operators. These tests pin the exposure down.
+  describe("the per-operator driver sign-in endpoint", () => {
+    it("requires a company slug — there is no list-everything mode", async () => {
       const { GET } = await import("@/app/api/auth/drivers/route");
 
       const res = await GET(req("/api/auth/drivers"));
       expect(res.status).toBe(400);
     });
 
-    it("the driver list returns only the requested company's drivers", async () => {
+    it("returns only the drivers of the operator whose link was used", async () => {
       const { GET } = await import("@/app/api/auth/drivers/route");
 
       const bodyA = await (
-        await GET(req(`/api/auth/drivers?company=${f.a.tenantId}`))
+        await GET(req("/api/auth/drivers?company=scope-a"))
       ).json();
 
       expect(bodyA.drivers.map((d: any) => d.id)).toEqual([f.a.driver.id]);
       expect(bodyA.drivers.map((d: any) => d.id)).not.toContain(f.b.driver.id);
     });
 
-    it("the driver list leaks no delivery counts or scope ids", async () => {
+    it("exposes only id and name — no counts, no scope ids, no tokens", async () => {
       const { GET } = await import("@/app/api/auth/drivers/route");
 
       const body = await (
-        await GET(req(`/api/auth/drivers?company=${f.a.tenantId}`))
+        await GET(req("/api/auth/drivers?company=scope-a"))
       ).json();
 
-      // The old endpoint returned stopCount/signedCount and tenantId. Gone.
+      // The original endpoint returned stopCount/signedCount and tenantId. Gone.
       for (const d of body.drivers) {
         expect(Object.keys(d).sort()).toEqual(["id", "name"]);
       }
-      expect(JSON.stringify(body)).not.toContain(f.a.tenantId);
+      const serialized = JSON.stringify(body);
+      expect(serialized).not.toContain(f.a.tenantId);
+      expect(serialized).not.toContain("admin-a@example.test");
+      expect(serialized).not.toContain("access-token");
+      expect(serialized).not.toContain("Acme Trading");
     });
 
-    it("an unknown company id yields an empty list, not an error", async () => {
+    it("an unknown slug yields an empty list, not an error", async () => {
       const { GET } = await import("@/app/api/auth/drivers/route");
 
-      // Same response as a deactivated company, so tenant ids cannot be probed.
       const body = await (
-        await GET(req("/api/auth/drivers?company=does-not-exist"))
+        await GET(req("/api/auth/drivers?company=no-such-operator"))
       ).json();
       expect(body.drivers).toEqual([]);
+      expect(body.companyName).toBeNull();
     });
 
-    it("deactivating an ADMIN hides their company and drivers from sign-in", async () => {
-      const companies = await import("@/app/api/auth/companies/route");
-      const driversRoute = await import("@/app/api/auth/drivers/route");
+    it("a deactivated operator is indistinguishable from an unknown slug", async () => {
+      const { GET } = await import("@/app/api/auth/drivers/route");
 
       await db().admin.update({
         where: { id: f.b.admin.id },
         data: { active: false },
       });
 
-      const companyBody = await (await companies.GET()).json();
-      expect(companyBody.companies.map((c: any) => c.id)).not.toContain(
-        f.b.tenantId
-      );
-
-      const driverBody = await (
-        await driversRoute.GET(req(`/api/auth/drivers?company=${f.b.tenantId}`))
+      const deactivated = await (
+        await GET(req("/api/auth/drivers?company=scope-b"))
       ).json();
-      expect(driverBody.drivers).toEqual([]);
+      const unknown = await (
+        await GET(req("/api/auth/drivers?company=no-such-operator"))
+      ).json();
+
+      // Byte-identical, so a slug cannot be confirmed by probing.
+      expect(deactivated).toEqual(unknown);
 
       await db().admin.update({
         where: { id: f.b.admin.id },
         data: { active: true },
       });
+    });
+
+    it("an ADMIN's own sign-in link is scoped to them", async () => {
+      const { GET } = await import("@/app/api/drivers/route");
+      useSession(adminSession(f.a));
+
+      const body = await (await GET(req("/api/drivers"))).json();
+
+      expect(body.signInLink.slug).toBe("scope-a");
+      expect(body.signInLink.path).toBe("/select/scope-a");
+      expect(JSON.stringify(body)).not.toContain("scope-b");
+    });
+
+    it("signing in through one operator's link cannot authenticate another's driver", async () => {
+      const { loginDriver } = await import("@/lib/accounts");
+      const { UNSAFE_unscopedPrisma } = await import("@/lib/db-scoped");
+
+      const scopeA = await UNSAFE_unscopedPrisma.tenant.findFirst({
+        where: { slug: "scope-a" },
+        select: { id: true },
+      });
+
+      // Scope B's driver shares the name but has PIN 2222. Using scope A's link
+      // narrows the candidates to A, so B's PIN authenticates nothing here.
+      const result = await loginDriver("Jane Delivery", "2222", scopeA!.id);
+      expect(result.success).toBe(false);
     });
   });
 
