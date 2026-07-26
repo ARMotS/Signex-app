@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { getCloudSyncRoots } from "@/lib/cloud-detect";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const GET = withAuth(async () => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const roots = getCloudSyncRoots();

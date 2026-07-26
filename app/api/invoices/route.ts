@@ -1,20 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listInvoiceFiles, getInvoiceFolderPath, deleteInvoiceFiles, deleteInvoiceOriginalOnly, findDuplicateInvoices } from "@/lib/invoices";
 import { getCloudAccountStatus } from "@/lib/microsoft-graph";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const GET = withAuth(async () => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
-  const cloudStatus = await getCloudAccountStatus();
+  const cloudStatus = await getCloudAccountStatus(ctx.tenantId);
   const isOneDrive = !!cloudStatus?.invoiceFolderItemId;
 
   const [invoices, folderPath, duplicates] = await Promise.all([
-    listInvoiceFiles(),
-    getInvoiceFolderPath(),
-    findDuplicateInvoices(),
+    listInvoiceFiles(ctx.tenantId),
+    getInvoiceFolderPath(ctx.tenantId),
+    findDuplicateInvoices(ctx.tenantId),
   ]);
 
   const signedCount = invoices.filter((i) => i.isSigned).length;
@@ -32,7 +32,7 @@ export const GET = withAuth(async () => {
 });
 
 export const DELETE = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { filenames, mode = "both" } = await request.json();
@@ -44,8 +44,8 @@ export const DELETE = withAuth(async (request: NextRequest) => {
   }
 
   const result = mode === "original_only"
-    ? await deleteInvoiceOriginalOnly(filenames)
-    : await deleteInvoiceFiles(filenames);
+    ? await deleteInvoiceOriginalOnly(ctx.tenantId, filenames)
+    : await deleteInvoiceFiles(ctx.tenantId, filenames);
 
   return NextResponse.json({
     success: true,

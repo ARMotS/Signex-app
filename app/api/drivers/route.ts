@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import {
   createDriverAccount,
@@ -9,11 +8,11 @@ import {
 } from "@/lib/accounts";
 
 export const GET = withAuth(async () => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
-  const drivers = await prisma.driver.findMany({
-    where: { tenantId: ctx.tenantId },
+  // Scoped client — this list can only ever contain this ADMIN's own drivers.
+  const drivers = await ctx.db.driver.findMany({
     select: {
       id: true,
       name: true,
@@ -27,7 +26,7 @@ export const GET = withAuth(async () => {
 });
 
 export const POST = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { name, pin } = await request.json();
@@ -48,7 +47,7 @@ export const POST = withAuth(async (request: NextRequest) => {
 });
 
 export const PUT = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { id, ...updates } = await request.json();
@@ -60,13 +59,14 @@ export const PUT = withAuth(async (request: NextRequest) => {
     );
   }
 
-  // Verify driver belongs to this tenant
-  const driver = await prisma.driver.findUnique({ where: { id } });
-  if (!driver || driver.tenantId !== ctx.tenantId) {
+  // Scoped read — a driver in another ADMIN's scope is not found (404, not 403,
+  // so the id's existence elsewhere is not disclosed).
+  const driver = await ctx.db.driver.findFirst({ where: { id } });
+  if (!driver) {
     return NextResponse.json({ error: "Driver not found" }, { status: 404 });
   }
 
-  const result = await updateDriver(id, updates);
+  const result = await updateDriver(ctx.tenantId, id, updates);
   if (!result.success) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }
@@ -75,7 +75,7 @@ export const PUT = withAuth(async (request: NextRequest) => {
 });
 
 export const DELETE = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { id } = await request.json();
@@ -87,13 +87,12 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     );
   }
 
-  // Verify driver belongs to this tenant
-  const driver = await prisma.driver.findUnique({ where: { id } });
-  if (!driver || driver.tenantId !== ctx.tenantId) {
+  const driver = await ctx.db.driver.findFirst({ where: { id } });
+  if (!driver) {
     return NextResponse.json({ error: "Driver not found" }, { status: 404 });
   }
 
-  const result = await deleteDriver(id);
+  const result = await deleteDriver(ctx.tenantId, id);
   if (!result.success) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }

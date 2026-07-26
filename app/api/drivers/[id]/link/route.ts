@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { UNSAFE_unscopedPrisma } from "@/lib/db-scoped";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const POST = withAuth(async (request: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { id } = await params;
@@ -14,34 +14,42 @@ export const POST = withAuth(async (request: NextRequest, { params }: { params: 
     return NextResponse.json({ error: "Email is required" }, { status: 400 });
   }
 
-  const driver = await prisma.driver.findUnique({ where: { id } });
-  if (!driver || driver.tenantId !== ctx.tenantId) {
+  const driver = await ctx.db.driver.findFirst({ where: { id } });
+  if (!driver) {
     return NextResponse.json({ error: "Driver not found" }, { status: 404 });
   }
 
-  // Find or create User with DRIVER role in same tenant
-  let user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+  // SCOPE-EXEMPT: User.email is globally unique, so this collision check must
+  // span scopes. Only the boolean outcome is used — if the email belongs to
+  // another scope the request is refused without revealing which.
+  const existingUser = await UNSAFE_unscopedPrisma.user.findUnique({
+    where: { email: email.toLowerCase() },
+    select: { id: true, email: true, tenantId: true },
+  });
 
-  if (user) {
-    if (user.tenantId !== ctx.tenantId) {
+  let user: { id: string; email: string };
+
+  if (existingUser) {
+    if (existingUser.tenantId !== ctx.tenantId) {
       return NextResponse.json(
-        { error: "This email belongs to a different organization" },
+        { error: "This email is already in use" },
         { status: 400 }
       );
     }
+    user = { id: existingUser.id, email: existingUser.email };
   } else {
-    user = await prisma.user.create({
+    user = await ctx.db.user.create({
       data: {
         email: email.toLowerCase(),
         name: driver.name,
         role: "DRIVER",
-        tenantId: ctx.tenantId,
       },
+      select: { id: true, email: true },
     });
   }
 
-  // Link driver to user
-  await prisma.driver.update({
+  // Link driver to user — scoped, so this can only touch our own driver row.
+  await ctx.db.driver.update({
     where: { id },
     data: { userId: user.id },
   });

@@ -16,7 +16,7 @@ import * as XLSX from "xlsx";
 import crypto from "crypto";
 import { listInvoiceFiles } from "./invoices";
 import { listDrivers } from "./accounts";
-import { prisma } from "./db";
+import { scopedPrisma } from "./db-scoped";
 import type { TripStop } from "./trip-data";
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -193,7 +193,17 @@ function parseExcelContent(buffer: Buffer): string[][] {
 
 // ─── Main Parse Function ──────────────────────────────────────────────────
 
+/**
+ * Parse a trip sheet within ONE scope.
+ *
+ * The matching rules are unchanged — drivers are matched by name and the sheet's
+ * regNo is carried through as trip metadata. What changed is the candidate pool:
+ * driver names, invoice files and already-signed history all come from
+ * `tenantId` only, so an ADMIN's upload can never bind to another ADMIN's driver
+ * or reveal that another ADMIN already signed the same invoice number.
+ */
 export async function parseTripSheet(
+  tenantId: string,
   fileBuffer: Buffer,
   filename: string
 ): Promise<ParseResult> {
@@ -275,9 +285,9 @@ export async function parseTripSheet(
       }))
       .filter((row) => row.invoiceNumber !== "");
 
-    // 4. Get existing invoices and drivers for matching
-    const invoiceFiles = await listInvoiceFiles();
-    const drivers = await listDrivers();
+    // 4. Get this scope's existing invoices and drivers for matching
+    const invoiceFiles = await listInvoiceFiles(tenantId);
+    const drivers = await listDrivers(tenantId);
 
     // Build invoice lookup: normalized number → filename
     const invoiceLookup = new Map<string, string>();
@@ -408,7 +418,11 @@ export async function parseTripSheet(
 
     // 7. Detect invoices that were already signed (DB or filesystem)
     const allInvoiceNumbers = parsedRows.map((r) => r.invoiceNumber).filter(Boolean);
-    const alreadySigned = await detectAlreadySignedInvoices(allInvoiceNumbers, invoiceFiles);
+    const alreadySigned = await detectAlreadySignedInvoices(
+      tenantId,
+      allInvoiceNumbers,
+      invoiceFiles
+    );
 
     return {
       success: true,
@@ -440,8 +454,13 @@ export async function parseTripSheet(
  * Checks two sources:
  *   1. Database: stops with status=SIGNED matching these invoice numbers
  *   2. Filesystem: files in the signed/ subfolder of the invoice folder
+ *
+ * Both sources are scoped. Invoice numbers are usually sequential per company,
+ * so an unscoped query here would very often collide with another ADMIN's rows
+ * and disclose their driver's name and signing time.
  */
 async function detectAlreadySignedInvoices(
+  tenantId: string,
   invoiceNumbers: string[],
   invoiceFiles: { filename: string; invoiceNumber: string; isSigned: boolean; signedAt?: string }[]
 ): Promise<AlreadySignedInvoice[]> {
@@ -450,8 +469,9 @@ async function detectAlreadySignedInvoices(
   const results: AlreadySignedInvoice[] = [];
   const seen = new Set<string>();
 
-  // Source 1: Check database for stops already signed with these invoice numbers
-  const signedStops = await prisma.stop.findMany({
+  // Source 1: Check this scope's database for stops already signed with these
+  // invoice numbers
+  const signedStops = await scopedPrisma(tenantId).stop.findMany({
     where: {
       invoiceNumber: { in: invoiceNumbers },
       status: "SIGNED",

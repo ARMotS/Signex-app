@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 // ─── GET ──────────────────────────────────────────────────────────────────────
 
 export const GET = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { searchParams } = request.nextUrl;
@@ -16,8 +15,9 @@ export const GET = withAuth(async (request: NextRequest) => {
   const missingEmail = searchParams.get("missingEmail") === "true";
   const skip = (page - 1) * limit;
 
+  // The scoped client injects tenantId — search can only ever match names,
+  // phone numbers and emails inside this ADMIN's own scope.
   const where = {
-    tenantId: ctx.tenantId,
     deletedAt: null,
     ...(missingEmail && { email: null }),
     ...(search && {
@@ -30,7 +30,7 @@ export const GET = withAuth(async (request: NextRequest) => {
   };
 
   const [contacts, total] = await Promise.all([
-    prisma.contact.findMany({
+    ctx.db.contact.findMany({
       where,
       skip,
       take: limit,
@@ -49,7 +49,7 @@ export const GET = withAuth(async (request: NextRequest) => {
         _count: { select: { stops: true } },
       },
     }),
-    prisma.contact.count({ where }),
+    ctx.db.contact.count({ where }),
   ]);
 
   return NextResponse.json({ contacts, total, page, limit });
@@ -58,7 +58,7 @@ export const GET = withAuth(async (request: NextRequest) => {
 // ─── POST ─────────────────────────────────────────────────────────────────────
 
 export const POST = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
@@ -68,9 +68,8 @@ export const POST = withAuth(async (request: NextRequest) => {
     return NextResponse.json({ error: "companyName is required" }, { status: 400 });
   }
 
-  const existing = await prisma.contact.findFirst({
+  const existing = await ctx.db.contact.findFirst({
     where: {
-      tenantId: ctx.tenantId,
       companyName: { equals: companyName.trim(), mode: "insensitive" },
       deletedAt: null,
     },
@@ -83,9 +82,8 @@ export const POST = withAuth(async (request: NextRequest) => {
     );
   }
 
-  const contact = await prisma.contact.create({
+  const contact = await ctx.db.contact.create({
     data: {
-      tenantId: ctx.tenantId,
       companyName: companyName.trim(),
       contactPerson: contactPerson?.trim() || null,
       email: email?.trim().toLowerCase() || null,

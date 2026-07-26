@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
 import { parseContactSheet } from "@/lib/contact-parser";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const POST = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const formData = await request.formData();
@@ -33,9 +32,10 @@ export const POST = withAuth(async (request: NextRequest) => {
   let updated = 0;
 
   for (const contact of parsed) {
-    const existing = await prisma.contact.findFirst({
+    // Duplicate detection is per-scope: importing a company another ADMIN
+    // already has must still create a contact here.
+    const existing = await ctx.db.contact.findFirst({
       where: {
-        tenantId: ctx.tenantId,
         companyName: { equals: contact.companyName.trim(), mode: "insensitive" },
         deletedAt: null,
       },
@@ -44,7 +44,7 @@ export const POST = withAuth(async (request: NextRequest) => {
 
     if (existing) {
       if (overwrite) {
-        await prisma.contact.update({
+        await ctx.db.contact.update({
           where: { id: existing.id },
           data: {
             contactPerson: contact.contactPerson?.trim() || undefined,
@@ -62,9 +62,8 @@ export const POST = withAuth(async (request: NextRequest) => {
       continue;
     }
 
-    await prisma.contact.create({
+    await ctx.db.contact.create({
       data: {
-        tenantId: ctx.tenantId,
         companyName: contact.companyName.trim(),
         contactPerson: contact.contactPerson?.trim() || null,
         email: contact.email?.trim().toLowerCase() || null,

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 // ─── PATCH ────────────────────────────────────────────────────────────────────
@@ -9,13 +8,15 @@ export const PATCH = withAuth(async (
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { id } = await params;
 
-  const record = await prisma.contact.findUnique({ where: { id } });
-  if (!record || record.tenantId !== ctx.tenantId) {
+  // Scoped read: a contact in another ADMIN's scope is simply not found — same
+  // 404 as an id that does not exist anywhere.
+  const record = await ctx.db.contact.findFirst({ where: { id } });
+  if (!record) {
     return NextResponse.json({ error: "Contact not found" }, { status: 404 });
   }
 
@@ -48,7 +49,7 @@ export const PATCH = withAuth(async (
     return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
   }
 
-  const contact = await prisma.contact.update({
+  const contact = await ctx.db.contact.update({
     where: { id },
     data,
   });
@@ -62,17 +63,17 @@ export const DELETE = withAuth(async (
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { id } = await params;
 
-  const record = await prisma.contact.findUnique({ where: { id } });
-  if (!record || record.tenantId !== ctx.tenantId) {
+  const record = await ctx.db.contact.findFirst({ where: { id } });
+  if (!record) {
     return NextResponse.json({ error: "Contact not found" }, { status: 404 });
   }
 
-  await prisma.contact.update({
+  await ctx.db.contact.update({
     where: { id },
     data: { deletedAt: new Date() },
   });

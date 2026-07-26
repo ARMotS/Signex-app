@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loginAdmin, loginDriver } from "@/lib/accounts";
 import { createSession } from "@/lib/session";
-import { prisma } from "@/lib/db";
+import { UNSAFE_unscopedPrisma } from "@/lib/db-scoped";
 import { recordFailedAttempt, clearAttempts, RATE_LIMITS } from "@/lib/rate-limit";
 
 function getClientIp(request: NextRequest): string {
@@ -16,6 +16,9 @@ function getClientIp(request: NextRequest): string {
  * POST /api/auth/login
  * Login for both admin and driver accounts.
  * Body: { role: "admin"|"driver", email?, password?, name?, pin? }
+ *
+ * Both paths resolve the caller's isolation scope from their own DB row — the
+ * client never supplies or influences it.
  */
 export async function POST(request: NextRequest) {
   const ip = getClientIp(request);
@@ -39,31 +42,32 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: result.error }, { status: 401 });
       }
 
-      // Look up User record to get tenantId and role
-      const user = await prisma.user.findUnique({
-        where: { email: email.toLowerCase() },
+      // The scope now comes from Admin.tenantId directly. It used to be looked
+      // up by joining User on email, which meant a missing or drifted User row
+      // either blocked login or resolved the wrong scope.
+      // SCOPE-EXEMPT: pre-session role lookup, keyed on a globally unique email.
+      const user = await UNSAFE_unscopedPrisma.user.findUnique({
+        where: { email: String(email).toLowerCase() },
+        select: { role: true },
       });
-
-      if (!user) {
-        return NextResponse.json(
-          { error: "No user account linked to this email" },
-          { status: 403 }
-        );
-      }
 
       clearAttempts(ip, "auth");
 
       await createSession({
         id: result.account!.id,
-        role: user.role === "SUPER_ADMIN" ? "super_admin" : "admin",
+        role: user?.role === "SUPER_ADMIN" ? "super_admin" : "admin",
         name: result.account!.name,
         email: result.account!.email,
-        tenantId: user.tenantId,
+        tenantId: result.account!.tenantId,
       });
 
       return NextResponse.json({
         success: true,
-        account: result.account,
+        account: {
+          id: result.account!.id,
+          name: result.account!.name,
+          email: result.account!.email,
+        },
       });
     }
 
@@ -76,6 +80,9 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // Driver names are unique per scope, so loginDriver verifies the PIN
+      // against every same-named candidate and accepts only a unique match. The
+      // resulting scope comes from that row.
       const result = await loginDriver(name, pin);
       if (!result.success) {
         recordFailedAttempt(ip, "auth", RATE_LIMITS.auth);
@@ -93,7 +100,11 @@ export async function POST(request: NextRequest) {
 
       return NextResponse.json({
         success: true,
-        account: result.account,
+        account: {
+          id: result.account!.id,
+          name: result.account!.name,
+          active: result.account!.active,
+        },
       });
     }
 

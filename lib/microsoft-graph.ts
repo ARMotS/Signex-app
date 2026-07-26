@@ -1,14 +1,30 @@
 /**
  * Microsoft Graph API client for OneDrive integration.
  * Handles OAuth token management (refresh) and file operations.
+ *
+ * ── Isolation contract ────────────────────────────────────────────────────
+ * Every function in this module takes `tenantId` as its FIRST argument, and the
+ * access token it uses is loaded from the CloudAccount row belonging to that
+ * scope and nothing else. There is no ambient "the OneDrive account" any more —
+ * each ADMIN connects their own drive, and an ADMIN's session can neither load
+ * another ADMIN's tokens nor list, read or write their files.
+ *
+ * `tenantId` MUST always come from the signed session cookie via getScope().
+ * No function here accepts an admin id or tenant id supplied by a client.
+ *
+ * Tokens are encrypted at rest (AES-256-GCM, lib/crypto.ts). Plaintext exists
+ * only in memory, for the duration of a request.
  */
 
-import { prisma } from "./db";
+import { scopedPrisma } from "./db-scoped";
+import { encryptToken, decryptToken } from "./crypto";
 
 const MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0";
 const GRAPH_API_URL = "https://graph.microsoft.com/v1.0";
 
 const SCOPES = ["Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "User.Read", "offline_access"];
+
+const PROVIDER = "onedrive";
 
 function getClientId(): string {
   const id = process.env.MICROSOFT_CLIENT_ID;
@@ -26,14 +42,14 @@ function getRedirectUri(): string {
   return process.env.MICROSOFT_REDIRECT_URI || `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/microsoft/callback`;
 }
 
-export function getAuthorizationUrl(state?: string): string {
+export function getAuthorizationUrl(state: string): string {
   const params = new URLSearchParams({
     client_id: getClientId(),
     response_type: "code",
     redirect_uri: getRedirectUri(),
     response_mode: "query",
     scope: SCOPES.join(" "),
-    ...(state && { state }),
+    state,
   });
   return `${MICROSOFT_AUTH_URL}/authorize?${params.toString()}`;
 }
@@ -92,93 +108,114 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> 
 }
 
 /**
- * Get a valid access token for the OneDrive cloud account.
- * Refreshes automatically if expired.
+ * Load this scope's OneDrive account row, or null if this ADMIN hasn't connected
+ * a drive. A scoped read — another scope's row is simply not visible.
  */
-export async function getValidAccessToken(): Promise<string | null> {
-  const account = await prisma.cloudAccount.findUnique({
-    where: { provider: "onedrive" },
+async function getAccount(tenantId: string) {
+  return scopedPrisma(tenantId).cloudAccount.findFirst({
+    where: { provider: PROVIDER },
   });
+}
 
+/**
+ * Get a valid access token for THIS scope's OneDrive account.
+ * Refreshes automatically if expired. Returns null if the scope has no
+ * connection — never falls back to another scope's token.
+ */
+export async function getValidAccessToken(tenantId: string): Promise<string | null> {
+  const account = await getAccount(tenantId);
   if (!account) return null;
 
   // If token expires in less than 5 minutes, refresh it
   const fiveMinutes = 5 * 60 * 1000;
   if (account.tokenExpiry.getTime() - Date.now() < fiveMinutes) {
     try {
-      const tokens = await refreshAccessToken(account.refreshToken);
+      const currentRefresh = decryptToken(account.refreshToken);
+      const tokens = await refreshAccessToken(currentRefresh);
       const newExpiry = new Date(Date.now() + tokens.expires_in * 1000);
 
-      await prisma.cloudAccount.update({
-        where: { provider: "onedrive" },
+      // Scoped update — writes back to this scope's row only.
+      await scopedPrisma(tenantId).cloudAccount.updateMany({
+        where: { provider: PROVIDER },
         data: {
-          accessToken: tokens.access_token,
-          refreshToken: tokens.refresh_token || account.refreshToken,
+          accessToken: encryptToken(tokens.access_token),
+          refreshToken: encryptToken(tokens.refresh_token || currentRefresh),
           tokenExpiry: newExpiry,
         },
       });
 
       return tokens.access_token;
     } catch (err) {
-      console.error("Failed to refresh OneDrive token:", err);
+      console.error(`Failed to refresh OneDrive token for scope ${tenantId}:`, err);
       return null;
     }
   }
 
-  return account.accessToken;
+  return decryptToken(account.accessToken);
 }
 
 /**
- * Save OAuth tokens after initial authorization.
+ * Save OAuth tokens after initial authorization, into ONE scope.
  */
-export async function saveCloudAccount(tokens: TokenResponse): Promise<void> {
+export async function saveCloudAccount(
+  tenantId: string,
+  tokens: TokenResponse
+): Promise<void> {
   const expiry = new Date(Date.now() + tokens.expires_in * 1000);
 
   // Fetch user profile to store account info
   let accountEmail: string | undefined;
   let accountName: string | undefined;
   try {
-    const profile = await graphGet("/me", tokens.access_token);
+    const profile = await graphGetWithToken("/me", tokens.access_token);
     accountEmail = profile.mail || profile.userPrincipalName;
     accountName = profile.displayName;
   } catch {
     // non-critical
   }
 
-  await prisma.cloudAccount.upsert({
-    where: { provider: "onedrive" },
-    update: {
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
-      tokenExpiry: expiry,
-      accountEmail,
-      accountName,
-    },
-    create: {
-      provider: "onedrive",
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
-      tokenExpiry: expiry,
-      accountEmail,
-      accountName,
-    },
+  const db = scopedPrisma(tenantId);
+  const existing = await getAccount(tenantId);
+
+  if (existing) {
+    await db.cloudAccount.updateMany({
+      where: { provider: PROVIDER },
+      data: {
+        accessToken: encryptToken(tokens.access_token),
+        refreshToken: encryptToken(tokens.refresh_token),
+        tokenExpiry: expiry,
+        accountEmail,
+        accountName,
+      },
+    });
+  } else {
+    await db.cloudAccount.create({
+      data: {
+        provider: PROVIDER,
+        accessToken: encryptToken(tokens.access_token),
+        refreshToken: encryptToken(tokens.refresh_token),
+        tokenExpiry: expiry,
+        accountEmail,
+        accountName,
+      },
+    });
+  }
+}
+
+/**
+ * Remove THIS scope's OneDrive connection. Other scopes are untouched.
+ */
+export async function disconnectCloudAccount(tenantId: string): Promise<void> {
+  await scopedPrisma(tenantId).cloudAccount.deleteMany({
+    where: { provider: PROVIDER },
   });
 }
 
 /**
- * Remove the stored OneDrive cloud account.
+ * Get this scope's cloud account status (without exposing tokens).
  */
-export async function disconnectCloudAccount(): Promise<void> {
-  await prisma.cloudAccount.deleteMany({ where: { provider: "onedrive" } });
-}
-
-/**
- * Get the current cloud account status (without exposing tokens).
- */
-export async function getCloudAccountStatus() {
-  const account = await prisma.cloudAccount.findUnique({
-    where: { provider: "onedrive" },
-  });
+export async function getCloudAccountStatus(tenantId: string) {
+  const account = await getAccount(tenantId);
 
   if (!account) return null;
 
@@ -197,13 +234,11 @@ export async function getCloudAccountStatus() {
 
 // ─── Graph API helpers ────────────────────────────────────────────────────
 
-async function graphGet(endpoint: string, accessToken?: string): Promise<any> {
-  const token = accessToken || (await getValidAccessToken());
-  if (!token) throw new Error("No valid OneDrive access token");
-
+/** Graph GET with an explicit token — used during the OAuth exchange only. */
+async function graphGetWithToken(endpoint: string, accessToken: string): Promise<any> {
   const url = endpoint.startsWith("http") ? endpoint : `${GRAPH_API_URL}${endpoint}`;
   const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${accessToken}` },
   });
 
   if (!res.ok) {
@@ -214,9 +249,19 @@ async function graphGet(endpoint: string, accessToken?: string): Promise<any> {
   return res.json();
 }
 
-async function graphGetBuffer(endpoint: string): Promise<Buffer> {
-  const token = await getValidAccessToken();
-  if (!token) throw new Error("No valid OneDrive access token");
+/** Resolve this scope's token or fail. Never falls through to another scope. */
+async function requireToken(tenantId: string): Promise<string> {
+  const token = await getValidAccessToken(tenantId);
+  if (!token) throw new Error("No valid OneDrive access token for this account");
+  return token;
+}
+
+async function graphGet(tenantId: string, endpoint: string): Promise<any> {
+  return graphGetWithToken(endpoint, await requireToken(tenantId));
+}
+
+async function graphGetBuffer(tenantId: string, endpoint: string): Promise<Buffer> {
+  const token = await requireToken(tenantId);
 
   const url = endpoint.startsWith("http") ? endpoint : `${GRAPH_API_URL}${endpoint}`;
   const res = await fetch(url, {
@@ -252,18 +297,24 @@ export interface OneDriveFolder {
 }
 
 /**
- * List the root folders in OneDrive.
+ * List the root folders in this scope's OneDrive.
  */
-export async function listRootFolders(): Promise<OneDriveItem[]> {
-  const data = await graphGet("/me/drive/root/children");
+export async function listRootFolders(tenantId: string): Promise<OneDriveItem[]> {
+  const data = await graphGet(tenantId, "/me/drive/root/children");
   return data.value || [];
 }
 
 /**
  * List children of a specific folder by item ID.
+ *
+ * The item ID is resolved against THIS scope's drive using THIS scope's token,
+ * so an ID belonging to another admin's drive returns a Graph 404.
  */
-export async function listFolderById(itemId: string): Promise<OneDriveItem[]> {
-  const data = await graphGet(`/me/drive/items/${itemId}/children`);
+export async function listFolderById(
+  tenantId: string,
+  itemId: string
+): Promise<OneDriveItem[]> {
+  const data = await graphGet(tenantId, `/me/drive/items/${itemId}/children`);
   return data.value || [];
 }
 
@@ -271,67 +322,87 @@ export async function listFolderById(itemId: string): Promise<OneDriveItem[]> {
  * List children of a folder by path.
  * Path should be relative to root, e.g. "Documents/TripSheets"
  */
-export async function listFolderByPath(folderPath: string): Promise<OneDriveItem[]> {
+export async function listFolderByPath(
+  tenantId: string,
+  folderPath: string
+): Promise<OneDriveItem[]> {
   const encodedPath = encodeURIComponent(folderPath).replace(/%2F/g, "/");
-  const data = await graphGet(`/me/drive/root:/${encodedPath}:/children`);
+  const data = await graphGet(tenantId, `/me/drive/root:/${encodedPath}:/children`);
   return data.value || [];
 }
 
 /**
  * Get folder metadata by path.
  */
-export async function getFolderByPath(folderPath: string): Promise<OneDriveItem> {
+export async function getFolderByPath(
+  tenantId: string,
+  folderPath: string
+): Promise<OneDriveItem> {
   const encodedPath = encodeURIComponent(folderPath).replace(/%2F/g, "/");
-  return graphGet(`/me/drive/root:/${encodedPath}`);
+  return graphGet(tenantId, `/me/drive/root:/${encodedPath}`);
 }
 
 /**
  * Download a file by its item ID. Returns raw Buffer.
  */
-export async function downloadFileById(itemId: string): Promise<Buffer> {
-  return graphGetBuffer(`/me/drive/items/${itemId}/content`);
+export async function downloadFileById(
+  tenantId: string,
+  itemId: string
+): Promise<Buffer> {
+  return graphGetBuffer(tenantId, `/me/drive/items/${itemId}/content`);
 }
 
 /**
  * Download a file by its path relative to OneDrive root.
  */
-export async function downloadFileByPath(filePath: string): Promise<Buffer> {
+export async function downloadFileByPath(
+  tenantId: string,
+  filePath: string
+): Promise<Buffer> {
   const encodedPath = encodeURIComponent(filePath).replace(/%2F/g, "/");
-  return graphGetBuffer(`/me/drive/root:/${encodedPath}:/content`);
+  return graphGetBuffer(tenantId, `/me/drive/root:/${encodedPath}:/content`);
 }
 
 /**
- * Set the configured OneDrive folder for trip sheets.
+ * Set the configured OneDrive folder for trip sheets, for this scope.
  */
-export async function setOneDriveFolder(folderPath: string, folderItemId: string): Promise<void> {
-  await prisma.cloudAccount.update({
-    where: { provider: "onedrive" },
+export async function setOneDriveFolder(
+  tenantId: string,
+  folderPath: string,
+  folderItemId: string
+): Promise<void> {
+  await scopedPrisma(tenantId).cloudAccount.updateMany({
+    where: { provider: PROVIDER },
     data: { folderPath, folderItemId },
   });
 }
 
 /**
- * Set the configured OneDrive folder for invoices.
+ * Set the configured OneDrive folder for invoices, for this scope.
  */
-export async function setOneDriveInvoiceFolder(folderPath: string, folderItemId: string): Promise<void> {
-  await prisma.cloudAccount.update({
-    where: { provider: "onedrive" },
+export async function setOneDriveInvoiceFolder(
+  tenantId: string,
+  folderPath: string,
+  folderItemId: string
+): Promise<void> {
+  await scopedPrisma(tenantId).cloudAccount.updateMany({
+    where: { provider: PROVIDER },
     data: { invoiceFolderPath: folderPath, invoiceFolderItemId: folderItemId },
   });
 }
 
 /**
- * List trip sheet files in the configured OneDrive folder.
+ * List trip sheet files in this scope's configured OneDrive folder.
  * Filters for CSV/Excel files only.
  */
-export async function listOneDriveTripSheetFiles(): Promise<OneDriveItem[]> {
-  const account = await prisma.cloudAccount.findUnique({
-    where: { provider: "onedrive" },
-  });
+export async function listOneDriveTripSheetFiles(
+  tenantId: string
+): Promise<OneDriveItem[]> {
+  const account = await getAccount(tenantId);
 
   if (!account?.folderItemId) return [];
 
-  const items = await listFolderById(account.folderItemId);
+  const items = await listFolderById(tenantId, account.folderItemId);
   const extensions = [".csv", ".xlsx", ".xls"];
 
   return items.filter((item) => {
@@ -342,17 +413,17 @@ export async function listOneDriveTripSheetFiles(): Promise<OneDriveItem[]> {
 }
 
 /**
- * List invoice files in the configured OneDrive invoice folder.
+ * List invoice files in this scope's configured OneDrive invoice folder.
  * Filters for PDF files only.
  */
-export async function listOneDriveInvoiceFiles(): Promise<OneDriveItem[]> {
-  const account = await prisma.cloudAccount.findUnique({
-    where: { provider: "onedrive" },
-  });
+export async function listOneDriveInvoiceFiles(
+  tenantId: string
+): Promise<OneDriveItem[]> {
+  const account = await getAccount(tenantId);
 
   if (!account?.invoiceFolderItemId) return [];
 
-  const items = await listFolderById(account.invoiceFolderItemId);
+  const items = await listFolderById(tenantId, account.invoiceFolderItemId);
 
   return items.filter((item) => {
     if (item.folder) return false;
@@ -361,15 +432,15 @@ export async function listOneDriveInvoiceFiles(): Promise<OneDriveItem[]> {
 }
 
 /**
- * Check if the OneDrive invoice folder is configured.
+ * Check if this scope's OneDrive invoice folder is configured.
  */
-export async function getOneDriveInvoiceSource(): Promise<{
+export async function getOneDriveInvoiceSource(tenantId: string): Promise<{
   connected: boolean;
   folderPath?: string;
   folderItemId?: string;
 } | null> {
   try {
-    const status = await getCloudAccountStatus();
+    const status = await getCloudAccountStatus(tenantId);
     if (status?.connected && status.invoiceFolderItemId) {
       return {
         connected: true,
@@ -384,17 +455,47 @@ export async function getOneDriveInvoiceSource(): Promise<{
 }
 
 /**
+ * Verify an item ID lives inside one of this scope's configured folders.
+ *
+ * Defence in depth: with per-scope tokens a foreign item ID already fails at
+ * Graph, but this also stops a caller using their own valid token to reach
+ * outside the folders they configured in Signex.
+ */
+export async function assertItemInConfiguredFolder(
+  tenantId: string,
+  itemId: string
+): Promise<void> {
+  const account = await getAccount(tenantId);
+  if (!account) throw new Error("No OneDrive connection for this account");
+
+  const allowedParents = [account.folderItemId, account.invoiceFolderItemId].filter(
+    (id): id is string => !!id
+  );
+  if (allowedParents.length === 0) {
+    throw new Error("No OneDrive folder configured for this account");
+  }
+
+  const item = await graphGet(tenantId, `/me/drive/items/${itemId}?$select=id,parentReference,name`);
+  const parentId: string | undefined = item?.parentReference?.id;
+
+  if (!parentId || !allowedParents.includes(parentId)) {
+    // Same message and shape as a missing item — no existence signal.
+    throw new Error(`Graph API error (404): item not found`);
+  }
+}
+
+/**
  * Upload a file to a specific OneDrive folder by folder item ID.
  * Uses the simple upload endpoint (< 4MB files).
  */
 export async function uploadFileToFolder(
+  tenantId: string,
   folderItemId: string,
   filename: string,
   buffer: Buffer,
   contentType: string = "application/pdf"
 ): Promise<OneDriveItem> {
-  const token = await getValidAccessToken();
-  if (!token) throw new Error("No valid OneDrive access token");
+  const token = await requireToken(tenantId);
 
   const encodedName = encodeURIComponent(filename);
   const url = `${GRAPH_API_URL}/me/drive/items/${folderItemId}:/${encodedName}:/content`;
@@ -421,13 +522,13 @@ export async function uploadFileToFolder(
  * Returns the subfolder item ID.
  */
 export async function ensureSubfolder(
+  tenantId: string,
   parentItemId: string,
   folderName: string
 ): Promise<string> {
-  const token = await getValidAccessToken();
-  if (!token) throw new Error("No valid OneDrive access token");
+  const token = await requireToken(tenantId);
 
-  const children = await listFolderById(parentItemId);
+  const children = await listFolderById(tenantId, parentItemId);
   const existing = children.find(
     (item) => item.folder && item.name.toLowerCase() === folderName.toLowerCase()
   );
@@ -450,7 +551,7 @@ export async function ensureSubfolder(
   if (!res.ok) {
     const err = await res.text();
     if (res.status === 409) {
-      const retryChildren = await listFolderById(parentItemId);
+      const retryChildren = await listFolderById(tenantId, parentItemId);
       const retryExisting = retryChildren.find(
         (item) => item.folder && item.name.toLowerCase() === folderName.toLowerCase()
       );
@@ -464,25 +565,27 @@ export async function ensureSubfolder(
 }
 
 /**
- * Upload a signed invoice to the OneDrive invoice folder's "signed" subfolder.
+ * Upload a signed invoice to this scope's invoice folder "signed" subfolder.
  */
 export async function uploadSignedInvoiceToOneDrive(
+  tenantId: string,
   filename: string,
   buffer: Buffer
 ): Promise<void> {
-  const account = await prisma.cloudAccount.findUnique({
-    where: { provider: "onedrive" },
-  });
+  const account = await getAccount(tenantId);
 
   if (!account?.invoiceFolderItemId) {
     throw new Error("OneDrive invoice folder not configured");
   }
 
-  const token = await getValidAccessToken();
-  if (!token) throw new Error("No valid OneDrive access token");
+  const token = await requireToken(tenantId);
 
   // Ensure "signed" subfolder exists inside the invoice folder (by ID)
-  const signedFolderId = await ensureSubfolder(account.invoiceFolderItemId, "signed");
+  const signedFolderId = await ensureSubfolder(
+    tenantId,
+    account.invoiceFolderItemId,
+    "signed"
+  );
 
   // Upload into the signed subfolder using ID-based colon syntax
   const encodedName = encodeURIComponent(filename);
@@ -509,14 +612,14 @@ export async function uploadSignedInvoiceToOneDrive(
  * Used to move completed trip sheets to processed/.
  */
 export async function moveFileToSubfolder(
+  tenantId: string,
   fileItemId: string,
   parentFolderItemId: string,
   subfolderName: string
 ): Promise<void> {
-  const token = await getValidAccessToken();
-  if (!token) throw new Error("No valid OneDrive access token");
+  const token = await requireToken(tenantId);
 
-  const subfolderId = await ensureSubfolder(parentFolderItemId, subfolderName);
+  const subfolderId = await ensureSubfolder(tenantId, parentFolderItemId, subfolderName);
 
   const url = `${GRAPH_API_URL}/me/drive/items/${fileItemId}`;
   const res = await fetch(url, {
@@ -539,9 +642,11 @@ export async function moveFileToSubfolder(
 /**
  * Delete a file from OneDrive by its item ID.
  */
-export async function deleteFileById(itemId: string): Promise<void> {
-  const token = await getValidAccessToken();
-  if (!token) throw new Error("No valid OneDrive access token");
+export async function deleteFileById(
+  tenantId: string,
+  itemId: string
+): Promise<void> {
+  const token = await requireToken(tenantId);
 
   const url = `${GRAPH_API_URL}/me/drive/items/${itemId}`;
   const res = await fetch(url, {
@@ -556,22 +661,22 @@ export async function deleteFileById(itemId: string): Promise<void> {
 }
 
 /**
- * List signed invoice files from the OneDrive "signed" subfolder.
+ * List signed invoice files from this scope's OneDrive "signed" subfolder.
  */
-export async function listOneDriveSignedInvoices(): Promise<OneDriveItem[]> {
-  const account = await prisma.cloudAccount.findUnique({
-    where: { provider: "onedrive" },
-  });
+export async function listOneDriveSignedInvoices(
+  tenantId: string
+): Promise<OneDriveItem[]> {
+  const account = await getAccount(tenantId);
 
   if (!account?.invoiceFolderItemId) return [];
 
-  const children = await listFolderById(account.invoiceFolderItemId);
+  const children = await listFolderById(tenantId, account.invoiceFolderItemId);
   const signedFolder = children.find(
     (item) => item.folder && item.name.toLowerCase() === "signed"
   );
   if (!signedFolder) return [];
 
-  const items = await listFolderById(signedFolder.id);
+  const items = await listFolderById(tenantId, signedFolder.id);
   return items.filter((item) => {
     if (item.folder) return false;
     return item.name.toLowerCase().endsWith(".pdf");

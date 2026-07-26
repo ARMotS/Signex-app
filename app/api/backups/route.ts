@@ -5,23 +5,23 @@ import {
   purgeBackedUpInvoices,
   purgeBackedUpTripSheets,
 } from "@/lib/backup";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const GET = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { searchParams } = new URL(request.url);
   const beforeParam = searchParams.get("before");
   const beforeDate = beforeParam ? new Date(beforeParam) : undefined;
 
-  const summary = await getBackupSummary(beforeDate, ctx.tenantId);
+  const summary = await getBackupSummary(ctx.tenantId, beforeDate);
   return NextResponse.json(summary);
 });
 
 export const POST = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
@@ -34,7 +34,7 @@ export const POST = withAuth(async (request: NextRequest) => {
     );
   }
 
-  const buffer = await createBackupZip(invoiceFilenames, tripSheetIds, ctx.tenantId);
+  const buffer = await createBackupZip(ctx.tenantId, invoiceFilenames, tripSheetIds);
 
   const datestamp = new Date().toISOString().slice(0, 10);
   const filename = `signex-backup-${datestamp}.zip`;
@@ -50,7 +50,7 @@ export const POST = withAuth(async (request: NextRequest) => {
 });
 
 export const DELETE = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
@@ -69,11 +69,11 @@ export const DELETE = withAuth(async (request: NextRequest) => {
   };
 
   if (invoiceFilenames.length > 0) {
-    results.invoices = await purgeBackedUpInvoices(invoiceFilenames);
+    results.invoices = await purgeBackedUpInvoices(ctx.tenantId, invoiceFilenames);
   }
 
   if (tripSheetIds.length > 0) {
-    results.tripSheets = await purgeBackedUpTripSheets(tripSheetIds, ctx.tenantId);
+    results.tripSheets = await purgeBackedUpTripSheets(ctx.tenantId, tripSheetIds);
   }
 
   return NextResponse.json({

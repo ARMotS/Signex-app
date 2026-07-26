@@ -13,22 +13,22 @@ import {
 } from "@/lib/trip-data";
 import { getCloudFolderInfo } from "@/lib/cloud-detect";
 import { getTripSheetFolderPath } from "@/lib/trip-sheet-folder";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const GET = withAuth(async () => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
-  const folderInfo = await listTripSheetFiles();
-  const folderPath = await getTripSheetFolderPath();
+  const folderInfo = await listTripSheetFiles(ctx.tenantId);
+  const folderPath = await getTripSheetFolderPath(ctx.tenantId);
   const [cloudInfo, duplicates] = await Promise.all([
     Promise.resolve(
       folderPath
         ? getCloudFolderInfo(folderPath)
         : { provider: "local" as const, label: "Not configured", icon: "📁", synced: false }
     ),
-    findDuplicateTripSheetFiles(),
+    findDuplicateTripSheetFiles(ctx.tenantId),
   ]);
 
   return NextResponse.json({
@@ -39,7 +39,7 @@ export const GET = withAuth(async () => {
 });
 
 export const POST = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
@@ -58,7 +58,7 @@ export const POST = withAuth(async (request: NextRequest) => {
       : []
   );
 
-  const file = await readTripSheetFile(filename);
+  const file = await readTripSheetFile(ctx.tenantId, filename);
   if (!file) {
     return NextResponse.json(
       { error: `File not found: ${filename}` },
@@ -66,7 +66,7 @@ export const POST = withAuth(async (request: NextRequest) => {
     );
   }
 
-  const parseResult = await parseTripSheet(file.buffer, file.filename);
+  const parseResult = await parseTripSheet(ctx.tenantId, file.buffer, file.filename);
 
   if (!parseResult.success) {
     return NextResponse.json(
@@ -76,6 +76,20 @@ export const POST = withAuth(async (request: NextRequest) => {
   }
 
   if (action === "deploy") {
+    // assignTo.driverId is client-supplied — confirm it is in this scope before
+    // any trip sheet is written against it.
+    let resolvedAssignTo: { driverId: string; driverName: string } | null = null;
+    if (assignTo?.driverId) {
+      const target = await ctx.db.driver.findFirst({
+        where: { id: assignTo.driverId },
+        select: { id: true, name: true },
+      });
+      if (!target) {
+        return NextResponse.json({ error: "Driver not found" }, { status: 404 });
+      }
+      resolvedAssignTo = { driverId: target.id, driverName: target.name };
+    }
+
     const savedTrips = [];
 
     for (const result of parseResult.driverResults) {
@@ -88,36 +102,34 @@ export const POST = withAuth(async (request: NextRequest) => {
       const renumberedStops = stops.map((s, idx) => ({ ...s, stopNumber: idx + 1 }));
 
       if (result.driverId === "__unassigned__") {
-        if (assignTo) {
-          const trip = await saveTripSheet({
-            driverId: assignTo.driverId,
-            driverName: assignTo.driverName,
+        if (resolvedAssignTo) {
+          const trip = await saveTripSheet(ctx.tenantId, {
+            driverId: resolvedAssignTo.driverId,
+            driverName: resolvedAssignTo.driverName,
             regNo: result.regNo,
             uploadedBy: ctx.userId,
             sourceFilename: filename,
             stops: renumberedStops,
-            tenantId: ctx.tenantId,
           });
           savedTrips.push(trip);
         }
         continue;
       }
 
-      const trip = await saveTripSheet({
+      const trip = await saveTripSheet(ctx.tenantId, {
         driverId: result.driverId,
         driverName: result.driverName,
         regNo: result.regNo,
         uploadedBy: ctx.userId,
         sourceFilename: filename,
         stops: renumberedStops,
-        tenantId: ctx.tenantId,
       });
       savedTrips.push(trip);
     }
 
     const tripSheetId = savedTrips.length > 0 ? savedTrips[0].id : null;
-    await markFileImported(filename, tripSheetId, "imported");
-    await moveToProcessed(filename);
+    await markFileImported(ctx.tenantId, filename, tripSheetId, "imported");
+    await moveToProcessed(ctx.tenantId, filename);
 
     return NextResponse.json({
       success: true,
@@ -136,7 +148,7 @@ export const POST = withAuth(async (request: NextRequest) => {
 });
 
 export const DELETE = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { filenames } = await request.json();
@@ -147,7 +159,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     );
   }
 
-  const result = await deleteTripSheetFiles(filenames);
+  const result = await deleteTripSheetFiles(ctx.tenantId, filenames);
 
   return NextResponse.json({
     success: true,

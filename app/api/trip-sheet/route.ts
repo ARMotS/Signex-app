@@ -11,12 +11,11 @@ import {
 } from "@/lib/trip-data";
 import { matchStopsToContacts, applyContactMatches } from "@/lib/contact-matcher";
 import { saveUploadedFile } from "@/lib/trip-sheet-folder";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
-import { prisma } from "@/lib/db";
 
 export const POST = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const formData = await request.formData();
@@ -37,7 +36,7 @@ export const POST = withAuth(async (request: NextRequest) => {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const parseResult = await parseTripSheet(buffer, file.name);
+  const parseResult = await parseTripSheet(ctx.tenantId, buffer, file.name);
 
   if (!parseResult.success) {
     return NextResponse.json(
@@ -49,7 +48,7 @@ export const POST = withAuth(async (request: NextRequest) => {
   const action = formData.get("action") as string | null;
 
   if (action === "deploy") {
-    await saveUploadedFile(file.name, buffer);
+    await saveUploadedFile(ctx.tenantId, file.name, buffer);
 
     const assignToRaw = formData.get("assignTo") as string | null;
     let assignTo: { driverId: string; driverName: string } | null = null;
@@ -59,6 +58,19 @@ export const POST = withAuth(async (request: NextRequest) => {
       } catch {
         // ignore
       }
+    }
+
+    // A driverId arriving in the request body is client-supplied, so it is
+    // verified against this scope before anything is written to it.
+    if (assignTo?.driverId) {
+      const target = await ctx.db.driver.findFirst({
+        where: { id: assignTo.driverId },
+        select: { id: true, name: true },
+      });
+      if (!target) {
+        return NextResponse.json({ error: "Driver not found" }, { status: 404 });
+      }
+      assignTo = { driverId: target.id, driverName: target.name };
     }
 
     const skipInvoicesRaw = formData.get("skipInvoices") as string | null;
@@ -86,28 +98,26 @@ export const POST = withAuth(async (request: NextRequest) => {
 
       if (result.driverId === "__unassigned__") {
         if (assignTo) {
-          const trip = await saveTripSheet({
+          const trip = await saveTripSheet(ctx.tenantId, {
             driverId: assignTo.driverId,
             driverName: assignTo.driverName,
             regNo: result.regNo,
             uploadedBy: ctx.userId,
             sourceFilename: file.name,
             stops: renumberedStops,
-            tenantId: ctx.tenantId,
           });
           savedTrips.push(trip);
         }
         continue;
       }
 
-      const trip = await saveTripSheet({
+      const trip = await saveTripSheet(ctx.tenantId, {
         driverId: result.driverId,
         driverName: result.driverName,
         regNo: result.regNo,
         uploadedBy: ctx.userId,
         sourceFilename: file.name,
         stops: renumberedStops,
-        tenantId: ctx.tenantId,
       });
       savedTrips.push(trip);
     }
@@ -117,11 +127,11 @@ export const POST = withAuth(async (request: NextRequest) => {
     );
     let matchResults = undefined;
     if (savedStops.length > 0) {
-      matchResults = await matchStopsToContacts(savedStops);
+      matchResults = await matchStopsToContacts(ctx.tenantId, savedStops);
       const autoMatches = matchResults
         .filter((m) => m.status === "auto" && m.contactId)
         .map((m) => ({ stopId: m.stopId, contactId: m.contactId! }));
-      if (autoMatches.length) await applyContactMatches(autoMatches);
+      if (autoMatches.length) await applyContactMatches(ctx.tenantId, autoMatches);
     }
 
     return NextResponse.json({
@@ -141,7 +151,7 @@ export const POST = withAuth(async (request: NextRequest) => {
 });
 
 export const GET = withAuth(async () => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const tripSheets = await getAllTripSheets(ctx.tenantId);
@@ -154,20 +164,20 @@ export const GET = withAuth(async () => {
 });
 
 export const DELETE = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
   const { id, ids } = body;
 
   if (ids && Array.isArray(ids) && ids.length > 0) {
-    // Verify all belong to this tenant
-    const trips = await prisma.tripSheet.findMany({
-      where: { id: { in: ids }, tenantId: ctx.tenantId },
+    // Narrow client-supplied ids to this scope. Foreign ids simply drop out.
+    const trips = await ctx.db.tripSheet.findMany({
+      where: { id: { in: ids } },
       select: { id: true },
     });
     const validIds = trips.map((t) => t.id);
-    const result = await deleteTripSheets(validIds);
+    const result = await deleteTripSheets(ctx.tenantId, validIds);
     return NextResponse.json({
       success: true,
       deleted: result.deleted,
@@ -182,13 +192,14 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     );
   }
 
-  // Verify belongs to this tenant
-  const trip = await prisma.tripSheet.findUnique({ where: { id } });
-  if (!trip || trip.tenantId !== ctx.tenantId) {
+  const trip = await ctx.db.tripSheet.findFirst({ where: { id } });
+  if (!trip) {
+    // 404, not 403 — an id in another scope is indistinguishable from one that
+    // doesn't exist.
     return NextResponse.json({ error: "Trip sheet not found" }, { status: 404 });
   }
 
-  const result = await deleteTripSheet(id);
+  const result = await deleteTripSheet(ctx.tenantId, id);
   if (!result.success) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }
@@ -197,19 +208,19 @@ export const DELETE = withAuth(async (request: NextRequest) => {
 });
 
 export const PATCH = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
   const { id, ids } = body;
 
   if (ids && Array.isArray(ids) && ids.length > 0) {
-    const trips = await prisma.tripSheet.findMany({
-      where: { id: { in: ids }, tenantId: ctx.tenantId },
+    const trips = await ctx.db.tripSheet.findMany({
+      where: { id: { in: ids } },
       select: { id: true },
     });
     const validIds = trips.map((t) => t.id);
-    const result = await completeTripSheets(validIds);
+    const result = await completeTripSheets(ctx.tenantId, validIds);
     return NextResponse.json({
       success: true,
       completed: result.completed,
@@ -224,12 +235,12 @@ export const PATCH = withAuth(async (request: NextRequest) => {
     );
   }
 
-  const trip = await prisma.tripSheet.findUnique({ where: { id } });
-  if (!trip || trip.tenantId !== ctx.tenantId) {
+  const trip = await ctx.db.tripSheet.findFirst({ where: { id } });
+  if (!trip) {
     return NextResponse.json({ error: "Trip sheet not found" }, { status: 404 });
   }
 
-  const result = await completeTripSheet(id);
+  const result = await completeTripSheet(ctx.tenantId, id);
   if (!result.success) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }

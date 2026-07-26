@@ -1,14 +1,21 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { createAdminAccount, getAdminCount } from "@/lib/accounts";
-import { createSession, getSession } from "@/lib/session";
-import { prisma } from "@/lib/db";
+import { createSession } from "@/lib/session";
+import { UNSAFE_unscopedPrisma } from "@/lib/db-scoped";
 
 /**
  * POST /api/auth/signup
- * Creates an admin account. Only allowed if no admins exist yet (first-time setup)
- * or if the request comes from an existing admin session.
+ *
+ * First-run bootstrap ONLY: creates the very first account, as SUPER_ADMIN, in
+ * the root scope.
+ *
+ * The previous version also let an existing admin create further admins, taking
+ * `tenantId` from the creator's session — which put every new ADMIN in the
+ * creator's scope and was the root cause of cross-ADMIN data visibility. Admin
+ * creation now lives solely at POST /api/admin/users, which mints a fresh scope
+ * per ADMIN.
  */
-export async function POST(request: NextRequest) {
+export async function POST(request: Request) {
   try {
     const { name, email, password } = await request.json();
 
@@ -27,63 +34,63 @@ export async function POST(request: NextRequest) {
     }
 
     const adminCount = await getAdminCount();
-    let tenantId: string;
 
     if (adminCount > 0) {
-      const session = await getSession();
-      if (!session || (session.role !== "admin" && session.role !== "super_admin")) {
-        return NextResponse.json(
-          { error: "Only existing admins can create new admin accounts" },
-          { status: 403 }
-        );
-      }
-      tenantId = session.tenantId!;
-    } else {
-      // First admin — find or create the default tenant
-      const defaultTenant = await prisma.tenant.upsert({
-        where: { slug: "default" },
-        update: {},
-        create: { name: "Default", slug: "default" },
-      });
-      tenantId = defaultTenant.id;
+      return NextResponse.json(
+        {
+          error:
+            "Signup is closed. Only the SUPER_ADMIN can create admin accounts, via the Users page.",
+        },
+        { status: 403 }
+      );
     }
 
-    const result = await createAdminAccount(name, email, password);
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    // SCOPE-EXEMPT: first-run bootstrap. The root scope belongs to the
+    // SUPER_ADMIN; every ADMIN created later gets its own tenant.
+    const rootTenant = await UNSAFE_unscopedPrisma.tenant.upsert({
+      where: { slug: "default" },
+      update: {},
+      create: { name: "Default", slug: "default" },
+    });
+
+    const result = await createAdminAccount(
+      name,
+      normalizedEmail,
+      password,
+      rootTenant.id
+    );
 
     if (!result.success) {
       return NextResponse.json({ error: result.error }, { status: 400 });
     }
 
-    // First account is SUPER_ADMIN, subsequent accounts are ADMIN
-    const userRole = adminCount === 0 ? "SUPER_ADMIN" : "ADMIN";
-
-    // Create corresponding User record for multi-tenant auth
-    await prisma.user.upsert({
-      where: { email: email.toLowerCase() },
+    await UNSAFE_unscopedPrisma.user.upsert({
+      where: { email: normalizedEmail },
       update: {},
       create: {
-        email: email.toLowerCase(),
+        email: normalizedEmail,
         name,
-        role: userRole,
-        tenantId,
+        role: "SUPER_ADMIN",
+        tenantId: rootTenant.id,
       },
     });
 
-    // Auto-login for first admin
-    if (adminCount === 0 && result.account) {
+    if (result.account) {
       await createSession({
         id: result.account.id,
         role: "super_admin",
         name: result.account.name,
         email: result.account.email,
-        tenantId,
+        tenantId: rootTenant.id,
       });
     }
 
     return NextResponse.json({
       success: true,
       account: result.account,
-      firstAdmin: adminCount === 0,
+      firstAdmin: true,
     });
   } catch (error) {
     console.error("Signup error:", error);

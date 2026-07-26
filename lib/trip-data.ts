@@ -2,9 +2,13 @@
  * Trip sheet data — PostgreSQL via Prisma.
  * Each trip sheet is assigned to a specific driver and contains stops.
  * Operations include eager loading of related stops.
+ *
+ * Every function takes `tenantId` as its first argument and it is REQUIRED.
+ * It used to be optional on the read paths, which meant an omitted argument
+ * silently returned every tenant's data.
  */
 
-import { prisma } from "./db";
+import { scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
 import { StopStatus as PrismaStopStatus } from "@prisma/client";
 import { moveToProcessed } from "./trip-sheet-folder";
@@ -43,25 +47,28 @@ export interface TripSheet {
  * Save a new trip sheet for a driver.
  * All trip sheets are immediately ACTIVE — drivers can have multiple active sheets.
  */
-export async function saveTripSheet(trip: {
-  driverId: string;
-  driverName: string;
-  regNo: string;
-  uploadedBy: string;
-  sourceFilename: string;
-  stops: Omit<TripStop, "id">[];
-  tenantId: string;
-}): Promise<TripSheet> {
+export async function saveTripSheet(
+  tenantId: string,
+  trip: {
+    driverId: string;
+    driverName: string;
+    regNo: string;
+    uploadedBy: string;
+    sourceFilename: string;
+    stops: Omit<TripStop, "id">[];
+  }
+): Promise<TripSheet> {
+  const db = scopedPrisma(tenantId);
   const status: "ACTIVE" | "QUEUED" = "ACTIVE";
 
-  const created = await prisma.tripSheet.create({
+  // The scoped client stamps tenantId on the sheet AND on the nested stops.
+  const created = await db.tripSheet.create({
     data: {
       sourceFilename: trip.sourceFilename,
       uploadedBy: trip.uploadedBy,
       driverId: trip.driverId,
       regNo: trip.regNo || null,
       status,
-      tenantId: trip.tenantId,
       stops: {
         create: trip.stops.map((stop) => ({
           stopNumber: stop.stopNumber,
@@ -71,13 +78,12 @@ export async function saveTripSheet(trip: {
           nop: stop.nop || 0,
           invoiceFile: stop.invoiceFile,
           status: (stop.status || "PENDING") as PrismaStopStatus,
-          tenantId: trip.tenantId,
         })),
       },
     },
   });
 
-  const stops = await prisma.stop.findMany({
+  const stops = await db.stop.findMany({
     where: { tripSheetId: created.id },
     orderBy: { stopNumber: "asc" },
   });
@@ -88,6 +94,7 @@ export async function saveTripSheet(trip: {
     entityId: created.id,
     userName: trip.uploadedBy,
     details: `Trip sheet deployed: ${trip.sourceFilename} for driver ${trip.driverName} (${trip.stops.length} stops)`,
+    tenantId,
   });
 
   return {
@@ -104,22 +111,24 @@ export async function saveTripSheet(trip: {
 }
 
 /**
- * Get all trip sheets with their stops.
+ * Get all trip sheets in a scope, with their stops.
  */
-export async function getAllTripSheets(tenantId?: string): Promise<TripSheet[]> {
-  const trips = await prisma.tripSheet.findMany({
-    where: tenantId ? { tenantId } : undefined,
+export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
+  const db = scopedPrisma(tenantId);
+
+  const trips = await db.tripSheet.findMany({
     orderBy: { date: "desc" },
   });
 
-  // Get all driver info and stops in parallel
+  if (trips.length === 0) return [];
+
   const driverIds = [...new Set(trips.map((t) => t.driverId))];
   const [drivers, allStops] = await Promise.all([
-    prisma.driver.findMany({
+    db.driver.findMany({
       where: { id: { in: driverIds } },
       select: { id: true, name: true },
     }),
-    prisma.stop.findMany({
+    db.stop.findMany({
       where: { tripSheetId: { in: trips.map((t) => t.id) } },
       orderBy: { stopNumber: "asc" },
       include: { contact: { select: { email: true } } },
@@ -151,12 +160,52 @@ export async function getAllTripSheets(tenantId?: string): Promise<TripSheet[]> 
 }
 
 /**
+ * Get one trip sheet by id, or null if it isn't in this scope.
+ */
+export async function getTripSheet(
+  tenantId: string,
+  tripId: string
+): Promise<TripSheet | null> {
+  const db = scopedPrisma(tenantId);
+
+  const trip = await db.tripSheet.findFirst({ where: { id: tripId } });
+  if (!trip) return null;
+
+  const [driver, stops] = await Promise.all([
+    db.driver.findFirst({
+      where: { id: trip.driverId },
+      select: { name: true },
+    }),
+    db.stop.findMany({
+      where: { tripSheetId: trip.id },
+      orderBy: { stopNumber: "asc" },
+      include: { contact: { select: { email: true } } },
+    }),
+  ]);
+
+  return {
+    id: trip.id,
+    driverId: trip.driverId,
+    driverName: driver?.name || "Unknown",
+    regNo: trip.regNo || "",
+    status: trip.status as "ACTIVE" | "QUEUED",
+    uploadedAt: trip.date,
+    uploadedBy: trip.uploadedBy,
+    sourceFilename: trip.sourceFilename,
+    stops: stops.map(mapStop),
+  };
+}
+
+/**
  * Get all trip sheets for a specific driver (active first, then queued by date).
  */
 export async function getTripSheetsForDriver(
+  tenantId: string,
   driverId: string
 ): Promise<TripSheet[]> {
-  const trips = await prisma.tripSheet.findMany({
+  const db = scopedPrisma(tenantId);
+
+  const trips = await db.tripSheet.findMany({
     where: { driverId },
     orderBy: [{ status: "asc" }, { date: "asc" }],
   });
@@ -164,13 +213,14 @@ export async function getTripSheetsForDriver(
   if (trips.length === 0) return [];
 
   const [driver, allStops] = await Promise.all([
-    prisma.driver.findUnique({
+    db.driver.findFirst({
       where: { id: driverId },
       select: { name: true },
     }),
-    prisma.stop.findMany({
+    db.stop.findMany({
       where: { tripSheetId: { in: trips.map((t) => t.id) } },
       orderBy: { stopNumber: "asc" },
+      include: { contact: { select: { email: true } } },
     }),
   ]);
 
@@ -198,38 +248,43 @@ export async function getTripSheetsForDriver(
  * Get the active trip sheet for a specific driver (backwards compat).
  */
 export async function getTripSheetForDriver(
+  tenantId: string,
   driverId: string
 ): Promise<TripSheet | null> {
-  const sheets = await getTripSheetsForDriver(driverId);
+  const sheets = await getTripSheetsForDriver(tenantId, driverId);
   return sheets.find((s) => s.status === "ACTIVE") || sheets[0] || null;
 }
 
 /**
  * Get all stops from the active trip sheet for a specific driver.
  */
-export async function getStopsForDriver(driverId: string): Promise<TripStop[]> {
-  const trip = await getTripSheetForDriver(driverId);
+export async function getStopsForDriver(
+  tenantId: string,
+  driverId: string
+): Promise<TripStop[]> {
+  const trip = await getTripSheetForDriver(tenantId, driverId);
   return trip?.stops || [];
 }
 
 /**
- * Update a stop's status.
+ * Update a stop's status. A stop id from another scope is "not found".
  */
 export async function updateStopStatus(
+  tenantId: string,
   stopId: string,
   status: StopStatus,
   signatureData?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const stop = await prisma.stop.findUnique({
-      where: { id: stopId },
-    });
+    const db = scopedPrisma(tenantId);
+
+    const stop = await db.stop.findFirst({ where: { id: stopId } });
 
     if (!stop) {
       return { success: false, error: "Stop not found" };
     }
 
-    await prisma.stop.update({
+    await db.stop.update({
       where: { id: stopId },
       data: {
         status: status as PrismaStopStatus,
@@ -239,11 +294,11 @@ export async function updateStopStatus(
     });
 
     // Get driver info for audit log
-    const tripSheet = await prisma.tripSheet.findUnique({
+    const tripSheet = await db.tripSheet.findFirst({
       where: { id: stop.tripSheetId },
     });
     const driver = tripSheet
-      ? await prisma.driver.findUnique({ where: { id: tripSheet.driverId } })
+      ? await db.driver.findFirst({ where: { id: tripSheet.driverId } })
       : null;
 
     await logAudit({
@@ -252,6 +307,7 @@ export async function updateStopStatus(
       entityId: stopId,
       userName: driver?.name || "Unknown",
       details: `Stop ${stop.stopNumber} (${stop.invoiceNumber}) → ${status}`,
+      tenantId,
     });
 
     return { success: true };
@@ -265,22 +321,21 @@ export async function updateStopStatus(
  * Delete a trip sheet by ID.
  */
 export async function deleteTripSheet(
+  tenantId: string,
   tripId: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const trip = await prisma.tripSheet.findUnique({
-      where: { id: tripId },
-    });
+    const db = scopedPrisma(tenantId);
+
+    const trip = await db.tripSheet.findFirst({ where: { id: tripId } });
 
     if (!trip) {
       return { success: false, error: "Trip sheet not found" };
     }
 
-    const driver = await prisma.driver.findUnique({
-      where: { id: trip.driverId },
-    });
+    const driver = await db.driver.findFirst({ where: { id: trip.driverId } });
 
-    await prisma.tripSheet.delete({ where: { id: tripId } });
+    await db.tripSheet.delete({ where: { id: tripId } });
 
     await logAudit({
       action: "STATUS_CHANGE",
@@ -288,6 +343,7 @@ export async function deleteTripSheet(
       entityId: tripId,
       userName: trip.uploadedBy,
       details: `Trip sheet deleted for driver ${driver?.name || "Unknown"}`,
+      tenantId,
     });
 
     return { success: true };
@@ -303,21 +359,20 @@ export async function deleteTripSheet(
  * Returns { success, error?, archivedFile? }.
  */
 export async function completeTripSheet(
+  tenantId: string,
   tripId: string
 ): Promise<{ success: boolean; error?: string; archivedFile?: string | null }> {
   try {
-    const trip = await prisma.tripSheet.findUnique({
-      where: { id: tripId },
-    });
+    const db = scopedPrisma(tenantId);
+
+    const trip = await db.tripSheet.findFirst({ where: { id: tripId } });
 
     if (!trip) {
       return { success: false, error: "Trip sheet not found" };
     }
 
     // Verify all stops are SIGNED
-    const stops = await prisma.stop.findMany({
-      where: { tripSheetId: tripId },
-    });
+    const stops = await db.stop.findMany({ where: { tripSheetId: tripId } });
 
     const allSigned = stops.length > 0 && stops.every((s) => s.status === "SIGNED");
     if (!allSigned) {
@@ -327,18 +382,17 @@ export async function completeTripSheet(
       };
     }
 
-    const driver = await prisma.driver.findUnique({
-      where: { id: trip.driverId },
-    });
+    const driver = await db.driver.findFirst({ where: { id: trip.driverId } });
 
-    // Move source file to processed/ subfolder
+    // Move source file to processed/ subfolder — in this scope's own folder or
+    // OneDrive connection, never another admin's.
     let archivedFile: string | null = null;
     if (trip.sourceFilename) {
-      archivedFile = await moveToProcessed(trip.sourceFilename);
+      archivedFile = await moveToProcessed(tenantId, trip.sourceFilename);
     }
 
     // Delete the trip sheet (cascades to stops)
-    await prisma.tripSheet.delete({ where: { id: tripId } });
+    await db.tripSheet.delete({ where: { id: tripId } });
 
     await logAudit({
       action: "STATUS_CHANGE",
@@ -346,6 +400,7 @@ export async function completeTripSheet(
       entityId: tripId,
       userName: trip.uploadedBy,
       details: `Trip sheet completed and archived for driver ${driver?.name || "Unknown"} (${stops.length} stops, all signed)`,
+      tenantId,
     });
 
     return { success: true, archivedFile };
@@ -359,13 +414,14 @@ export async function completeTripSheet(
  * Batch complete multiple trip sheets.
  */
 export async function completeTripSheets(
+  tenantId: string,
   tripIds: string[]
 ): Promise<{ completed: number; failed: { id: string; error: string }[] }> {
   let completed = 0;
   const failed: { id: string; error: string }[] = [];
 
   for (const id of tripIds) {
-    const result = await completeTripSheet(id);
+    const result = await completeTripSheet(tenantId, id);
     if (result.success) {
       completed++;
     } else {
@@ -380,13 +436,14 @@ export async function completeTripSheets(
  * Batch delete multiple trip sheets by IDs.
  */
 export async function deleteTripSheets(
+  tenantId: string,
   tripIds: string[]
 ): Promise<{ deleted: number; failed: string[] }> {
   let deleted = 0;
   const failed: string[] = [];
 
   for (const id of tripIds) {
-    const result = await deleteTripSheet(id);
+    const result = await deleteTripSheet(tenantId, id);
     if (result.success) {
       deleted++;
     } else {
@@ -398,24 +455,24 @@ export async function deleteTripSheets(
 }
 
 /**
- * Get summary stats across all trip sheets.
+ * Get summary stats across one scope's trip sheets.
  */
-export async function getTripStats(tenantId?: string): Promise<{
+export async function getTripStats(tenantId: string): Promise<{
   totalStops: number;
   signed: number;
   pending: number;
   inProgress: number;
   activeDrivers: number;
 }> {
-  const tenantFilter = tenantId ? { tenantId } : {};
+  const db = scopedPrisma(tenantId);
+
   const [totalStops, signed, pending, inProgress, activeDrivers] =
     await Promise.all([
-      prisma.stop.count({ where: tenantFilter }),
-      prisma.stop.count({ where: { ...tenantFilter, status: "SIGNED" } }),
-      prisma.stop.count({ where: { ...tenantFilter, status: "PENDING" } }),
-      prisma.stop.count({ where: { ...tenantFilter, status: "IN_PROGRESS" } }),
-      prisma.tripSheet.findMany({
-        where: tenantFilter,
+      db.stop.count(),
+      db.stop.count({ where: { status: "SIGNED" } }),
+      db.stop.count({ where: { status: "PENDING" } }),
+      db.stop.count({ where: { status: "IN_PROGRESS" } }),
+      db.tripSheet.findMany({
         select: { driverId: true },
         distinct: ["driverId"],
       }),

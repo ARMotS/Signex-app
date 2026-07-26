@@ -5,7 +5,7 @@ import {
   setOneDriveFolder,
   setOneDriveInvoiceFolder,
 } from "@/lib/microsoft-graph";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 /**
@@ -13,15 +13,17 @@ import { withAuth } from "@/lib/api-handler";
  * Browse OneDrive folders. Without parentId, returns root folders.
  */
 export const GET = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { searchParams } = new URL(request.url);
   const parentId = searchParams.get("parentId");
 
+  // parentId is client-supplied but resolved with THIS scope's token against
+  // THIS scope's drive, so another ADMIN's folder id yields a Graph 404.
   const items = parentId
-    ? await listFolderById(parentId)
-    : await listRootFolders();
+    ? await listFolderById(ctx.tenantId, parentId)
+    : await listRootFolders(ctx.tenantId);
 
   // Return only folders for the folder picker
   const folders = items.filter((item) => item.folder);
@@ -35,7 +37,7 @@ export const GET = withAuth(async (request: NextRequest) => {
  * Body: { folderPath: string, folderItemId: string, target?: "tripsheets" | "invoices" }
  */
 export const POST = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { folderPath, folderItemId, target } = await request.json();
@@ -48,9 +50,9 @@ export const POST = withAuth(async (request: NextRequest) => {
   }
 
   if (target === "invoices") {
-    await setOneDriveInvoiceFolder(folderPath, folderItemId);
+    await setOneDriveInvoiceFolder(ctx.tenantId, folderPath, folderItemId);
   } else {
-    await setOneDriveFolder(folderPath, folderItemId);
+    await setOneDriveFolder(ctx.tenantId, folderPath, folderItemId);
   }
 
   return NextResponse.json({ success: true, folderPath, folderItemId, target: target || "tripsheets" });

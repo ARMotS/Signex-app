@@ -2,6 +2,11 @@
  * Trip sheet folder operations — reads CSV/Excel files from a configured
  * cloud-synced (or local) folder, OR from OneDrive via Graph API.
  *
+ * Every function takes `tenantId` first. The folder path comes from that scope's
+ * AppConfig and the OneDrive connection from that scope's CloudAccount, so two
+ * ADMINs never see each other's files, and one ADMIN importing a file does not
+ * mark it consumed for another.
+ *
  * Features:
  *   - List available trip sheet files in the folder
  *   - Track which files have already been imported (via DB)
@@ -17,7 +22,7 @@
 
 import fs from "fs";
 import path from "path";
-import { prisma } from "./db";
+import { scopedPrisma } from "./db-scoped";
 import { readConfig } from "./config";
 import { detectCloudProvider, type CloudProvider } from "./cloud-detect";
 import {
@@ -69,13 +74,13 @@ const TRIP_SHEET_EXTENSIONS = [".csv", ".xlsx", ".xls"];
  * Check if OneDrive Graph API should be used as the file source.
  * Returns the cloud account status if connected with a folder configured.
  */
-export async function getOneDriveSource(): Promise<{
+export async function getOneDriveSource(tenantId: string): Promise<{
   connected: boolean;
   folderPath?: string;
   folderItemId?: string;
 } | null> {
   try {
-    const status = await getCloudAccountStatus();
+    const status = await getCloudAccountStatus(tenantId);
     if (status?.connected && status.folderItemId) {
       return {
         connected: true,
@@ -93,8 +98,8 @@ export async function getOneDriveSource(): Promise<{
  * Get the configured trip sheet folder path.
  * Returns null if no folder is configured.
  */
-export async function getTripSheetFolderPath(): Promise<string | null> {
-  const config = await readConfig();
+export async function getTripSheetFolderPath(tenantId: string): Promise<string | null> {
+  const config = await readConfig(tenantId);
   if (config.tripSheetFolderPath && config.tripSheetFolderPath.trim() !== "") {
     return config.tripSheetFolderPath;
   }
@@ -106,25 +111,26 @@ export async function getTripSheetFolderPath(): Promise<string | null> {
  * Uses OneDrive Graph API if connected, otherwise falls back to local filesystem.
  * Checks DB to mark which files have already been imported.
  */
-export async function listTripSheetFiles(): Promise<TripSheetFolderInfo> {
+export async function listTripSheetFiles(tenantId: string): Promise<TripSheetFolderInfo> {
   // Try OneDrive Graph API first
-  const onedrive = await getOneDriveSource();
+  const onedrive = await getOneDriveSource(tenantId);
   if (onedrive) {
-    return listTripSheetFilesFromOneDrive(onedrive.folderPath || "");
+    return listTripSheetFilesFromOneDrive(tenantId, onedrive.folderPath || "");
   }
 
   // Fall back to local filesystem
-  return listTripSheetFilesFromLocal();
+  return listTripSheetFilesFromLocal(tenantId);
 }
 
 async function listTripSheetFilesFromOneDrive(
+  tenantId: string,
   folderPath: string
 ): Promise<TripSheetFolderInfo> {
   try {
-    const items = await listOneDriveTripSheetFiles();
+    const items = await listOneDriveTripSheetFiles(tenantId);
 
     const filenames = items.map((i) => i.name);
-    const importRecords = await prisma.importedFile.findMany({
+    const importRecords = await scopedPrisma(tenantId).importedFile.findMany({
       where: { filename: { in: filenames } },
     });
     const importMap = new Map(importRecords.map((r) => [r.filename, r]));
@@ -173,8 +179,8 @@ async function listTripSheetFilesFromOneDrive(
   }
 }
 
-async function listTripSheetFilesFromLocal(): Promise<TripSheetFolderInfo> {
-  const folderPath = await getTripSheetFolderPath();
+async function listTripSheetFilesFromLocal(tenantId: string): Promise<TripSheetFolderInfo> {
+  const folderPath = await getTripSheetFolderPath(tenantId);
 
   if (!folderPath) {
     return {
@@ -207,7 +213,7 @@ async function listTripSheetFilesFromLocal(): Promise<TripSheetFolderInfo> {
       return TRIP_SHEET_EXTENSIONS.includes(ext);
     });
 
-    const importRecords = await prisma.importedFile.findMany({
+    const importRecords = await scopedPrisma(tenantId).importedFile.findMany({
       where: {
         filename: { in: tripFiles },
       },
@@ -271,13 +277,14 @@ async function listTripSheetFilesFromLocal(): Promise<TripSheetFolderInfo> {
  * @param fileId - Optional OneDrive item ID (used when source is OneDrive)
  */
 export async function readTripSheetFile(
+  tenantId: string,
   filename: string,
   fileId?: string
 ): Promise<{ buffer: Buffer; filename: string } | null> {
   // If a fileId is provided, download from OneDrive
   if (fileId) {
     try {
-      const buffer = await downloadFileById(fileId);
+      const buffer = await downloadFileById(tenantId, fileId);
       return { buffer, filename };
     } catch (err) {
       console.error(`Failed to download ${filename} from OneDrive:`, err);
@@ -286,13 +293,13 @@ export async function readTripSheetFile(
   }
 
   // Check if OneDrive is connected and try to find the file there
-  const onedrive = await getOneDriveSource();
+  const onedrive = await getOneDriveSource(tenantId);
   if (onedrive) {
     try {
-      const items = await listOneDriveTripSheetFiles();
+      const items = await listOneDriveTripSheetFiles(tenantId);
       const match = items.find((i) => i.name === filename);
       if (match) {
-        const buffer = await downloadFileById(match.id);
+        const buffer = await downloadFileById(tenantId, match.id);
         return { buffer, filename };
       }
     } catch (err) {
@@ -302,7 +309,7 @@ export async function readTripSheetFile(
   }
 
   // Fall back to local filesystem
-  const folderPath = await getTripSheetFolderPath();
+  const folderPath = await getTripSheetFolderPath(tenantId);
   if (!folderPath) return null;
 
   const filePath = path.join(folderPath, filename);
@@ -326,14 +333,17 @@ export async function readTripSheetFile(
  * Mark a file as imported in the database.
  */
 export async function markFileImported(
+  tenantId: string,
   filename: string,
   tripSheetId: string | null,
   status: string = "imported"
 ): Promise<void> {
-  const folderPath = (await getTripSheetFolderPath()) || "";
+  const folderPath = (await getTripSheetFolderPath(tenantId)) || "";
 
-  await prisma.importedFile.upsert({
-    where: { filename },
+  // Scoped uniqueness is [tenantId, filename] — another ADMIN importing the same
+  // filename gets their own row and their own "already imported" state.
+  await scopedPrisma(tenantId).importedFile.upsert({
+    where: { tenantId_filename: { tenantId, filename } },
     update: {
       status,
       tripSheetId,
@@ -354,15 +364,18 @@ export async function markFileImported(
  * Uses OneDrive Graph API if connected, otherwise local filesystem.
  * Returns the new path, or null if the move failed.
  */
-export async function moveToProcessed(filename: string): Promise<string | null> {
+export async function moveToProcessed(
+  tenantId: string,
+  filename: string
+): Promise<string | null> {
   // Try OneDrive first
-  const onedrive = await getOneDriveSource();
+  const onedrive = await getOneDriveSource(tenantId);
   if (onedrive?.folderItemId) {
     try {
-      const items = await listOneDriveTripSheetFiles();
+      const items = await listOneDriveTripSheetFiles(tenantId);
       const match = items.find((i) => i.name === filename);
       if (match) {
-        await moveFileToSubfolder(match.id, onedrive.folderItemId, "processed");
+        await moveFileToSubfolder(tenantId, match.id, onedrive.folderItemId, "processed");
         return `onedrive://processed/${filename}`;
       }
     } catch (err) {
@@ -372,7 +385,7 @@ export async function moveToProcessed(filename: string): Promise<string | null> 
   }
 
   // Fall back to local filesystem
-  const folderPath = await getTripSheetFolderPath();
+  const folderPath = await getTripSheetFolderPath(tenantId);
   if (!folderPath) return null;
 
   const sourcePath = path.join(folderPath, filename);
@@ -414,18 +427,19 @@ export async function moveToProcessed(filename: string): Promise<string | null> 
  * Returns the full path (or OneDrive path), or null if no folder is configured.
  */
 export async function saveUploadedFile(
+  tenantId: string,
   filename: string,
   buffer: Buffer
 ): Promise<string | null> {
   // Upload to OneDrive if trip sheet folder is configured there
-  const onedrive = await getOneDriveSource();
+  const onedrive = await getOneDriveSource(tenantId);
   if (onedrive?.folderItemId) {
     try {
       const ext = filename.toLowerCase().slice(filename.lastIndexOf("."));
       const contentType = ext === ".csv"
         ? "text/csv"
         : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-      await uploadFileToFolder(onedrive.folderItemId, filename, buffer, contentType);
+      await uploadFileToFolder(tenantId, onedrive.folderItemId, filename, buffer, contentType);
       return `onedrive://${filename}`;
     } catch (err) {
       console.error("Failed to upload trip sheet to OneDrive:", err);
@@ -434,7 +448,7 @@ export async function saveUploadedFile(
   }
 
   // Fall back to local filesystem
-  const folderPath = await getTripSheetFolderPath();
+  const folderPath = await getTripSheetFolderPath(tenantId);
   if (!folderPath) return null;
 
   if (!fs.existsSync(folderPath)) {
@@ -457,16 +471,17 @@ export async function saveUploadedFile(
  * Also removes the corresponding ImportedFile DB record if it exists.
  */
 export async function deleteTripSheetFile(
+  tenantId: string,
   filename: string
 ): Promise<{ success: boolean; error?: string }> {
-  const onedrive = await getOneDriveSource();
+  const onedrive = await getOneDriveSource(tenantId);
   if (onedrive) {
     try {
-      const items = await listOneDriveTripSheetFiles();
+      const items = await listOneDriveTripSheetFiles(tenantId);
       const match = items.find((i) => i.name === filename);
-      if (match) await deleteFileById(match.id);
+      if (match) await deleteFileById(tenantId, match.id);
       try {
-        await prisma.importedFile.deleteMany({ where: { filename } });
+        await scopedPrisma(tenantId).importedFile.deleteMany({ where: { filename } });
       } catch {
         // Ignore DB cleanup errors
       }
@@ -477,7 +492,7 @@ export async function deleteTripSheetFile(
     }
   }
 
-  const folderPath = await getTripSheetFolderPath();
+  const folderPath = await getTripSheetFolderPath(tenantId);
   if (!folderPath) {
     return { success: false, error: "No trip sheet folder configured" };
   }
@@ -497,7 +512,7 @@ export async function deleteTripSheetFile(
     }
 
     try {
-      await prisma.importedFile.deleteMany({ where: { filename } });
+      await scopedPrisma(tenantId).importedFile.deleteMany({ where: { filename } });
     } catch {
       // Ignore DB cleanup errors
     }
@@ -513,13 +528,14 @@ export async function deleteTripSheetFile(
  * Delete multiple trip sheet files from the configured folder.
  */
 export async function deleteTripSheetFiles(
+  tenantId: string,
   filenames: string[]
 ): Promise<{ deleted: number; failed: string[] }> {
   let deleted = 0;
   const failed: string[] = [];
 
   for (const filename of filenames) {
-    const result = await deleteTripSheetFile(filename);
+    const result = await deleteTripSheetFile(tenantId, filename);
     if (result.success) {
       deleted++;
     } else {
@@ -542,8 +558,10 @@ export interface TripSheetDuplicateGroup {
  * Detects by normalizing filenames (strip copy patterns, case-insensitive)
  * and grouping files with the same effective name.
  */
-export async function findDuplicateTripSheetFiles(): Promise<TripSheetDuplicateGroup[]> {
-  const folderPath = await getTripSheetFolderPath();
+export async function findDuplicateTripSheetFiles(
+  tenantId: string
+): Promise<TripSheetDuplicateGroup[]> {
+  const folderPath = await getTripSheetFolderPath(tenantId);
   if (!folderPath || !fs.existsSync(folderPath)) return [];
 
   const entries = fs.readdirSync(folderPath);

@@ -4,15 +4,16 @@ import path from "path";
 import { readInvoiceFile, saveSignedInvoice, embedSignatureOnPdf, getInvoiceFolderPath } from "@/lib/invoices";
 import { getOneDriveInvoiceSource, listOneDriveSignedInvoices, downloadFileById } from "@/lib/microsoft-graph";
 import { updateStopStatus } from "@/lib/trip-data";
-import { prisma } from "@/lib/db";
-import { getSessionContext } from "@/lib/tenant";
+import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const GET = withAuth(async (
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) => {
-  await getSessionContext();
+  // Every read resolves against the caller's own invoice folder / OneDrive
+  // connection, so the same filename in two scopes returns two different files.
+  const ctx = await getScope();
   const { id } = await params;
   const decodedFilename = decodeURIComponent(id);
   const { searchParams } = new URL(request.url);
@@ -20,13 +21,13 @@ export const GET = withAuth(async (
 
   if (wantSigned) {
     // Try OneDrive first
-    const onedrive = await getOneDriveInvoiceSource();
+    const onedrive = await getOneDriveInvoiceSource(ctx.tenantId);
     if (onedrive) {
       try {
-        const signedItems = await listOneDriveSignedInvoices();
+        const signedItems = await listOneDriveSignedInvoices(ctx.tenantId);
         const match = signedItems.find((i) => i.name === decodedFilename);
         if (match) {
-          const buffer = await downloadFileById(match.id);
+          const buffer = await downloadFileById(ctx.tenantId, match.id);
           return new NextResponse(new Uint8Array(buffer), {
             headers: {
               "Content-Type": "application/pdf",
@@ -49,7 +50,7 @@ export const GET = withAuth(async (
     }
 
     // Fall back to local filesystem
-    const folderPath = await getInvoiceFolderPath();
+    const folderPath = await getInvoiceFolderPath(ctx.tenantId);
     const signedPath = path.join(folderPath, "signed", decodedFilename);
     const resolved = path.resolve(signedPath);
     const resolvedFolder = path.resolve(folderPath);
@@ -75,7 +76,7 @@ export const GET = withAuth(async (
     });
   }
 
-  const buffer = await readInvoiceFile(decodedFilename);
+  const buffer = await readInvoiceFile(ctx.tenantId, decodedFilename);
 
   if (!buffer) {
     return NextResponse.json(
@@ -97,7 +98,7 @@ export const PUT = withAuth(async (
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   const { id } = await params;
   const decodedFilename = decodeURIComponent(id);
 
@@ -111,27 +112,26 @@ export const PUT = withAuth(async (
     );
   }
 
-  // If stopId provided, verify it belongs to this tenant
+  // If stopId provided, confirm it is in this scope (scoped read → 404 for a
+  // stop belonging to another ADMIN).
   if (stopId) {
-    const stop = await prisma.stop.findUnique({
+    const stop = await ctx.db.stop.findFirst({
       where: { id: stopId },
       include: { tripSheet: { select: { driverId: true } } },
     });
-    if (!stop || stop.tenantId !== ctx.tenantId) {
+    if (!stop) {
       return NextResponse.json({ error: "Stop not found" }, { status: 404 });
     }
-    // Drivers can only sign their own stops
+    // Drivers can only sign their own stops, within their own scope.
     if (ctx.role === "DRIVER") {
-      const driver = await prisma.driver.findFirst({
-        where: { id: ctx.userId, tenantId: ctx.tenantId },
-      });
+      const driver = await ctx.db.driver.findFirst({ where: { id: ctx.userId } });
       if (!driver || stop.tripSheet.driverId !== driver.id) {
         return NextResponse.json({ error: "Stop not found" }, { status: 404 });
       }
     }
   }
 
-  const originalPdf = await readInvoiceFile(decodedFilename);
+  const originalPdf = await readInvoiceFile(ctx.tenantId, decodedFilename);
   if (!originalPdf) {
     return NextResponse.json(
       { error: `Invoice file "${decodedFilename}" not found. It may have been renamed or moved.` },
@@ -145,6 +145,7 @@ export const PUT = withAuth(async (
   let signedPdfBuffer: Buffer;
   try {
     signedPdfBuffer = await embedSignatureOnPdf(
+      ctx.tenantId,
       originalPdf,
       signatureBytes,
       signerName
@@ -159,6 +160,7 @@ export const PUT = withAuth(async (
 
   try {
     await saveSignedInvoice(
+      ctx.tenantId,
       decodedFilename,
       signedPdfBuffer,
       true
@@ -172,25 +174,26 @@ export const PUT = withAuth(async (
   }
 
   if (stopId) {
-    await updateStopStatus(stopId, "SIGNED");
+    await updateStopStatus(ctx.tenantId, stopId, "SIGNED");
   }
 
-  // Contact lookup / auto-create
+  // Contact lookup / auto-create — within this scope only. A customer name that
+  // matches another ADMIN's contact still gets a fresh contact here.
   let contactId: string | null = null;
   let contactHasEmail = false;
 
   if (stopId) {
-    const stop = await prisma.stop.findUnique({ where: { id: stopId } });
+    const stop = await ctx.db.stop.findFirst({ where: { id: stopId } });
     if (stop) {
-      let contact = await prisma.contact.findFirst({
-        where: { tenantId: ctx.tenantId, deletedAt: null, companyName: { equals: stop.customerName, mode: 'insensitive' } },
+      let contact = await ctx.db.contact.findFirst({
+        where: { deletedAt: null, companyName: { equals: stop.customerName, mode: 'insensitive' } },
       });
       if (!contact) {
-        contact = await prisma.contact.create({
-          data: { tenantId: ctx.tenantId, companyName: stop.customerName, address: stop.address, source: 'AUTO_CREATED' },
+        contact = await ctx.db.contact.create({
+          data: { companyName: stop.customerName, address: stop.address, source: 'AUTO_CREATED' },
         });
       }
-      await prisma.stop.update({ where: { id: stopId }, data: { contactId: contact.id } });
+      await ctx.db.stop.update({ where: { id: stopId }, data: { contactId: contact.id } });
       contactId = contact.id;
       contactHasEmail = !!contact.email;
     }

@@ -1,11 +1,16 @@
 /**
- * App configuration — PostgreSQL via Prisma (key-value store).
+ * Per-scope app configuration — PostgreSQL via Prisma (key-value store).
  * Runtime changes without server restart.
+ *
+ * Every setting here belongs to ONE admin, not to the installation: the invoice
+ * folder, the trip sheet folder and the signature position are all things one
+ * ADMIN configures for their own operation. Reads and writes go through the
+ * scoped client, so an ADMIN can neither see nor overwrite another's settings.
  */
 
 import fs from "fs";
 import path from "path";
-import { prisma } from "./db";
+import { scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
 import { detectCloudProvider, type CloudProvider } from "./cloud-detect";
 
@@ -40,12 +45,12 @@ const DEFAULT_CONFIG: SignexConfig = {
 };
 
 /**
- * Read the current config from the database.
- * Falls back to defaults if keys don't exist.
+ * Read one scope's config from the database.
+ * Falls back to defaults if keys don't exist for that scope.
  */
-export async function readConfig(): Promise<SignexConfig> {
+export async function readConfig(tenantId: string): Promise<SignexConfig> {
   try {
-    const rows = await prisma.appConfig.findMany();
+    const rows = await scopedPrisma(tenantId).appConfig.findMany();
     const config = { ...DEFAULT_CONFIG };
 
     for (const row of rows) {
@@ -73,22 +78,28 @@ export async function readConfig(): Promise<SignexConfig> {
 }
 
 /**
- * Write updated config to the database. Merges with existing config.
+ * Write updated config for one scope. Merges with that scope's existing config.
  */
 export async function writeConfig(
+  tenantId: string,
   updates: Partial<SignexConfig>
 ): Promise<SignexConfig> {
-  const current = await readConfig();
+  const db = scopedPrisma(tenantId);
+  const current = await readConfig(tenantId);
   const merged = { ...current, ...updates };
 
-  // Upsert each key-value pair, serializing objects to JSON
-  const upserts = Object.entries(merged).map(([key, value]) =>
-    prisma.appConfig.upsert({
-      where: { key },
-      update: { value: typeof value === "object" ? JSON.stringify(value) : String(value) },
-      create: { key, value: typeof value === "object" ? JSON.stringify(value) : String(value) },
-    })
-  );
+  // Upsert each key-value pair, serializing objects to JSON.
+  // The AppConfig primary key is [tenantId, key] — the scoped client injects
+  // tenantId into both the where clause and the create payload.
+  const upserts = Object.entries(merged).map(([key, value]) => {
+    const serialized =
+      typeof value === "object" ? JSON.stringify(value) : String(value);
+    return db.appConfig.upsert({
+      where: { tenantId_key: { tenantId, key } },
+      update: { value: serialized },
+      create: { key, value: serialized },
+    });
+  });
 
   await Promise.all(upserts);
 
@@ -96,6 +107,7 @@ export async function writeConfig(
     action: "CONFIG_UPDATE",
     entity: "config",
     details: JSON.stringify(Object.keys(updates)),
+    tenantId,
   });
 
   return merged;

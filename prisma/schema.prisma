@@ -7,28 +7,55 @@ datasource db {
 }
 
 // ─── Multi-Tenancy ───────────────────────────────────────────────────────
+//
+// One Tenant == one isolation scope == one ADMIN account (plus every DRIVER,
+// contact, trip sheet, signature, upload and OneDrive connection beneath them).
+// The SUPER_ADMIN owns the root scope and may *view* any other scope via the
+// scope switcher, but never sees two scopes commingled in one query.
+//
+// Every scoped model carries a NOT NULL tenantId, so a row cannot physically
+// exist without a scope.
+//
+// The `@default("")` on those columns is a TYPE-LEVEL convenience, not a real
+// fallback: it lets callers omit tenantId from create payloads (the scoped client
+// in lib/db-scoped.ts injects the true value at runtime) while keeping full
+// Prisma type inference. An actual "" can never be persisted, because every
+// tenantId is a foreign key to Tenant.id and no tenant has an empty id — the
+// database rejects the row. So "no row without a valid scope" is enforced by the
+// FK, not by application code.
+//
+// Cross-scope references are additionally blocked by composite foreign keys
+// ([tenantId, id] targets), which make a row pointing into another scope
+// unrepresentable rather than merely discouraged.
 
 model Tenant {
-  id          String      @id @default(cuid())
-  name        String
-  slug        String      @unique
-  createdAt   DateTime    @default(now())
-  users       User[]
-  drivers     Driver[]
-  contacts    Contact[]
-  tripSheets  TripSheet[]
-  stops       Stop[]
+  id            String         @id @default(cuid())
+  name          String
+  slug          String         @unique
+  // The ADMIN this scope belongs to. Null for the root (SUPER_ADMIN) scope.
+  ownerAdminId  String?        @unique
+  createdAt     DateTime       @default(now())
+  users         User[]
+  admins        Admin[]
+  drivers       Driver[]
+  contacts      Contact[]
+  tripSheets    TripSheet[]
+  stops         Stop[]
+  appConfigs    AppConfig[]
+  cloudAccounts CloudAccount[]
+  importedFiles ImportedFile[]
+  auditLogs     AuditLog[]
 }
 
 model User {
-  id         String    @id @default(cuid())
-  email      String    @unique
-  name       String?
-  role       UserRole  @default(ADMIN)
-  tenantId   String
-  tenant     Tenant    @relation(fields: [tenantId], references: [id])
-  createdAt  DateTime  @default(now())
-  driver     Driver?
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  role      UserRole @default(ADMIN)
+  tenantId  String   @default("")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  createdAt DateTime @default(now())
+  driver    Driver?
 
   @@index([tenantId])
   @@index([email])
@@ -48,25 +75,36 @@ model Admin {
   email        String      @unique
   passwordHash String
   sessionToken String?
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
-  tripSheets   TripSheet[]
-}
-
-model Driver {
-  id           String      @id @default(cuid())
-  name         String      @unique
-  pinHash      String
-  active       Boolean     @default(true)
-  sessionToken String?
-  userId       String?     @unique
-  user         User?       @relation(fields: [userId], references: [id])
-  tenantId     String
+  tenantId     String      @default("")
   tenant       Tenant      @relation(fields: [tenantId], references: [id])
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   tripSheets   TripSheet[]
 
+  // Composite-FK target so TripSheet.adminId cannot cross a scope boundary.
+  @@unique([tenantId, id])
+  @@index([tenantId])
+}
+
+model Driver {
+  id           String      @id @default(cuid())
+  name         String
+  pinHash      String
+  active       Boolean     @default(true)
+  sessionToken String?
+  userId       String?     @unique
+  user         User?       @relation(fields: [userId], references: [id])
+  tenantId     String      @default("")
+  tenant       Tenant      @relation(fields: [tenantId], references: [id])
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  tripSheets   TripSheet[]
+
+  // Driver names are unique WITHIN a scope only. A global unique constraint
+  // would leak another ADMIN's driver names through the duplicate-name error.
+  @@unique([tenantId, name])
+  // Composite-FK target so TripSheet cannot reference a driver in another scope.
+  @@unique([tenantId, id])
   @@index([tenantId])
   @@index([active])
 }
@@ -84,17 +122,19 @@ model TripSheet {
   sourceFilename String
   uploadedBy     String
   driverId       String
-  driver         Driver          @relation(fields: [driverId], references: [id], onDelete: Cascade)
   regNo          String?
   status         TripSheetStatus @default(ACTIVE)
   adminId        String?
-  admin          Admin?          @relation(fields: [adminId], references: [id])
-  tenantId       String
+  tenantId       String          @default("")
   tenant         Tenant          @relation(fields: [tenantId], references: [id])
   stops          Stop[]
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
+  driver Driver @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  admin  Admin? @relation(fields: [tenantId, adminId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([tenantId, id])
   @@index([tenantId])
   @@index([driverId])
   @@index([driverId, status])
@@ -120,13 +160,17 @@ model Stop {
   emailSentAt   DateTime?
   signatureData String?    @db.Text
   tripSheetId   String
-  tripSheet     TripSheet  @relation(fields: [tripSheetId], references: [id], onDelete: Cascade)
   contactId     String?
-  contact       Contact?   @relation(fields: [contactId], references: [id])
-  tenantId      String
+  tenantId      String     @default("")
   tenant        Tenant     @relation(fields: [tenantId], references: [id])
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
+
+  tripSheet TripSheet @relation(fields: [tenantId, tripSheetId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  // Restrict, not SetNull: the composite FK includes the required tenantId, so
+  // SetNull would try to null a NOT NULL column. Contacts are soft-deleted
+  // (deletedAt) anyway — a hard delete of a referenced contact should fail loudly.
+  contact   Contact?  @relation(fields: [tenantId, contactId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
 
   @@index([tenantId])
   @@index([tripSheetId])
@@ -136,44 +180,65 @@ model Stop {
 }
 
 // ─── App Configuration ────────────────────────────────────────────────────
+//
+// Per-scope key/value config. Invoice folder, trip sheet folder and signature
+// position are settings of ONE admin, not of the installation.
 
 model AppConfig {
-  key       String   @id
+  tenantId  String   @default("")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  key       String
   value     String
   updatedAt DateTime @updatedAt
+
+  @@id([tenantId, key])
+  @@index([tenantId])
 }
 
 // ─── Cloud Accounts (OneDrive / Google Drive OAuth) ───────────────────────
+//
+// One connection PER SCOPE per provider. accessToken and refreshToken are
+// stored encrypted at rest (AES-256-GCM, see lib/crypto.ts) — the column type
+// holds ciphertext, never a usable bearer token.
 
 model CloudAccount {
-  id                   String   @id @default(cuid())
-  provider             String   // "onedrive" | "gdrive"
-  accountEmail         String?
-  accountName          String?
-  accessToken          String   @db.Text
-  refreshToken         String   @db.Text
-  tokenExpiry          DateTime
-  driveId              String?
-  folderPath           String?  // trip sheet folder
-  folderItemId         String?  // trip sheet folder item ID
-  invoiceFolderPath    String?
-  invoiceFolderItemId  String?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  id                  String   @id @default(cuid())
+  tenantId            String   @default("")
+  tenant              Tenant   @relation(fields: [tenantId], references: [id])
+  provider            String // "onedrive" | "gdrive"
+  accountEmail        String?
+  accountName         String?
+  accessToken         String   @db.Text // encrypted
+  refreshToken        String   @db.Text // encrypted
+  tokenExpiry         DateTime
+  driveId             String?
+  folderPath          String? // trip sheet folder
+  folderItemId        String? // trip sheet folder item ID
+  invoiceFolderPath   String?
+  invoiceFolderItemId String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
-  @@unique([provider])
+  @@unique([tenantId, provider])
+  @@index([tenantId])
 }
 
 // ─── Imported Files (Trip Sheet Cloud Folder Tracking) ────────────────────
 
 model ImportedFile {
   id          String   @id @default(cuid())
-  filename    String   @unique
+  tenantId    String   @default("")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  filename    String
   folderPath  String
   importedAt  DateTime @default(now())
   tripSheetId String?
   status      String   @default("imported") // imported | failed | skipped
 
+  // Scoped uniqueness — one ADMIN importing "route.csv" must not mark it
+  // consumed for every other ADMIN.
+  @@unique([tenantId, filename])
+  @@index([tenantId])
   @@index([filename])
   @@index([importedAt])
 }
@@ -190,20 +255,26 @@ enum AuditAction {
   DRIVER_UPDATE
   DRIVER_DELETE
   CONFIG_UPDATE
+  SCOPE_SWITCH
 }
 
 model AuditLog {
   id        String      @id @default(cuid())
   action    AuditAction
-  entity    String      // trip_sheet | stop | driver | admin | config
+  entity    String // trip_sheet | stop | driver | admin | config | scope
   entityId  String?
   userName  String?
   details   String?     @db.Text
+  // Nullable by design: failed logins and other pre-session events have no
+  // scope yet. Everything post-authentication MUST set it.
+  tenantId  String?
+  tenant    Tenant?     @relation(fields: [tenantId], references: [id])
   createdAt DateTime    @default(now())
 
   @@index([action])
   @@index([createdAt])
   @@index([entity, entityId])
+  @@index([tenantId, createdAt])
 }
 
 // ─── Contacts ─────────────────────────────────────────────────────────────
@@ -216,7 +287,7 @@ enum ContactSource {
 
 model Contact {
   id            String        @id @default(cuid())
-  tenantId      String
+  tenantId      String        @default("")
   tenant        Tenant        @relation(fields: [tenantId], references: [id])
   companyName   String
   contactPerson String?
@@ -231,9 +302,10 @@ model Contact {
   updatedAt     DateTime      @updatedAt
   stops         Stop[]
 
+  // Composite-FK target so a Stop cannot reference a contact in another scope.
+  @@unique([tenantId, id])
   @@index([tenantId])
   @@index([tenantId, companyName])
   @@index([tenantId, email])
   @@index([deletedAt])
 }
-

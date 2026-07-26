@@ -1,18 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readConfig, writeConfig, validateFolderPath } from "@/lib/config";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const GET = withAuth(async () => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
-  const config = await readConfig();
+  // Per-scope settings: folder paths and signature position belong to this ADMIN.
+  const config = await readConfig(ctx.tenantId);
   return NextResponse.json(config);
 });
 
 export const PUT = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
@@ -43,7 +44,7 @@ export const PUT = withAuth(async (request: NextRequest) => {
     }
   }
 
-  const updated = await writeConfig(body);
+  const updated = await writeConfig(ctx.tenantId, body);
   return NextResponse.json({
     success: true,
     config: updated,

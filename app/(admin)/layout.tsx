@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
+import ScopeSwitcher, { ScopeBanner } from "@/components/admin/ScopeSwitcher";
 
 const navItems = [
   {
@@ -206,6 +207,9 @@ export default function AdminLayout({
           )}
         </nav>
 
+        {/* Scope switcher — SUPER_ADMIN only, renders nothing otherwise */}
+        <ScopeSwitcher role={role} />
+
         {/* Quick links */}
         <div className="px-3 py-3 border-t border-white/5">
           <Link
@@ -331,6 +335,9 @@ export default function AdminLayout({
             )}
           </nav>
         </div>
+
+        {/* Warns whenever a SUPER_ADMIN is viewing another ADMIN's scope */}
+        <ScopeBanner role={role} />
 
         {/* ─── Content ─────────────────────────────────────────────────── */}
         <main className="flex-1 p-6 md:p-8 pb-24 md:pb-8 overflow-y-auto bg-ink-surface">

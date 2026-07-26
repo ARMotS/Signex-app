@@ -5,9 +5,13 @@
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
     "postinstall": "prisma generate",
-    "build": "prisma db push && next build --webpack",
+    "build": "prisma migrate deploy && next build --webpack",
     "start": "next start",
     "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:isolation": "vitest run tests/isolation.test.ts",
+    "db:backfill-isolation": "npx tsx prisma/backfill-tenant-isolation.ts",
     "db:push": "npx prisma db push",
     "db:studio": "npx prisma studio",
     "db:migrate": "npx prisma migrate dev",
@@ -45,6 +49,8 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "vitest": "^3.2.4",
+    "tsx": "^4.20.3",
     "@types/node": "^20",
     "@types/nodemailer": "^8.0.0",
     "@types/papaparse": "^5.5.2",

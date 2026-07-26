@@ -18,12 +18,20 @@ if (!_secret) {
 }
 const SECRET: string = _secret;
 
-interface SessionData {
+export interface SessionData {
   id: string;
   role: "admin" | "driver" | "super_admin";
   name: string;
   email?: string;
+  /** The account's OWN isolation scope. Never changes for the life of a session. */
   tenantId?: string;
+  /**
+   * SUPER_ADMIN only: the scope currently being viewed via the scope switcher.
+   * Read exclusively by getScope() in lib/tenant.ts, and ignored outright for
+   * any role other than super_admin. Lives inside the HMAC-signed payload, so a
+   * client cannot set it — only POST /api/admin/scopes can.
+   */
+  viewTenantId?: string | null;
   sessionToken: string;
   exp: number;
 }
@@ -36,6 +44,23 @@ function sign(data: string): string {
 
 function generateSessionToken(): string {
   return crypto.randomBytes(32).toString("hex");
+}
+
+const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
+
+/** Serialise, sign and write the session cookie. */
+async function writeSessionCookie(session: SessionData): Promise<void> {
+  const payload = Buffer.from(JSON.stringify(session)).toString("base64");
+  const signature = sign(payload);
+
+  const cookieStore = await cookies();
+  cookieStore.set(SESSION_COOKIE, `${payload}.${signature}`, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: SESSION_MAX_AGE_SECONDS,
+  });
 }
 
 export async function createSession(user: {
@@ -60,24 +85,29 @@ export async function createSession(user: {
     });
   }
 
-  const session: SessionData = {
+  await writeSessionCookie({
     ...user,
+    // A fresh login always starts in the account's own scope.
+    viewTenantId: null,
     sessionToken,
-    exp: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
-  };
-
-  const payload = Buffer.from(JSON.stringify(session)).toString("base64");
-  const signature = sign(payload);
-  const value = `${payload}.${signature}`;
-
-  const cookieStore = await cookies();
-  cookieStore.set(SESSION_COOKIE, value, {
-    httpOnly: true,
-    secure: false,
-    sameSite: "lax",
-    path: "/",
-    maxAge: 24 * 60 * 60, // 24 hours
+    exp: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
   });
+}
+
+/**
+ * SUPER_ADMIN scope switcher: re-issue the current session cookie with a
+ * different `viewTenantId`, leaving identity, session token and expiry intact.
+ *
+ * Callers MUST have already verified the caller is a SUPER_ADMIN and that the
+ * target tenant exists — this function performs no authorization of its own.
+ * Pass `null` to return to the account's own scope.
+ */
+export async function setViewScope(viewTenantId: string | null): Promise<boolean> {
+  const session = await getSession();
+  if (!session) return false;
+
+  await writeSessionCookie({ ...session, viewTenantId });
+  return true;
 }
 
 export async function getSession(): Promise<SessionData | null> {

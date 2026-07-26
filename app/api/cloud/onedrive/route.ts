@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCloudAccountStatus, disconnectCloudAccount } from "@/lib/microsoft-graph";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 /**
@@ -8,10 +8,12 @@ import { withAuth } from "@/lib/api-handler";
  * Returns the current OneDrive connection status.
  */
 export const GET = withAuth(async () => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
-  const status = await getCloudAccountStatus();
+  // This scope's own connection. An ADMIN without one sees "not connected" even
+  // when other ADMINs have connected drives.
+  const status = await getCloudAccountStatus(ctx.tenantId);
   return NextResponse.json({ connected: !!status, account: status });
 });
 
@@ -20,9 +22,9 @@ export const GET = withAuth(async () => {
  * Disconnects the OneDrive account.
  */
 export const DELETE = withAuth(async () => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
-  await disconnectCloudAccount();
+  await disconnectCloudAccount(ctx.tenantId);
   return NextResponse.json({ success: true });
 });

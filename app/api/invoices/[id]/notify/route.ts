@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs'
 import path from 'path'
-import { prisma } from '@/lib/db'
 import { sendDeliveryConfirmation } from '@/lib/email'
-import { getSessionContext } from '@/lib/tenant'
+import { getScope } from '@/lib/tenant'
 import { withAuth } from '@/lib/api-handler'
 import { getInvoiceFolderPath } from '@/lib/invoices'
 import { getOneDriveInvoiceSource, listOneDriveSignedInvoices, downloadFileById } from '@/lib/microsoft-graph'
@@ -11,16 +10,18 @@ import { getOneDriveInvoiceSource, listOneDriveSignedInvoices, downloadFileById 
 export const runtime = 'nodejs'
 
 export const POST = withAuth(async (req: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   const { id } = await params;
   const { driverName } = await req.json();
 
-  const stop = await prisma.stop.findUnique({
+  // Scoped read — a stop id from another ADMIN is not found, so this endpoint
+  // cannot be used to email another ADMIN's customer.
+  const stop = await ctx.db.stop.findFirst({
     where: { id },
     include: { contact: true },
   });
 
-  if (!stop || stop.tenantId !== ctx.tenantId) {
+  if (!stop) {
     return NextResponse.json({ error: 'Stop not found' }, { status: 404 });
   }
   if (stop.status !== 'SIGNED') return NextResponse.json({ error: 'Invoice not signed yet' }, { status: 400 });
@@ -32,18 +33,18 @@ export const POST = withAuth(async (req: NextRequest, { params }: { params: Prom
   let pdfAttachment: { filename: string; content: Buffer } | undefined;
   if (stop.invoiceFile) {
     try {
-      const onedrive = await getOneDriveInvoiceSource();
+      const onedrive = await getOneDriveInvoiceSource(ctx.tenantId);
       if (onedrive) {
-        const signedItems = await listOneDriveSignedInvoices();
+        const signedItems = await listOneDriveSignedInvoices(ctx.tenantId);
         const match = signedItems.find((i) => i.name === stop.invoiceFile);
         if (match) {
           pdfAttachment = {
             filename: `signed-${stop.invoiceFile}`,
-            content: await downloadFileById(match.id),
+            content: await downloadFileById(ctx.tenantId, match.id),
           };
         }
       } else {
-        const folderPath = await getInvoiceFolderPath();
+        const folderPath = await getInvoiceFolderPath(ctx.tenantId);
         const signedPath = path.join(folderPath, 'signed', stop.invoiceFile);
         if (fs.existsSync(signedPath)) {
           pdfAttachment = {
@@ -71,7 +72,7 @@ export const POST = withAuth(async (req: NextRequest, { params }: { params: Prom
   });
 
   if (result.success) {
-    await prisma.stop.update({
+    await ctx.db.stop.update({
       where: { id },
       data: { emailSentAt: new Date() },
     });

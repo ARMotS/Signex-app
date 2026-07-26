@@ -32,8 +32,11 @@ async function main() {
     },
   });
 
-  console.log(`Seeded tenant "${tenant.name}" (${tenant.id})`);
+  console.log(`Seeded root scope "${tenant.name}" (${tenant.id})`);
   console.log(`Seeded super admin: ${email}`);
+  console.log(
+    "Each ADMIN created later gets its own isolated scope — see POST /api/admin/users."
+  );
 }
 
 main()

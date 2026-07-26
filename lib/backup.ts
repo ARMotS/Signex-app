@@ -10,12 +10,15 @@
  *     signed-invoices/     ← signed PDF files
  *     trip-sheets/         ← JSON export per trip sheet
  *     manifest.json        ← summary + timestamps
+ *
+ * Scoped throughout: `tenantId` is required, so a backup can only ever contain
+ * one ADMIN's invoices and trip sheets, and a purge can only ever delete theirs.
  */
 
 import fs from "fs";
 import path from "path";
 import JSZip from "jszip";
-import { prisma } from "./db";
+import { scopedPrisma } from "./db-scoped";
 import { getInvoiceFolderPath } from "./invoices";
 import {
   getOneDriveInvoiceSource,
@@ -55,14 +58,15 @@ export interface BackupSummary {
  * Optionally filter to invoices signed before a given date.
  */
 export async function getBackupableInvoices(
+  tenantId: string,
   beforeDate?: Date
 ): Promise<BackupableInvoice[]> {
-  const onedrive = await getOneDriveInvoiceSource();
+  const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
-    return getBackupableInvoicesFromOneDrive(beforeDate);
+    return getBackupableInvoicesFromOneDrive(tenantId, beforeDate);
   }
 
-  const folderPath = await getInvoiceFolderPath();
+  const folderPath = await getInvoiceFolderPath(tenantId);
   const signedFolder = path.join(folderPath, "signed");
 
   if (!fs.existsSync(signedFolder)) return [];
@@ -98,9 +102,10 @@ export async function getBackupableInvoices(
 }
 
 async function getBackupableInvoicesFromOneDrive(
+  tenantId: string,
   beforeDate?: Date
 ): Promise<BackupableInvoice[]> {
-  const items = await listOneDriveSignedInvoices();
+  const items = await listOneDriveSignedInvoices(tenantId);
   const results: BackupableInvoice[] = [];
 
   for (const item of items) {
@@ -127,19 +132,16 @@ async function getBackupableInvoicesFromOneDrive(
  * Optionally filter to trip sheets created before a given date.
  */
 export async function getBackupableTripSheets(
-  beforeDate?: Date,
-  tenantId?: string
+  tenantId: string,
+  beforeDate?: Date
 ): Promise<BackupableTripSheet[]> {
   const whereClause: Record<string, unknown> = {};
   if (beforeDate) {
     whereClause.date = { lt: beforeDate };
   }
-  if (tenantId) {
-    whereClause.tenantId = tenantId;
-  }
 
   // Get trip sheets with their stop counts
-  const tripSheets = await prisma.tripSheet.findMany({
+  const tripSheets = await scopedPrisma(tenantId).tripSheet.findMany({
     where: whereClause,
     orderBy: { date: "asc" },
     include: {
@@ -174,12 +176,12 @@ export async function getBackupableTripSheets(
  * Get a combined summary of all backupable items.
  */
 export async function getBackupSummary(
-  beforeDate?: Date,
-  tenantId?: string
+  tenantId: string,
+  beforeDate?: Date
 ): Promise<BackupSummary> {
   const [invoices, tripSheets] = await Promise.all([
-    getBackupableInvoices(beforeDate),
-    getBackupableTripSheets(beforeDate, tenantId),
+    getBackupableInvoices(tenantId, beforeDate),
+    getBackupableTripSheets(tenantId, beforeDate),
   ]);
 
   return {
@@ -197,9 +199,9 @@ export async function getBackupSummary(
  * data exports. Returns the ZIP as a Buffer.
  */
 export async function createBackupZip(
+  tenantId: string,
   invoiceFilenames: string[],
-  tripSheetIds: string[],
-  tenantId?: string
+  tripSheetIds: string[]
 ): Promise<Buffer> {
   const zip = new JSZip();
   const datestamp = new Date().toISOString().slice(0, 10);
@@ -207,21 +209,21 @@ export async function createBackupZip(
 
   // ── Signed invoices ──────────────────────────────────────────────
   if (invoiceFilenames.length > 0) {
-    const onedrive = await getOneDriveInvoiceSource();
+    const onedrive = await getOneDriveInvoiceSource(tenantId);
     if (onedrive) {
-      const items = await listOneDriveSignedInvoices();
+      const items = await listOneDriveSignedInvoices(tenantId);
       for (const filename of invoiceFilenames) {
         const item = items.find((i) => i.name === filename);
         if (!item) continue;
         try {
-          const fileData = await downloadFileById(item.id);
+          const fileData = await downloadFileById(tenantId, item.id);
           zip.file(`${prefix}/signed-invoices/${filename}`, fileData);
         } catch {
           // skip files we can't download
         }
       }
     } else {
-      const folderPath = await getInvoiceFolderPath();
+      const folderPath = await getInvoiceFolderPath(tenantId);
       const signedFolder = path.join(folderPath, "signed");
 
       for (const filename of invoiceFilenames) {
@@ -241,8 +243,8 @@ export async function createBackupZip(
 
   // ── Trip sheet JSON exports ──────────────────────────────────────
   if (tripSheetIds.length > 0) {
-    const tripSheets = await prisma.tripSheet.findMany({
-      where: { id: { in: tripSheetIds }, ...(tenantId && { tenantId }) },
+    const tripSheets = await scopedPrisma(tenantId).tripSheet.findMany({
+      where: { id: { in: tripSheetIds } },
       include: {
         driver: { select: { name: true } },
         stops: { orderBy: { stopNumber: "asc" } },
@@ -311,9 +313,10 @@ export async function createBackupZip(
  * Only removes from the signed/ subfolder (not originals).
  */
 export async function purgeBackedUpInvoices(
+  tenantId: string,
   filenames: string[]
 ): Promise<{ deleted: number; failed: string[] }> {
-  const folderPath = await getInvoiceFolderPath();
+  const folderPath = await getInvoiceFolderPath(tenantId);
   const signedFolder = path.join(folderPath, "signed");
   let deleted = 0;
   const failed: string[] = [];
@@ -349,24 +352,23 @@ export async function purgeBackedUpInvoices(
  * Cascade deletes handle stops automatically.
  */
 export async function purgeBackedUpTripSheets(
-  tripSheetIds: string[],
-  tenantId?: string
+  tenantId: string,
+  tripSheetIds: string[]
 ): Promise<{ deleted: number; failed: string[] }> {
+  const db = scopedPrisma(tenantId);
   let deleted = 0;
   const failed: string[] = [];
 
   for (const id of tripSheetIds) {
     try {
-      // Verify ownership before deleting
-      if (tenantId) {
-        const ts = await prisma.tripSheet.findUnique({ where: { id } });
-        if (!ts || ts.tenantId !== tenantId) {
-          failed.push(id);
-          continue;
-        }
+      // deleteMany, not delete: an id outside this scope matches zero rows and
+      // is reported as failed rather than throwing.
+      const res = await db.tripSheet.deleteMany({ where: { id } });
+      if (res.count > 0) {
+        deleted++;
+      } else {
+        failed.push(id);
       }
-      await prisma.tripSheet.delete({ where: { id } });
-      deleted++;
     } catch {
       failed.push(id);
     }

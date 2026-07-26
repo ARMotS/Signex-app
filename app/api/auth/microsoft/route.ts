@@ -1,19 +1,26 @@
 import { NextResponse } from "next/server";
 import { getAuthorizationUrl } from "@/lib/microsoft-graph";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { signOAuthState } from "@/lib/crypto";
+import { getScope, requireRole, requireHomeScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
-import crypto from "crypto";
 
 /**
  * GET /api/auth/microsoft
  * Initiates the OneDrive OAuth flow. Admin-only.
  * Returns a redirect URL to Microsoft's consent page.
+ *
+ * `state` is an HMAC-signed token binding this round-trip to the caller's scope,
+ * verified in the callback. Previously it was a bare random value returned to the
+ * client and never checked on the way back.
  */
 export const GET = withAuth(async () => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  // Connecting a drive is an act of ownership — a SUPER_ADMIN must not attach
+  // their own Microsoft account while viewing someone else's scope.
+  requireHomeScope(ctx);
 
-  const state = crypto.randomBytes(16).toString("hex");
+  const state = signOAuthState(ctx.tenantId);
   const url = getAuthorizationUrl(state);
 
   return NextResponse.json({ url, state });

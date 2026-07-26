@@ -1,21 +1,22 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 
-interface Driver {
-  id: string;
-  name: string;
-  active: boolean;
-  stopCount: number;
-  signedCount: number;
-}
-
+/**
+ * Driver sign-in: name + PIN.
+ *
+ * This page used to fetch and display every driver in the installation from a
+ * public, unauthenticated endpoint — which meant anyone could enumerate every
+ * ADMIN's driver names and live delivery counts. That endpoint is gone. The
+ * driver now types their name, and the server resolves which ADMIN's scope they
+ * belong to from the name+PIN pair. Nothing about who exists is revealed before
+ * a successful sign-in.
+ */
 export default function DriverSelectPage() {
   const router = useRouter();
-  const [drivers, setDrivers] = useState<Driver[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedDriver, setSelectedDriver] = useState<Driver | null>(null);
+  const [name, setName] = useState("");
+  const [nameConfirmed, setNameConfirmed] = useState(false);
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -23,18 +24,10 @@ export default function DriverSelectPage() {
   useEffect(() => {
     // Clear old driver data so stale sessions don't persist
     localStorage.removeItem("signex-driver");
-
-    fetch("/api/auth/drivers")
-      .then((r) => r.json())
-      .then((data) => {
-        setDrivers((data.drivers || []).filter((d: Driver) => d.active));
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
   }, []);
 
-  const handlePinSubmit = async () => {
-    if (pin.length !== 4 || !selectedDriver) return;
+  const handlePinSubmit = useCallback(async () => {
+    if (pin.length !== 4 || !name.trim()) return;
     setError("");
     setSubmitting(true);
 
@@ -44,18 +37,20 @@ export default function DriverSelectPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           role: "driver",
-          name: selectedDriver.name,
+          name: name.trim(),
           pin,
         }),
       });
       const data = await res.json();
 
       if (res.ok) {
+        // The server is the source of truth for identity and scope; this is
+        // only a display convenience for the run screen.
         localStorage.setItem(
           "signex-driver",
           JSON.stringify({
-            id: selectedDriver.id,
-            name: selectedDriver.name,
+            id: data.account.id,
+            name: data.account.name,
           })
         );
         router.push("/run");
@@ -65,23 +60,16 @@ export default function DriverSelectPage() {
       }
     } catch {
       setError("Network error");
+      setPin("");
     } finally {
       setSubmitting(false);
     }
-  };
+  }, [pin, name, router]);
 
   const handlePinInput = (digit: string) => {
     if (pin.length < 4) {
-      const newPin = pin + digit;
-      setPin(newPin);
+      setPin(pin + digit);
       setError("");
-      // Auto-submit on 4 digits
-      if (newPin.length === 4) {
-        setTimeout(() => {
-          setPin(newPin);
-          // trigger submit after state update
-        }, 50);
-      }
     }
   };
 
@@ -92,31 +80,29 @@ export default function DriverSelectPage() {
 
   // Auto-submit when PIN reaches 4 digits
   useEffect(() => {
-    if (pin.length === 4 && selectedDriver && !submitting) {
+    if (pin.length === 4 && nameConfirmed && !submitting) {
       handlePinSubmit();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pin]);
+  }, [pin, nameConfirmed]);
 
-  if (loading) {
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <div className="w-6 h-6 border-2 border-ink-border border-t-ink-green rounded-full animate-spin" />
-      </div>
-    );
-  }
-
-  // PIN entry screen
-  if (selectedDriver) {
+  // ── PIN entry screen ────────────────────────────────────────────────
+  if (nameConfirmed) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center px-4 py-6 animate-fade-in">
         <div className="w-16 h-16 rounded-full bg-ink-surface flex items-center justify-center mb-4">
           <span className="text-xl font-mono font-medium text-ink-muted">
-            {selectedDriver.name.split(" ").map((n) => n[0]).join("")}
+            {name
+              .trim()
+              .split(/\s+/)
+              .map((n) => n[0])
+              .join("")
+              .toUpperCase()
+              .slice(0, 2)}
           </span>
         </div>
         <p className="font-mono text-lg font-medium text-ink-black mb-1">
-          {selectedDriver.name}
+          {name.trim()}
         </p>
         <p className="text-sm text-ink-muted mb-8">Enter your 4-digit PIN</p>
 
@@ -132,9 +118,7 @@ export default function DriverSelectPage() {
             <div
               key={i}
               className={`w-4 h-4 rounded-full transition-all ${
-                i < pin.length
-                  ? "bg-ink-green scale-110"
-                  : "bg-ink-border"
+                i < pin.length ? "bg-ink-green scale-110" : "bg-ink-border"
               }`}
             />
           ))}
@@ -183,100 +167,70 @@ export default function DriverSelectPage() {
 
         <button
           onClick={() => {
-            setSelectedDriver(null);
+            setNameConfirmed(false);
             setPin("");
             setError("");
           }}
           className="mt-8 text-xs font-mono text-ink-muted hover:text-ink-black transition-colors"
         >
-          ← Choose a different driver
+          ← Change name
         </button>
       </div>
     );
   }
 
-  // Driver selection screen
+  // ── Name entry screen ───────────────────────────────────────────────
   return (
-    <div className="flex-1 flex flex-col px-4 py-6">
+    <div className="flex-1 flex flex-col justify-center px-4 py-6">
       <div className="mb-8 text-center">
         <h1 className="font-mono text-xl font-medium text-ink-black tracking-tight">
-          Select your name
+          Driver sign-in
         </h1>
         <p className="text-sm text-ink-muted mt-1">
-          Tap your name to start your delivery run
+          Enter your name exactly as your dispatcher set it up
         </p>
       </div>
 
-      {drivers.length === 0 ? (
-        <div className="flex-1 flex flex-col items-center justify-center text-center px-6">
-          <div className="text-4xl mb-4">👤</div>
-          <p className="font-mono text-sm font-medium text-ink-black mb-2">
-            No drivers available
-          </p>
-          <p className="text-xs text-ink-muted max-w-sm">
-            Ask your dispatcher to add you to the system from the admin dashboard.
-          </p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-3 max-w-md mx-auto w-full stagger-children">
-          {drivers.map((driver) => {
-            const hasStops = driver.stopCount > 0;
-            const allSigned = hasStops && driver.signedCount === driver.stopCount;
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (name.trim().length > 0) {
+            setError("");
+            setNameConfirmed(true);
+          }
+        }}
+        className="max-w-md mx-auto w-full"
+      >
+        <label
+          htmlFor="driver-name"
+          className="block text-xs font-mono uppercase tracking-wide text-ink-muted mb-2"
+        >
+          Your name
+        </label>
+        <input
+          id="driver-name"
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          autoComplete="name"
+          autoCapitalize="words"
+          autoFocus
+          placeholder="e.g. John Mokoena"
+          className="w-full px-4 py-3.5 bg-ink-card border border-ink-border rounded font-mono text-base text-ink-black placeholder:text-ink-muted-light focus:border-ink-green focus:outline-none transition-colors"
+        />
 
-            return (
-              <button
-                key={driver.id}
-                onClick={() => setSelectedDriver(driver)}
-                className="flex items-center gap-4 w-full p-5 bg-ink-card border border-ink-border rounded text-left hover:border-ink-green hover:bg-ink-green-dim active:scale-[0.98] transition-all touch-target"
-              >
-                <div className="w-12 h-12 rounded bg-ink-surface flex items-center justify-center shrink-0">
-                  <span className="text-lg font-mono font-medium text-ink-muted">
-                    {driver.name.split(" ").map((n) => n[0]).join("")}
-                  </span>
-                </div>
-                <div className="flex-1">
-                  <p className="font-mono text-base font-medium text-ink-black">
-                    {driver.name}
-                  </p>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    {hasStops && (
-                      <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${
-                        allSigned
-                          ? "bg-ink-green-dim text-ink-green"
-                          : "bg-ink-amber-dim text-ink-amber"
-                      }`}>
-                        {driver.signedCount}/{driver.stopCount} stops
-                      </span>
-                    )}
-                    {!hasStops && (
-                      <span className="text-xs text-ink-muted">
-                        No deliveries
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="text-ink-muted-light"
-                >
-                  <path d="m9 18 6-6-6-6" />
-                </svg>
-              </button>
-            );
-          })}
-        </div>
-      )}
+        <button
+          type="submit"
+          disabled={name.trim().length === 0}
+          className="w-full mt-4 px-4 py-3.5 rounded bg-ink-green text-white font-mono text-sm font-medium hover:bg-ink-green/90 active:scale-[0.99] transition-all touch-target disabled:opacity-40 disabled:active:scale-100"
+        >
+          Continue
+        </button>
+      </form>
 
       <div className="mt-auto pt-8 text-center">
         <p className="text-xs font-mono text-ink-muted">
-          Don&apos;t see your name? Ask your dispatcher to add you.
+          Trouble signing in? Ask your dispatcher to check your name and PIN.
         </p>
       </div>
     </div>

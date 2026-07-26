@@ -2,25 +2,26 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   listOneDriveTripSheetFiles,
   downloadFileById,
+  assertItemInConfiguredFolder,
 } from "@/lib/microsoft-graph";
-import { getSessionContext, requireRole } from "@/lib/tenant";
+import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
-import { prisma } from "@/lib/db";
 
 /**
  * GET /api/cloud/onedrive/files
- * Lists trip sheet files (CSV/Excel) in the configured OneDrive folder.
- * Checks import status against the DB.
+ * Lists trip sheet files (CSV/Excel) in THIS scope's configured OneDrive folder.
+ * Checks import status against this scope's ImportedFile rows.
  */
 export const GET = withAuth(async () => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
-  const items = await listOneDriveTripSheetFiles();
+  const items = await listOneDriveTripSheetFiles(ctx.tenantId);
 
-  // Check which files have already been imported
+  // Which files this ADMIN has already imported. Import state is per-scope, so
+  // another ADMIN importing the same filename does not mark it consumed here.
   const filenames = items.map((i) => i.name);
-  const importRecords = await prisma.importedFile.findMany({
+  const importRecords = await ctx.db.importedFile.findMany({
     where: { filename: { in: filenames } },
   });
   const importMap = new Map(importRecords.map((r) => [r.filename, r]));
@@ -56,9 +57,13 @@ export const GET = withAuth(async () => {
  * POST /api/cloud/onedrive/files
  * Download a file from OneDrive by item ID and return its contents as base64.
  * Body: { fileId: string, filename: string }
+ *
+ * `fileId` is client-supplied, so two things constrain it: the Graph call uses
+ * only this scope's token (another ADMIN's item id 404s at Microsoft), and the
+ * item must sit inside a folder this ADMIN configured in Signex.
  */
 export const POST = withAuth(async (request: NextRequest) => {
-  const ctx = await getSessionContext();
+  const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { fileId, filename } = await request.json();
@@ -70,7 +75,13 @@ export const POST = withAuth(async (request: NextRequest) => {
     );
   }
 
-  const buffer = await downloadFileById(fileId);
+  try {
+    await assertItemInConfiguredFolder(ctx.tenantId, fileId);
+  } catch {
+    return NextResponse.json({ error: "File not found" }, { status: 404 });
+  }
+
+  const buffer = await downloadFileById(ctx.tenantId, fileId);
   const base64 = buffer.toString("base64");
 
   return NextResponse.json({

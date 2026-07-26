@@ -1,6 +1,10 @@
 /**
  * Invoice file utilities — reads PDFs from a configured local/shared folder.
- * 
+ *
+ * Every function takes `tenantId` first: the folder path is read from that
+ * scope's AppConfig and any OneDrive access uses that scope's own connection.
+ * One ADMIN can neither list, read, sign, nor delete another ADMIN's invoices.
+ *
  * Priority for folder path:
  *   1. Runtime config in database (AppConfig table) — set via Settings page
  *   2. INVOICE_FOLDER_PATH environment variable
@@ -28,9 +32,9 @@ import {
 /** Default fallback folder (relative to project root) */
 const DEFAULT_FOLDER = path.join(process.cwd(), "invoices");
 
-/** Get the configured invoice folder path (config DB → env var → default) */
-export async function getInvoiceFolderPath(): Promise<string> {
-  const config = await readConfig();
+/** Get this scope's invoice folder path (config DB → env var → default) */
+export async function getInvoiceFolderPath(tenantId: string): Promise<string> {
+  const config = await readConfig(tenantId);
   if (config.invoiceFolderPath && config.invoiceFolderPath.trim() !== "") {
     return config.invoiceFolderPath;
   }
@@ -59,22 +63,22 @@ export interface InvoiceFile {
  * Uses OneDrive Graph API if an invoice folder is configured there,
  * otherwise falls back to the local filesystem.
  */
-export async function listInvoiceFiles(): Promise<InvoiceFile[]> {
+export async function listInvoiceFiles(tenantId: string): Promise<InvoiceFile[]> {
   // Try OneDrive first
-  const onedrive = await getOneDriveInvoiceSource();
+  const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
-    return listInvoiceFilesFromOneDrive();
+    return listInvoiceFilesFromOneDrive(tenantId);
   }
 
   // Fall back to local filesystem
-  return listInvoiceFilesFromLocal();
+  return listInvoiceFilesFromLocal(tenantId);
 }
 
-async function listInvoiceFilesFromOneDrive(): Promise<InvoiceFile[]> {
+async function listInvoiceFilesFromOneDrive(tenantId: string): Promise<InvoiceFile[]> {
   try {
     const [items, signedItems] = await Promise.all([
-      listOneDriveInvoiceFiles(),
-      listOneDriveSignedInvoices(),
+      listOneDriveInvoiceFiles(tenantId),
+      listOneDriveSignedInvoices(tenantId),
     ]);
 
     const signedSet = new Set(signedItems.map((s) => s.name.toLowerCase()));
@@ -102,8 +106,8 @@ async function listInvoiceFilesFromOneDrive(): Promise<InvoiceFile[]> {
   }
 }
 
-async function listInvoiceFilesFromLocal(): Promise<InvoiceFile[]> {
-  const folderPath = await getInvoiceFolderPath();
+async function listInvoiceFilesFromLocal(tenantId: string): Promise<InvoiceFile[]> {
+  const folderPath = await getInvoiceFolderPath(tenantId);
 
   // Ensure folder exists
   if (!fs.existsSync(folderPath)) {
@@ -156,15 +160,18 @@ async function listInvoiceFilesFromLocal(): Promise<InvoiceFile[]> {
  * Read a specific invoice PDF file as a Buffer.
  * Downloads from OneDrive if configured, otherwise reads from local filesystem.
  */
-export async function readInvoiceFile(filename: string): Promise<Buffer | null> {
+export async function readInvoiceFile(
+  tenantId: string,
+  filename: string
+): Promise<Buffer | null> {
   // Try OneDrive first
-  const onedrive = await getOneDriveInvoiceSource();
+  const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
     try {
-      const items = await listOneDriveInvoiceFiles();
+      const items = await listOneDriveInvoiceFiles(tenantId);
       const match = items.find((i) => i.name === filename);
       if (match) {
-        return downloadFileById(match.id);
+        return downloadFileById(tenantId, match.id);
       }
       return null;
     } catch (err) {
@@ -174,7 +181,7 @@ export async function readInvoiceFile(filename: string): Promise<Buffer | null> 
   }
 
   // Fall back to local filesystem
-  const folderPath = await getInvoiceFolderPath();
+  const folderPath = await getInvoiceFolderPath(tenantId);
   const filePath = path.join(folderPath, filename);
 
   // Security: prevent directory traversal
@@ -196,15 +203,16 @@ export async function readInvoiceFile(filename: string): Promise<Buffer | null> 
  * Uploads to OneDrive if configured, otherwise saves to local filesystem.
  */
 export async function saveSignedInvoice(
+  tenantId: string,
   filename: string,
   pdfBuffer: Buffer,
   saveToSubfolder: boolean = true
 ): Promise<string> {
   // Upload to OneDrive if invoice folder is configured there
-  const onedrive = await getOneDriveInvoiceSource();
+  const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
     try {
-      await uploadSignedInvoiceToOneDrive(filename, pdfBuffer);
+      await uploadSignedInvoiceToOneDrive(tenantId, filename, pdfBuffer);
       return `onedrive://signed/${filename}`;
     } catch (err) {
       console.error("Failed to upload signed invoice to OneDrive:", err);
@@ -213,7 +221,7 @@ export async function saveSignedInvoice(
   }
 
   // Fall back to local filesystem
-  const folderPath = await getInvoiceFolderPath();
+  const folderPath = await getInvoiceFolderPath(tenantId);
 
   let targetPath: string;
   if (saveToSubfolder) {
@@ -244,6 +252,7 @@ export async function saveSignedInvoice(
  * Returns the modified PDF as a Buffer.
  */
 export async function embedSignatureOnPdf(
+  tenantId: string,
   pdfBytes: Buffer,
   signatureImageBytes: Uint8Array,
   signerName?: string
@@ -251,8 +260,8 @@ export async function embedSignatureOnPdf(
   const pdfDoc = await PDFDocument.load(pdfBytes);
   const pages = pdfDoc.getPages();
 
-  // Read configured signature position
-  const config = await readConfig();
+  // Read this scope's configured signature position
+  const config = await readConfig(tenantId);
   const pos = config.signaturePosition;
 
   // Select the target page
@@ -345,18 +354,21 @@ export async function embedSignatureOnPdf(
 /**
  * Check if a signed version of an invoice exists in the signed subfolder.
  */
-export async function checkIfSigned(filename: string): Promise<boolean> {
-  const onedrive = await getOneDriveInvoiceSource();
+export async function checkIfSigned(
+  tenantId: string,
+  filename: string
+): Promise<boolean> {
+  const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
     try {
-      const signedItems = await listOneDriveSignedInvoices();
+      const signedItems = await listOneDriveSignedInvoices(tenantId);
       return signedItems.some((i) => i.name.toLowerCase() === filename.toLowerCase());
     } catch {
       return false;
     }
   }
 
-  const folderPath = await getInvoiceFolderPath();
+  const folderPath = await getInvoiceFolderPath(tenantId);
   const signedPath = path.join(folderPath, "signed", filename);
   return fs.existsSync(signedPath);
 }
@@ -367,19 +379,20 @@ export async function checkIfSigned(filename: string): Promise<boolean> {
  * Also removes the signed copy if it exists.
  */
 export async function deleteInvoiceFile(
+  tenantId: string,
   filename: string
 ): Promise<{ success: boolean; error?: string }> {
-  const onedrive = await getOneDriveInvoiceSource();
+  const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
     try {
       const [items, signedItems] = await Promise.all([
-        listOneDriveInvoiceFiles(),
-        listOneDriveSignedInvoices(),
+        listOneDriveInvoiceFiles(tenantId),
+        listOneDriveSignedInvoices(tenantId),
       ]);
       const match = items.find((i) => i.name === filename);
-      if (match) await deleteFileById(match.id);
+      if (match) await deleteFileById(tenantId, match.id);
       const signedMatch = signedItems.find((i) => i.name === filename);
-      if (signedMatch) await deleteFileById(signedMatch.id);
+      if (signedMatch) await deleteFileById(tenantId, signedMatch.id);
       return { success: true };
     } catch (err) {
       console.error(`Failed to delete invoice file ${filename} from OneDrive:`, err);
@@ -387,7 +400,7 @@ export async function deleteInvoiceFile(
     }
   }
 
-  const folderPath = await getInvoiceFolderPath();
+  const folderPath = await getInvoiceFolderPath(tenantId);
   const filePath = path.join(folderPath, filename);
 
   // Security: prevent directory traversal
@@ -420,13 +433,14 @@ export async function deleteInvoiceFile(
  * Returns a summary of successes and failures.
  */
 export async function deleteInvoiceFiles(
+  tenantId: string,
   filenames: string[]
 ): Promise<{ deleted: number; failed: string[] }> {
   let deleted = 0;
   const failed: string[] = [];
 
   for (const filename of filenames) {
-    const result = await deleteInvoiceFile(filename);
+    const result = await deleteInvoiceFile(tenantId, filename);
     if (result.success) {
       deleted++;
     } else {
@@ -441,18 +455,19 @@ export async function deleteInvoiceFiles(
  * Delete only the original invoice files (not signed copies).
  */
 export async function deleteInvoiceOriginalOnly(
+  tenantId: string,
   filenames: string[]
 ): Promise<{ deleted: number; failed: string[] }> {
   let deleted = 0;
   const failed: string[] = [];
 
-  const onedrive = await getOneDriveInvoiceSource();
+  const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
-    const items = await listOneDriveInvoiceFiles();
+    const items = await listOneDriveInvoiceFiles(tenantId);
     for (const filename of filenames) {
       try {
         const match = items.find((i) => i.name === filename);
-        if (match) await deleteFileById(match.id);
+        if (match) await deleteFileById(tenantId, match.id);
         deleted++;
       } catch {
         failed.push(filename);
@@ -461,7 +476,7 @@ export async function deleteInvoiceOriginalOnly(
     return { deleted, failed };
   }
 
-  const folderPath = await getInvoiceFolderPath();
+  const folderPath = await getInvoiceFolderPath(tenantId);
   for (const filename of filenames) {
     const filePath = path.join(folderPath, filename);
     const resolved = path.resolve(filePath);
@@ -498,7 +513,9 @@ export interface DuplicateGroup {
  * and grouping files that resolve to the same invoice number or
  * appear to be copies (e.g. "INV-2041 (1).pdf").
  */
-export async function findDuplicateInvoices(): Promise<DuplicateGroup[]> {
+export async function findDuplicateInvoices(
+  tenantId: string
+): Promise<DuplicateGroup[]> {
   // Normalize: strip common copy patterns like " (1)", " - Copy", "_copy", etc.
   const normalize = (filename: string): string => {
     const name = filename.replace(/\.pdf$/i, "");
@@ -512,18 +529,18 @@ export async function findDuplicateInvoices(): Promise<DuplicateGroup[]> {
   };
 
   // Get file list from whichever source is active
-  const onedrive = await getOneDriveInvoiceSource();
+  const onedrive = await getOneDriveInvoiceSource(tenantId);
   let pdfFiles: string[];
 
   if (onedrive) {
     try {
-      const items = await listOneDriveInvoiceFiles();
+      const items = await listOneDriveInvoiceFiles(tenantId);
       pdfFiles = items.map((i) => i.name);
     } catch {
       return [];
     }
   } else {
-    const folderPath = await getInvoiceFolderPath();
+    const folderPath = await getInvoiceFolderPath(tenantId);
     if (!fs.existsSync(folderPath)) return [];
     const files = fs.readdirSync(folderPath);
     pdfFiles = files.filter((f) => f.toLowerCase().endsWith(".pdf"));
