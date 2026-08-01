@@ -18,6 +18,10 @@
 
 import { scopedPrisma } from "./db-scoped";
 import { encryptToken, decryptToken } from "./crypto";
+import { acquireLock, releaseLock } from "./lock";
+// Every Graph call goes through graphFetch so a 429 is retried with Graph's own
+// Retry-After rather than surfacing as a failure. See lib/graph-retry.ts.
+import { graphFetch } from "./graph-retry";
 
 const MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0";
 const GRAPH_API_URL = "https://graph.microsoft.com/v1.0";
@@ -25,6 +29,9 @@ const GRAPH_API_URL = "https://graph.microsoft.com/v1.0";
 const SCOPES = ["Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "User.Read", "offline_access"];
 
 const PROVIDER = "onedrive";
+
+/** Subfolder of the invoice folder holding countersigned copies. */
+const SIGNED_SUBFOLDER = "signed";
 
 function getClientId(): string {
   const id = process.env.MICROSOFT_CLIENT_ID;
@@ -122,36 +129,136 @@ async function getAccount(tenantId: string) {
  * Refreshes automatically if expired. Returns null if the scope has no
  * connection — never falls back to another scope's token.
  */
+type CloudAccountRow = NonNullable<Awaited<ReturnType<typeof getAccount>>>;
+
+/** Refresh when the token has under five minutes left. */
+const REFRESH_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * In-flight refreshes for THIS instance, keyed by scope.
+ *
+ * Twenty drivers signing in at shift change would otherwise each start their
+ * own token exchange. Sharing one promise collapses that to a single call.
+ */
+const inFlightRefresh = new Map<string, Promise<string | null>>();
+
 export async function getValidAccessToken(tenantId: string): Promise<string | null> {
   const account = await getAccount(tenantId);
   if (!account) return null;
 
-  // If token expires in less than 5 minutes, refresh it
-  const fiveMinutes = 5 * 60 * 1000;
-  if (account.tokenExpiry.getTime() - Date.now() < fiveMinutes) {
-    try {
-      const currentRefresh = decryptToken(account.refreshToken);
-      const tokens = await refreshAccessToken(currentRefresh);
-      const newExpiry = new Date(Date.now() + tokens.expires_in * 1000);
-
-      // Scoped update — writes back to this scope's row only.
-      await scopedPrisma(tenantId).cloudAccount.updateMany({
-        where: { provider: PROVIDER },
-        data: {
-          accessToken: encryptToken(tokens.access_token),
-          refreshToken: encryptToken(tokens.refresh_token || currentRefresh),
-          tokenExpiry: newExpiry,
-        },
-      });
-
-      return tokens.access_token;
-    } catch (err) {
-      console.error(`Failed to refresh OneDrive token for scope ${tenantId}:`, err);
-      return null;
-    }
+  if (account.tokenExpiry.getTime() - Date.now() >= REFRESH_WINDOW_MS) {
+    return decryptToken(account.accessToken);
   }
 
-  return decryptToken(account.accessToken);
+  // Layer 1 — collapse concurrent callers inside this instance.
+  const existing = inFlightRefresh.get(tenantId);
+  if (existing) return existing;
+
+  const pending = refreshForScope(tenantId, account).finally(() => {
+    inFlightRefresh.delete(tenantId);
+  });
+  inFlightRefresh.set(tenantId, pending);
+
+  return pending;
+}
+
+/**
+ * Refresh this scope's token exactly once, across every serverless instance.
+ *
+ * ── Why this needs three layers ───────────────────────────────────────────
+ * Microsoft ROTATES refresh tokens: using one invalidates it and issues a
+ * replacement. So concurrent refreshes are not merely wasteful, they are
+ * destructive — two instances refreshing from the same stored token produce two
+ * different replacements, and whichever writes last wins. The loser's token is
+ * already dead, and the branch's OneDrive stays broken until an admin
+ * reconnects it by hand.
+ *
+ *   1. An in-process promise map (above) collapses callers within one instance.
+ *   2. A Redis lock stops other instances starting a redundant exchange.
+ *   3. A compare-and-swap on the write is what actually guarantees correctness,
+ *      because the lock can expire mid-flight and Redis may be absent entirely.
+ *
+ * Layer 3 alone would be correct but wasteful; layers 1 and 2 exist to avoid
+ * hammering Microsoft with exchanges that will be thrown away.
+ */
+async function refreshForScope(
+  tenantId: string,
+  account: CloudAccountRow
+): Promise<string | null> {
+  const lock = await acquireLock(`lock:onedrive-refresh:${tenantId}`);
+
+  if (!lock) {
+    // Another instance is already refreshing. Give it a moment and re-read
+    // rather than starting a competing exchange.
+    const adopted = await adoptRefreshedToken(tenantId, account.refreshToken);
+    if (adopted) return adopted;
+    // It did not finish in time — fall through and do it ourselves. The
+    // compare-and-swap below keeps that safe.
+  }
+
+  try {
+    return await performRefresh(tenantId, account);
+  } finally {
+    if (lock) await releaseLock(lock);
+  }
+}
+
+/**
+ * Wait briefly for whoever holds the lock to publish a new token.
+ * Returns null if nothing changed in time.
+ */
+async function adoptRefreshedToken(
+  tenantId: string,
+  previousRefreshCiphertext: string
+): Promise<string | null> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await new Promise((r) => setTimeout(r, 300));
+
+    const latest = await getAccount(tenantId);
+    if (!latest) return null;
+
+    // The stored refresh token changing is the signal that a refresh landed.
+    if (latest.refreshToken !== previousRefreshCiphertext) {
+      return decryptToken(latest.accessToken);
+    }
+  }
+  return null;
+}
+
+async function performRefresh(
+  tenantId: string,
+  account: CloudAccountRow
+): Promise<string | null> {
+  try {
+    const currentRefresh = decryptToken(account.refreshToken);
+    const tokens = await refreshAccessToken(currentRefresh);
+    const newExpiry = new Date(Date.now() + tokens.expires_in * 1000);
+
+    // Compare-and-swap: only write if the stored refresh token is still the one
+    // we exchanged. Ciphertext is compared rather than plaintext, which works
+    // because this is the exact value read at the start — AES-GCM is
+    // non-deterministic, so re-encrypting would never match.
+    const res = await scopedPrisma(tenantId).cloudAccount.updateMany({
+      where: { provider: PROVIDER, refreshToken: account.refreshToken },
+      data: {
+        accessToken: encryptToken(tokens.access_token),
+        refreshToken: encryptToken(tokens.refresh_token || currentRefresh),
+        tokenExpiry: newExpiry,
+      },
+    });
+
+    if (res.count === 0) {
+      // Someone rotated it first. Their token is the live one; ours is already
+      // invalid, so discard it rather than overwriting theirs.
+      const latest = await getAccount(tenantId);
+      return latest ? decryptToken(latest.accessToken) : null;
+    }
+
+    return tokens.access_token;
+  } catch (err) {
+    console.error(`Failed to refresh OneDrive token for scope ${tenantId}:`, err);
+    return null;
+  }
 }
 
 /**
@@ -237,7 +344,7 @@ export async function getCloudAccountStatus(tenantId: string) {
 /** Graph GET with an explicit token — used during the OAuth exchange only. */
 async function graphGetWithToken(endpoint: string, accessToken: string): Promise<any> {
   const url = endpoint.startsWith("http") ? endpoint : `${GRAPH_API_URL}${endpoint}`;
-  const res = await fetch(url, {
+  const res = await graphFetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 
@@ -285,11 +392,56 @@ async function graphGetAllItems(
   return items;
 }
 
+/**
+ * Like graphGet, but a 404 is an ANSWER rather than an error.
+ *
+ * Used for "does this file exist" lookups, where a missing file is an ordinary
+ * outcome. Every other status still throws — a 403 or a 500 must not be
+ * mistaken for "not there", which would silently report an unsigned invoice as
+ * never having been signed.
+ */
+async function graphGetOrNull<T>(
+  tenantId: string,
+  endpoint: string
+): Promise<T | null> {
+  const token = await requireToken(tenantId);
+  const url = endpoint.startsWith("http") ? endpoint : `${GRAPH_API_URL}${endpoint}`;
+
+  const res = await graphFetch(url, { headers: { Authorization: `Bearer ${token}` } });
+
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`Graph API error (${res.status}): ${await res.text()}`);
+  }
+  return res.json();
+}
+
+/**
+ * Like graphGetBuffer, but a 404 means "no such file" rather than an error.
+ * Lets a single request both locate and download a file.
+ */
+async function graphGetBufferOrNull(
+  tenantId: string,
+  endpoint: string
+): Promise<Buffer | null> {
+  const token = await requireToken(tenantId);
+  const url = endpoint.startsWith("http") ? endpoint : `${GRAPH_API_URL}${endpoint}`;
+
+  const res = await graphFetch(url, { headers: { Authorization: `Bearer ${token}` } });
+
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`Graph API error (${res.status}): ${await res.text()}`);
+  }
+
+  return Buffer.from(await res.arrayBuffer());
+}
+
 async function graphGetBuffer(tenantId: string, endpoint: string): Promise<Buffer> {
   const token = await requireToken(tenantId);
 
   const url = endpoint.startsWith("http") ? endpoint : `${GRAPH_API_URL}${endpoint}`;
-  const res = await fetch(url, {
+  const res = await graphFetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
 
@@ -456,6 +608,140 @@ export async function listOneDriveInvoiceFiles(
   });
 }
 
+// ─── Direct file addressing ───────────────────────────────────────────────
+//
+// Graph can address a file by its path relative to a folder item, so locating
+// one file costs ONE request. The listing-based approach it replaces cost a
+// full paginated enumeration of the folder — and for a signed invoice, two:
+// one to find the `signed` subfolder, another to list it. A single driver
+// signing could therefore trigger several complete folder listings, which was
+// the dominant source of latency and of Graph throttling.
+
+/**
+ * Reject anything that could escape the configured folder.
+ *
+ * The filename reaches us from a URL path parameter, so it is caller-supplied.
+ * Graph path addressing interprets "/" as a separator and ".." as a parent,
+ * which would otherwise let a request walk out of the invoice folder and read
+ * anywhere in that admin's drive. The local filesystem path has an equivalent
+ * guard in lib/invoices.ts; this is the OneDrive half of the same rule.
+ */
+function assertSafeItemName(name: string): string {
+  const trimmed = name.trim();
+
+  // Checked numerically rather than with a regex: a control-character class
+  // written literally is easy to corrupt in a source file, and this reads
+  // more plainly anyway.
+  const hasControlChar = Array.from(trimmed).some((ch) => {
+    const code = ch.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
+
+  if (
+    !trimmed ||
+    hasControlChar ||
+    trimmed.includes("/") ||
+    trimmed.includes("\\") ||
+    trimmed === "." ||
+    trimmed === ".."
+  ) {
+    throw new Error("Invalid filename - path traversal detected");
+  }
+
+  return trimmed;
+}
+
+/** Encode a path for Graph's `items/{id}:/{path}` addressing. */
+function encodeRelativePath(segments: string[]): string {
+  return segments.map((s) => encodeURIComponent(s)).join("/");
+}
+
+/**
+ * Resolve one item inside a folder by name, in a single request.
+ * Returns null when the file simply is not there.
+ */
+async function getItemInFolderByName(
+  tenantId: string,
+  folderItemId: string,
+  segments: string[]
+): Promise<OneDriveItem | null> {
+  const path = encodeRelativePath(segments);
+  return graphGetOrNull<OneDriveItem>(
+    tenantId,
+    `/me/drive/items/${folderItemId}:/${path}`
+  );
+}
+
+/**
+ * Find an original invoice by filename. One Graph request, no listing.
+ */
+export async function getInvoiceItemByName(
+  tenantId: string,
+  filename: string
+): Promise<OneDriveItem | null> {
+  const safe = assertSafeItemName(filename);
+  const account = await getAccount(tenantId);
+  if (!account?.invoiceFolderItemId) return null;
+
+  return getItemInFolderByName(tenantId, account.invoiceFolderItemId, [safe]);
+}
+
+/**
+ * Find a countersigned invoice by filename, inside the `signed` subfolder.
+ * One Graph request — this replaces two full folder listings.
+ */
+export async function getSignedInvoiceItemByName(
+  tenantId: string,
+  filename: string
+): Promise<OneDriveItem | null> {
+  const safe = assertSafeItemName(filename);
+  const account = await getAccount(tenantId);
+  if (!account?.invoiceFolderItemId) return null;
+
+  return getItemInFolderByName(tenantId, account.invoiceFolderItemId, [
+    SIGNED_SUBFOLDER,
+    safe,
+  ]);
+}
+
+/**
+ * Download an original invoice by filename in a single request.
+ * Returns null if it does not exist.
+ */
+export async function downloadInvoiceByName(
+  tenantId: string,
+  filename: string
+): Promise<Buffer | null> {
+  const safe = assertSafeItemName(filename);
+  const account = await getAccount(tenantId);
+  if (!account?.invoiceFolderItemId) return null;
+
+  return graphGetBufferOrNull(
+    tenantId,
+    `/me/drive/items/${account.invoiceFolderItemId}:/${encodeRelativePath([safe])}:/content`
+  );
+}
+
+/**
+ * Download a countersigned invoice by filename in a single request.
+ */
+export async function downloadSignedInvoiceByName(
+  tenantId: string,
+  filename: string
+): Promise<Buffer | null> {
+  const safe = assertSafeItemName(filename);
+  const account = await getAccount(tenantId);
+  if (!account?.invoiceFolderItemId) return null;
+
+  return graphGetBufferOrNull(
+    tenantId,
+    `/me/drive/items/${account.invoiceFolderItemId}:/${encodeRelativePath([
+      SIGNED_SUBFOLDER,
+      safe,
+    ])}:/content`
+  );
+}
+
 /**
  * Check if this scope's OneDrive invoice folder is configured.
  */
@@ -525,7 +811,7 @@ export async function uploadFileToFolder(
   const encodedName = encodeURIComponent(filename);
   const url = `${GRAPH_API_URL}/me/drive/items/${folderItemId}:/${encodedName}:/content`;
 
-  const res = await fetch(url, {
+  const res = await graphFetch(url, {
     method: "PUT",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -560,7 +846,7 @@ export async function ensureSubfolder(
   if (existing) return existing.id;
 
   const url = `${GRAPH_API_URL}/me/drive/items/${parentItemId}/children`;
-  const res = await fetch(url, {
+  const res = await graphFetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -616,7 +902,7 @@ export async function uploadSignedInvoiceToOneDrive(
   const encodedName = encodeURIComponent(filename);
   const url = `${GRAPH_API_URL}/me/drive/items/${signedFolderId}:/${encodedName}:/content`;
 
-  const res = await fetch(url, {
+  const res = await graphFetch(url, {
     method: "PUT",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -649,7 +935,7 @@ export async function moveFileToSubfolder(
 
   const url = `${GRAPH_API_URL}/me/drive/items/${fileItemId}`;
   const move = (body: Record<string, unknown>) =>
-    fetch(url, {
+    graphFetch(url, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -688,7 +974,7 @@ export async function deleteFileById(
   const token = await requireToken(tenantId);
 
   const url = `${GRAPH_API_URL}/me/drive/items/${itemId}`;
-  const res = await fetch(url, {
+  const res = await graphFetch(url, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });

@@ -5,7 +5,7 @@ import { sendDeliveryConfirmation } from '@/lib/email'
 import { getScope } from '@/lib/tenant'
 import { withAuth } from '@/lib/api-handler'
 import { getInvoiceFolderPath } from '@/lib/invoices'
-import { getOneDriveInvoiceSource, listOneDriveSignedInvoices, downloadFileById } from '@/lib/microsoft-graph'
+import { getOneDriveInvoiceSource, downloadSignedInvoiceByName } from '@/lib/microsoft-graph'
 
 export const runtime = 'nodejs'
 
@@ -35,12 +35,15 @@ export const POST = withAuth(async (req: NextRequest, { params }: { params: Prom
     try {
       const onedrive = await getOneDriveInvoiceSource(ctx.tenantId);
       if (onedrive) {
-        const signedItems = await listOneDriveSignedInvoices(ctx.tenantId);
-        const match = signedItems.find((i) => i.name === stop.invoiceFile);
-        if (match) {
+        // One addressed download rather than enumerating the signed folder.
+        const content = await downloadSignedInvoiceByName(
+          ctx.tenantId,
+          stop.invoiceFile
+        );
+        if (content) {
           pdfAttachment = {
             filename: `signed-${stop.invoiceFile}`,
-            content: await downloadFileById(ctx.tenantId, match.id),
+            content,
           };
         }
       } else {

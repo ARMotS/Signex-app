@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { readInvoiceFile, saveSignedInvoice, embedSignatureOnPdf, getInvoiceFolderPath } from "@/lib/invoices";
-import { getOneDriveInvoiceSource, listOneDriveSignedInvoices, downloadFileById } from "@/lib/microsoft-graph";
+import { getOneDriveInvoiceSource, downloadSignedInvoiceByName } from "@/lib/microsoft-graph";
 import { updateStopStatus } from "@/lib/trip-data";
 import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
@@ -24,10 +24,12 @@ export const GET = withAuth(async (
     const onedrive = await getOneDriveInvoiceSource(ctx.tenantId);
     if (onedrive) {
       try {
-        const signedItems = await listOneDriveSignedInvoices(ctx.tenantId);
-        const match = signedItems.find((i) => i.name === decodedFilename);
-        if (match) {
-          const buffer = await downloadFileById(ctx.tenantId, match.id);
+        // Addressed directly rather than by listing the signed folder.
+        const buffer = await downloadSignedInvoiceByName(
+          ctx.tenantId,
+          decodedFilename
+        );
+        if (buffer) {
           return new NextResponse(new Uint8Array(buffer), {
             headers: {
               "Content-Type": "application/pdf",

@@ -24,7 +24,9 @@ import {
   getOneDriveInvoiceSource,
   listOneDriveInvoiceFiles,
   listOneDriveSignedInvoices,
-  downloadFileById,
+  getInvoiceItemByName,
+  getSignedInvoiceItemByName,
+  downloadInvoiceByName,
   deleteFileById,
   uploadSignedInvoiceToOneDrive,
 } from "./microsoft-graph";
@@ -168,12 +170,11 @@ export async function readInvoiceFile(
   const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
     try {
-      const items = await listOneDriveInvoiceFiles(tenantId);
-      const match = items.find((i) => i.name === filename);
-      if (match) {
-        return downloadFileById(tenantId, match.id);
-      }
-      return null;
+      // One request. This used to enumerate the ENTIRE invoice folder just to
+      // translate a filename into an item id, then download — so a folder of a
+      // few thousand PDFs cost several paginated round trips before the
+      // download even started, on the hottest path in the app.
+      return await downloadInvoiceByName(tenantId, filename);
     } catch (err) {
       console.error(`Failed to read ${filename} from OneDrive:`, err);
       return null;
@@ -361,8 +362,9 @@ export async function checkIfSigned(
   const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
     try {
-      const signedItems = await listOneDriveSignedInvoices(tenantId);
-      return signedItems.some((i) => i.name.toLowerCase() === filename.toLowerCase());
+      // Previously two full listings: one to find the `signed` subfolder, then
+      // another to enumerate it. Now a single addressed lookup.
+      return (await getSignedInvoiceItemByName(tenantId, filename)) !== null;
     } catch {
       return false;
     }
@@ -385,13 +387,12 @@ export async function deleteInvoiceFile(
   const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
     try {
-      const [items, signedItems] = await Promise.all([
-        listOneDriveInvoiceFiles(tenantId),
-        listOneDriveSignedInvoices(tenantId),
+      // Two addressed lookups instead of two full folder enumerations.
+      const [match, signedMatch] = await Promise.all([
+        getInvoiceItemByName(tenantId, filename),
+        getSignedInvoiceItemByName(tenantId, filename),
       ]);
-      const match = items.find((i) => i.name === filename);
       if (match) await deleteFileById(tenantId, match.id);
-      const signedMatch = signedItems.find((i) => i.name === filename);
       if (signedMatch) await deleteFileById(tenantId, signedMatch.id);
       return { success: true };
     } catch (err) {
