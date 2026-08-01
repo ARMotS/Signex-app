@@ -21,20 +21,25 @@
   "prisma": {
     "seed": "npx tsx prisma/seed.ts"
   },
+  "overrides": {
+    "postcss": "^8.5.25",
+    "brace-expansion": "^5.0.9",
+    "minimatch": "^10.1.1",
+    "sharp": "^0.35.3"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.96.0",
-    "@auth/prisma-adapter": "^2.11.2",
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "@react-email/components": "^1.0.12",
     "@react-email/render": "^2.0.8",
     "@serwist/next": "^9.5.11",
+    "@upstash/redis": "^1.38.0",
     "date-fns": "^4.1.0",
     "fuse.js": "^7.3.0",
-    "jose": "^6.2.3",
     "jszip": "^3.10.1",
-    "next": "16.2.4",
-    "nodemailer": "^8.0.7",
+    "next": "^16.2.12",
+    "nodemailer": "^9.0.3",
     "papaparse": "^5.5.3",
     "pdf-lib": "^1.17.1",
     "pdf.js-extract": "^1.0.1",
@@ -44,13 +49,10 @@
     "react-dom": "19.2.4",
     "react-dropzone": "^15.0.0",
     "serwist": "^9.5.11",
-    "xlsx": "^0.18.5",
-    "zustand": "^5.0.12"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "vitest": "^3.2.4",
-    "tsx": "^4.20.3",
     "@types/node": "^20",
     "@types/nodemailer": "^8.0.0",
     "@types/papaparse": "^5.5.2",
@@ -58,8 +60,10 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.4",
+    "eslint-config-next": "^16.2.12",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "tsx": "^4.20.3",
+    "typescript": "^5",
+    "vitest": "^3.2.4"
   }
 }
