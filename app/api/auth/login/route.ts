@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
 
       const result = await loginAdmin(email, password);
       if (!result.success) {
-        recordFailedAttempt(ip, "auth", RATE_LIMITS.auth);
+        await recordFailedAttempt(ip, "auth", RATE_LIMITS.auth);
         return NextResponse.json({ error: result.error }, { status: 401 });
       }
 
@@ -51,7 +51,7 @@ export async function POST(request: NextRequest) {
         select: { role: true },
       });
 
-      clearAttempts(ip, "auth");
+      await clearAttempts(ip, "auth");
 
       await createSession({
         id: result.account!.id,
@@ -99,11 +99,11 @@ export async function POST(request: NextRequest) {
       // against every same-named candidate and accepts only a unique match.
       const result = await loginDriver(name, pin, companyTenantId);
       if (!result.success) {
-        recordFailedAttempt(ip, "auth", RATE_LIMITS.auth);
+        await recordFailedAttempt(ip, "auth", RATE_LIMITS.auth);
         return NextResponse.json({ error: result.error }, { status: 401 });
       }
 
-      clearAttempts(ip, "auth");
+      await clearAttempts(ip, "auth");
 
       await createSession({
         id: result.account!.id,
