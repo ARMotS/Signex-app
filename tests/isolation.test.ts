@@ -1374,4 +1374,101 @@ suite("cross-ADMIN isolation", () => {
       });
     });
   });
+
+  // ── Change feed ──────────────────────────────────────────────────────
+  //
+  // /api/sync is polled continuously by every signed-in device, so a leak here
+  // would not be a one-off disclosure — it would be a standing side channel
+  // reporting another ADMIN's delivery activity in near real time.
+  describe("change feed", () => {
+    it("counts only the caller's own scope", async () => {
+      const { GET } = await import("@/app/api/sync/route");
+
+      useSession(adminSession(f.a));
+      const a = await (await GET(req("/api/sync"))).json();
+
+      useSession(adminSession(f.b));
+      const b = await (await GET(req("/api/sync"))).json();
+
+      // Each scope has exactly one seeded trip sheet and one stop — so a cursor
+      // that saw both scopes would report two.
+      expect(a.tripSheets).toBe(1);
+      expect(a.stops).toBe(1);
+      expect(b.tripSheets).toBe(1);
+      expect(b.stops).toBe(1);
+    });
+
+    it("ADMIN 2 signing a stop does not move ADMIN 1's cursor", async () => {
+      const { GET } = await import("@/app/api/sync/route");
+
+      useSession(adminSession(f.a));
+      const before = (await (await GET(req("/api/sync"))).json()).cursor;
+
+      // Activity in the other scope, of exactly the kind the feed is meant to
+      // notice for its own scope.
+      await db().stop.update({
+        where: { id: f.b.stop.id },
+        data: { status: "SIGNED", signedAt: new Date() },
+      });
+
+      useSession(adminSession(f.a));
+      const after = (await (await GET(req("/api/sync"))).json()).cursor;
+
+      expect(after).toBe(before);
+    });
+
+    it("moves for the scope that actually changed", async () => {
+      const { GET } = await import("@/app/api/sync/route");
+
+      useSession(adminSession(f.b));
+      const before = (await (await GET(req("/api/sync"))).json()).cursor;
+
+      await db().stop.update({
+        where: { id: f.b.stop.id },
+        data: { customerName: `Changed ${Date.now()}` },
+      });
+
+      useSession(adminSession(f.b));
+      const after = (await (await GET(req("/api/sync"))).json()).cursor;
+
+      // Proves the previous test passed because of scoping, not because the
+      // cursor is simply insensitive to change.
+      expect(after).not.toBe(before);
+    });
+
+    it("a DRIVER's cursor covers only their own work", async () => {
+      const { GET } = await import("@/app/api/sync/route");
+
+      useSession(driverSession(f.a));
+      const body = await (await GET(req("/api/sync"))).json();
+
+      expect(body.tripSheets).toBe(1);
+      expect(body.stops).toBe(1);
+    });
+
+    it("another scope's driver activity does not wake this driver's device", async () => {
+      const { GET } = await import("@/app/api/sync/route");
+
+      useSession(driverSession(f.a));
+      const before = (await (await GET(req("/api/sync"))).json()).cursor;
+
+      await db().stop.update({
+        where: { id: f.b.stop.id },
+        data: { status: "SIGNED", signedAt: new Date() },
+      });
+
+      useSession(driverSession(f.a));
+      const after = (await (await GET(req("/api/sync"))).json()).cursor;
+
+      expect(after).toBe(before);
+    });
+
+    it("requires a session", async () => {
+      const { GET } = await import("@/app/api/sync/route");
+      useSession(null);
+
+      const res = await GET(req("/api/sync"));
+      expect(res.status).toBe(401);
+    });
+  });
 });
