@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState, useCallback } from "react";
+import { useLiveSync } from "@/hooks/useLiveSync";
 
 interface DriverInfo {
   id: string;
@@ -71,6 +72,21 @@ export default function RunPage() {
       setLoading(false);
     }
   }, [fetchStops]);
+
+  /**
+   * Keep the run sheet live.
+   *
+   * Without this the list was fetched once on mount and never again, so a trip
+   * sheet deployed after the driver opened the app stayed invisible until they
+   * happened to reload — and a stop cancelled by the office stayed on the list
+   * as a delivery they would still try to make.
+   */
+  useLiveSync(
+    () => {
+      if (driver) fetchStops(driver.id);
+    },
+    { enabled: !!driver }
+  );
 
   const updateStopStatus = async (stopId: string, status: TripStop["status"]) => {
     try {

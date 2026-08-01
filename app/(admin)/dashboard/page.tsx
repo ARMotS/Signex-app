@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useLiveSync } from "@/hooks/useLiveSync";
 
 interface TripStop {
   id: string;
@@ -26,19 +27,38 @@ export default function DashboardPage() {
   const [tripSheets, setTripSheets] = useState<TripSheet[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    // Fetch both invoice stats and trip data
-    Promise.all([
-      fetch("/api/invoices").then((r) => r.json()),
-      fetch("/api/trip-sheet").then((r) => r.json()).catch(() => ({ tripSheets: [] })),
-    ])
-      .then(([invData, tripData]) => {
-        if (!invData.error) setInvoiceStats(invData);
-        if (tripData.tripSheets) setTripSheets(tripData.tripSheets);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+  const loadDashboard = useCallback(async () => {
+    try {
+      const [invData, tripData] = await Promise.all([
+        fetch("/api/invoices").then((r) => r.json()),
+        fetch("/api/trip-sheet")
+          .then((r) => r.json())
+          .catch(() => ({ tripSheets: [] })),
+      ]);
+      if (!invData.error) setInvoiceStats(invData);
+      if (tripData.tripSheets) setTripSheets(tripData.tripSheets);
+    } catch {
+      // Leave the last good numbers on screen rather than blanking the
+      // dashboard because one poll failed.
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    // Every setState in loadDashboard runs after `await Promise.all`, so none
+    // of them happens synchronously in the effect body — the rule cannot see
+    // past the await.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadDashboard();
+  }, [loadDashboard]);
+
+  /**
+   * Follow the drivers in real time. The dashboard is a wallboard — it is left
+   * open all day, so it has to reflect signatures as they happen rather than as
+   * of whenever the page was last opened.
+   */
+  useLiveSync(loadDashboard);
 
   // Compute real stats
   const totalInvoices = invoiceStats?.count ?? 0;

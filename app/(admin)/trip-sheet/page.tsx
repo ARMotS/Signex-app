@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useLiveSync } from "@/hooks/useLiveSync";
 
 interface TripStop {
   id: string;
@@ -214,13 +215,33 @@ export default function TripSheetPage() {
       .then((data) => setDrivers((data.drivers || []).filter((d: DriverAccount) => d.active)))
       .catch(() => {});
 
-    // Auto-poll cloud folder every 30 seconds
+    // Auto-poll the cloud folder every 30 seconds.
+    //
+    // Skipped while the tab is hidden: this call lists a remote OneDrive folder
+    // rather than reading the database, so a forgotten background tab was
+    // spending Graph quota all day to look at a folder nobody was watching.
+    // Checking on the way back to the tab covers the gap.
     const pollInterval = setInterval(() => {
-      fetchCloudFolder();
+      if (!document.hidden) fetchCloudFolder();
     }, 30000);
 
-    return () => clearInterval(pollInterval);
+    const onVisible = () => {
+      if (!document.hidden) fetchCloudFolder();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      clearInterval(pollInterval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [fetchTripSheets, fetchCloudFolder]);
+
+  /**
+   * Reflect driver progress as it happens — stops moving to SIGNED, and sheets
+   * disappearing as they are completed. Cheap: the change feed is two indexed
+   * aggregates, and only a real change triggers the full refetch below.
+   */
+  useLiveSync(fetchTripSheets);
 
   // ─── File Upload ──────────────────────────────────────────────────────
 
