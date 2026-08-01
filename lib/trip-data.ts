@@ -12,6 +12,7 @@ import { scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
 import { StopStatus as PrismaStopStatus } from "@prisma/client";
 import { moveToProcessed } from "./trip-sheet-folder";
+import { mapWithConcurrency } from "./concurrency";
 
 export type StopStatus = "PENDING" | "IN_PROGRESS" | "SIGNED";
 
@@ -424,20 +425,32 @@ export async function completeTripSheet(
 
 /**
  * Batch complete multiple trip sheets.
+ *
+ * Each sheet costs several database round trips plus a OneDrive file move, so
+ * these run with bounded parallelism — sequentially, an end-of-day close-out of
+ * twenty sheets could outlast the serverless function's time limit.
+ *
+ * Partial success is deliberate: one sheet failing (a stop still unsigned, a
+ * source file already moved) must not abandon the rest, so the worker resolves
+ * to a result rather than throwing.
  */
 export async function completeTripSheets(
   tenantId: string,
   tripIds: string[]
 ): Promise<{ completed: number; failed: { id: string; error: string }[] }> {
+  const results = await mapWithConcurrency(tripIds, async (id) => ({
+    id,
+    outcome: await completeTripSheet(tenantId, id),
+  }));
+
   let completed = 0;
   const failed: { id: string; error: string }[] = [];
 
-  for (const id of tripIds) {
-    const result = await completeTripSheet(tenantId, id);
-    if (result.success) {
+  for (const { id, outcome } of results) {
+    if (outcome.success) {
       completed++;
     } else {
-      failed.push({ id, error: result.error || "Unknown error" });
+      failed.push({ id, error: outcome.error || "Unknown error" });
     }
   }
 
@@ -446,17 +459,22 @@ export async function completeTripSheets(
 
 /**
  * Batch delete multiple trip sheets by IDs.
+ * Bounded parallelism, partial success — see completeTripSheets above.
  */
 export async function deleteTripSheets(
   tenantId: string,
   tripIds: string[]
 ): Promise<{ deleted: number; failed: string[] }> {
+  const results = await mapWithConcurrency(tripIds, async (id) => ({
+    id,
+    outcome: await deleteTripSheet(tenantId, id),
+  }));
+
   let deleted = 0;
   const failed: string[] = [];
 
-  for (const id of tripIds) {
-    const result = await deleteTripSheet(tenantId, id);
-    if (result.success) {
+  for (const { id, outcome } of results) {
+    if (outcome.success) {
       deleted++;
     } else {
       failed.push(id);

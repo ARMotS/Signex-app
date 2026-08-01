@@ -15,6 +15,10 @@ import { getTripSheetFolderPath } from "@/lib/trip-sheet-folder";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
+/** Cloud imports list a remote folder and parse a spreadsheet — see the note
+ *  on maxDuration in ../route.ts. */
+export const maxDuration = 60;
+
 export const GET = withAuth(async () => {
   const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");

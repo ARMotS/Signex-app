@@ -14,6 +14,14 @@ import { saveUploadedFile } from "@/lib/trip-sheet-folder";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
+/**
+ * Parsing a spreadsheet, and batch-completing a day's trip sheets, both do real
+ * work: a full invoice-folder listing on the way in, and a OneDrive file move
+ * per sheet on the way out. The platform default is far too short for an
+ * end-of-day close-out, and a timeout here would leave sheets half-archived.
+ */
+export const maxDuration = 60;
+
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
