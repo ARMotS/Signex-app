@@ -14,6 +14,8 @@ interface TripStop {
   status: "PENDING" | "IN_PROGRESS" | "SIGNED";
   signedAt?: string;
   emailSentAt?: string;
+  emailStatus?: string;
+  emailError?: string | null;
   contact?: { email?: string };
 }
 
@@ -63,6 +65,32 @@ interface Stats {
   pending: number;
   inProgress: number;
   activeDrivers: number;
+}
+
+/** One stop frozen into a completed sheet's snapshot — see CompletedTripSheet. */
+interface ArchivedStop {
+  stopNumber: number;
+  invoiceNumber: string;
+  customerName: string;
+  address: string;
+  nop: number;
+  signedAt: string | null;
+  emailStatus: string;
+}
+
+interface CompletedTripSheet {
+  id: string;
+  driverId: string;
+  driverName: string;
+  regNo: string;
+  sourceFilename: string;
+  archivedFile: string | null;
+  uploadedAt: string;
+  completedAt: string;
+  completedBy: string | null;
+  totalStops: number;
+  signedStops: number;
+  stops: ArchivedStop[];
 }
 
 interface DriverAccount {
@@ -118,6 +146,14 @@ export default function TripSheetPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [expandedTrip, setExpandedTrip] = useState<string | null>(null);
+
+  // Completed trip sheets — read from the archive, not from live trip sheets:
+  // completing a sheet deletes it. See the CompletedTripSheet model.
+  const [tripTab, setTripTab] = useState<"active" | "completed">("active");
+  const [completedSheets, setCompletedSheets] = useState<CompletedTripSheet[]>([]);
+  const [completedRange, setCompletedRange] = useState<"today" | "all">("today");
+  const [completedLoading, setCompletedLoading] = useState(false);
+  const [expandedCompleted, setExpandedCompleted] = useState<string | null>(null);
 
   // Driver assignment for unassigned rows
   const [drivers, setDrivers] = useState<DriverAccount[]>([]);
@@ -206,6 +242,33 @@ export default function TripSheetPage() {
     }
   }, []);
 
+  const fetchCompletedSheets = useCallback(async () => {
+    setCompletedLoading(true);
+    try {
+      // "Today" is the dispatcher's own day, not the server's UTC one.
+      const tzOffset = new Date().getTimezoneOffset();
+      const res = await fetch(
+        `/api/trip-sheet/completed?tzOffset=${tzOffset}${completedRange === "all" ? "&range=all" : ""}`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setCompletedSheets(data.completed || []);
+      }
+    } catch {
+      // ignore — the tab keeps whatever it last showed
+    } finally {
+      setCompletedLoading(false);
+    }
+  }, [completedRange]);
+
+  // Kept out of the mount effect below: this one re-runs when the range toggle
+  // moves, and folding it in there would tear down and rebuild the cloud poll
+  // interval every time someone switched between Today and All.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchCompletedSheets();
+  }, [fetchCompletedSheets]);
+
   useEffect(() => {
     fetchTripSheets();
     fetchCloudFolder();
@@ -240,8 +303,16 @@ export default function TripSheetPage() {
    * Reflect driver progress as it happens — stops moving to SIGNED, and sheets
    * disappearing as they are completed. Cheap: the change feed is two indexed
    * aggregates, and only a real change triggers the full refetch below.
+   *
+   * Completing a sheet deletes it, which is exactly what moves the cursor, so
+   * the same tick refreshes the archive the sheet just moved into.
    */
-  useLiveSync(fetchTripSheets);
+  const refreshTripData = useCallback(() => {
+    fetchTripSheets();
+    fetchCompletedSheets();
+  }, [fetchTripSheets, fetchCompletedSheets]);
+
+  useLiveSync(refreshTripData);
 
   // ─── File Upload ──────────────────────────────────────────────────────
 
@@ -515,6 +586,7 @@ export default function TripSheetPage() {
         const trip = tripSheets.find((t) => t.id === tripId);
         setCompleteSuccess(`Trip sheet for ${trip?.driverName || "driver"} archived successfully`);
         fetchTripSheets();
+        fetchCompletedSheets();
         fetchCloudFolder();
         setTimeout(() => setCompleteSuccess(null), 4000);
       }
@@ -551,6 +623,7 @@ export default function TripSheetPage() {
         }
         setSelectedTrips(new Set());
         fetchTripSheets();
+        fetchCompletedSheets();
         fetchCloudFolder();
       }
     } catch {
@@ -1393,37 +1466,73 @@ export default function TripSheetPage() {
         </div>
       )}
 
-      {/* ─── Active Trip Sheets ─────────────────────────────────────────── */}
-      {!preview && !loading && tripSheets.length > 0 && (
+      {/* ─── Trip Sheets: Active / Completed ────────────────────────────── */}
+      {!preview && !loading && (
         <div className="mt-8 bg-ink-card border border-ink-border rounded overflow-hidden">
-          <button
-            onClick={() => setShowActiveTrips(!showActiveTrips)}
-            className="flex items-center justify-between w-full px-5 py-4 hover:bg-ink-surface/50 transition-colors"
-          >
-            <div className="flex items-center gap-2">
-              <h2 className="font-mono text-[13px] sm:text-sm font-medium text-ink-black uppercase tracking-wide">
-                Active Trip Sheets
-              </h2>
-              <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-mono font-medium rounded-full bg-ink-surface text-ink-muted">
-                {tripSheets.length}
-              </span>
+          {/* Tab bar. Completed sheets come from the archive rather than from
+              live trip sheets — closing one out deletes it, which is why the
+              day's work needs somewhere else to live. */}
+          <div className="flex items-center justify-between border-b border-ink-border">
+            <div className="flex items-center overflow-x-auto">
+              {([
+                { id: "active" as const, label: "Active Trip Sheets", count: tripSheets.length },
+                {
+                  id: "completed" as const,
+                  label: completedRange === "today" ? "Completed Today" : "All Completed",
+                  count: completedSheets.length,
+                },
+              ]).map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => {
+                    setTripTab(t.id);
+                    setShowActiveTrips(true);
+                  }}
+                  className={`flex items-center gap-2 px-5 py-4 font-mono text-[13px] sm:text-sm font-medium uppercase tracking-wide whitespace-nowrap border-b-2 -mb-px transition-colors ${
+                    tripTab === t.id
+                      ? "border-ink-green text-ink-black"
+                      : "border-transparent text-ink-muted hover:text-ink-black"
+                  }`}
+                >
+                  {t.label}
+                  <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-mono font-medium rounded-full bg-ink-surface text-ink-muted">
+                    {t.count}
+                  </span>
+                </button>
+              ))}
             </div>
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className={`text-ink-muted transition-transform ${showActiveTrips ? "rotate-180" : ""}`}
+            <button
+              onClick={() => setShowActiveTrips(!showActiveTrips)}
+              className="px-5 py-4 text-ink-muted hover:text-ink-black transition-colors shrink-0"
+              title={showActiveTrips ? "Collapse" : "Expand"}
             >
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </button>
-          {showActiveTrips && (
-          <div className="space-y-3 p-4 pt-0 stagger-children border-t border-ink-border">
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={`transition-transform ${showActiveTrips ? "rotate-180" : ""}`}
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+          </div>
+
+          {showActiveTrips && tripTab === "active" && tripSheets.length === 0 && (
+            <div className="p-8 text-center">
+              <p className="text-sm text-ink-muted font-mono">No active trip sheets</p>
+              <p className="text-xs text-ink-muted mt-1">
+                Upload a file above to preview and deploy stops to drivers
+              </p>
+            </div>
+          )}
+
+          {showActiveTrips && tripTab === "active" && tripSheets.length > 0 && (
+          <div className="space-y-3 p-4 pt-0 stagger-children">
             {/* Select all */}
             <div className="flex items-center gap-3 py-2">
               <label className="flex items-center gap-2 cursor-pointer">
@@ -1636,41 +1745,53 @@ export default function TripSheetPage() {
                               {stop.nop > 0 ? stop.nop : "—"}
                             </span>
                           </div>
-                          {/* Line 2: Email button + Status badge */}
+                          {/* Line 2: Email button + Status badge.
+                              The confirmation goes out automatically on
+                              signature, so this button is a resend — or the
+                              recovery when the automatic attempt failed. */}
                           <div className="flex items-center gap-2 mt-1.5 pl-8">
-                            {stop.status === "SIGNED" && stop.contact?.email && (
+                            {stop.status === "SIGNED" && stop.contact?.email && (() => {
+                              const live = emailSending[stop.id];
+                              const isSent = live === "sent" || (!live && (stop.emailStatus === "SENT" || (!stop.emailStatus && stop.emailSentAt)));
+                              const isFailed = live === "failed" || (!live && stop.emailStatus === "FAILED");
+                              const isSending = live === "sending" || (!live && stop.emailStatus === "SENDING");
+                              return (
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handleResendEmail(stop, trip.driverName);
                                 }}
-                                disabled={emailSending[stop.id] === "sending"}
+                                disabled={live === "sending"}
                                 className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono font-medium transition-all ${
-                                  emailSending[stop.id] === "sent" || (!emailSending[stop.id] && stop.emailSentAt)
+                                  isSent
                                     ? "bg-ink-green-dim text-ink-green border border-ink-green/20"
-                                    : emailSending[stop.id] === "failed"
+                                    : isFailed
                                     ? "bg-ink-red-dim text-ink-red border border-ink-red/20 hover:bg-ink-red/10"
-                                    : emailSending[stop.id] === "sending"
+                                    : isSending
                                     ? "bg-ink-surface text-ink-muted border border-ink-border"
                                     : "bg-ink-surface text-ink-muted border border-ink-border hover:border-ink-muted-light hover:text-ink-black"
                                 }`}
-                                title={stop.emailSentAt && !emailSending[stop.id]
-                                  ? `Email sent — click to resend to ${stop.contact.email}`
-                                  : `Send delivery confirmation to ${stop.contact.email}`}
+                                title={
+                                  isFailed
+                                    ? `Last attempt failed${stop.emailError ? `: ${stop.emailError}` : ""} — click to retry ${stop.contact.email}`
+                                    : isSent
+                                    ? `Email sent — click to resend to ${stop.contact.email}`
+                                    : `Send delivery confirmation to ${stop.contact.email}`
+                                }
                               >
-                                {emailSending[stop.id] === "sending" ? (
+                                {isSending ? (
                                   <>
                                     <div className="w-3 h-3 border-2 border-ink-muted/30 border-t-ink-muted rounded-full animate-spin" />
                                     Sending…
                                   </>
-                                ) : emailSending[stop.id] === "sent" || (!emailSending[stop.id] && stop.emailSentAt) ? (
+                                ) : isSent ? (
                                   <>
                                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                       <polyline points="20 6 9 17 4 12" />
                                     </svg>
                                     Sent
                                   </>
-                                ) : emailSending[stop.id] === "failed" ? (
+                                ) : isFailed ? (
                                   <>
                                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                       <circle cx="12" cy="12" r="10" />
@@ -1689,6 +1810,15 @@ export default function TripSheetPage() {
                                   </>
                                 )}
                               </button>
+                              );
+                            })()}
+                            {stop.status === "SIGNED" && !stop.contact?.email && (
+                              <span
+                                className="inline-flex items-center px-2 py-1 rounded text-[11px] font-mono bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
+                                title="No email address on this contact — add one to send a confirmation"
+                              >
+                                No email
+                              </span>
                             )}
                             <span
                               className={
@@ -1787,6 +1917,176 @@ export default function TripSheetPage() {
               );
             })()}
           </div>
+          )}
+
+          {/* ─── Completed Trip Sheets ──────────────────────────────────── */}
+          {showActiveTrips && tripTab === "completed" && (
+            <div className="animate-fade-in">
+              {/* Range toggle + summary */}
+              <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-ink-border bg-ink-surface/30 flex-wrap">
+                <p className="text-xs font-mono text-ink-muted">
+                  {completedSheets.length} sheet{completedSheets.length !== 1 ? "s" : ""} closed out
+                  {completedRange === "today" ? " today" : ""}
+                  {completedSheets.length > 0 && (
+                    <>
+                      {" · "}
+                      <span className="text-ink-green">
+                        {completedSheets.reduce((sum, c) => sum + c.signedStops, 0)} deliveries
+                      </span>
+                    </>
+                  )}
+                </p>
+                <div className="flex items-center gap-1 shrink-0">
+                  {(["today", "all"] as const).map((r) => (
+                    <button
+                      key={r}
+                      onClick={() => setCompletedRange(r)}
+                      className={`px-3 py-1 text-[11px] font-mono rounded transition-colors ${
+                        completedRange === r
+                          ? "bg-ink-black text-white"
+                          : "text-ink-muted hover:text-ink-black hover:bg-ink-surface"
+                      }`}
+                    >
+                      {r === "today" ? "Today" : "All"}
+                    </button>
+                  ))}
+                  <button
+                    onClick={fetchCompletedSheets}
+                    disabled={completedLoading}
+                    className="flex items-center gap-1.5 ml-1 px-2.5 py-1 text-[11px] font-mono text-ink-muted hover:text-ink-black border border-ink-border rounded hover:border-ink-muted-light transition-all"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={completedLoading ? "animate-spin" : ""}>
+                      <polyline points="23 4 23 10 17 10" />
+                      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                    </svg>
+                    Refresh
+                  </button>
+                </div>
+              </div>
+
+              {completedSheets.length === 0 ? (
+                <div className="p-8 text-center">
+                  <p className="text-sm text-ink-muted font-mono">
+                    {completedRange === "today"
+                      ? "Nothing closed out today yet"
+                      : "No completed trip sheets"}
+                  </p>
+                  <p className="text-xs text-ink-muted mt-1">
+                    A sheet lands here once every stop is signed and you press Complete
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3 p-4 stagger-children">
+                  {completedSheets.map((sheet) => {
+                    const isExpanded = expandedCompleted === sheet.id;
+                    return (
+                      <div
+                        key={sheet.id}
+                        className="bg-ink-card border border-ink-border rounded overflow-hidden"
+                      >
+                        <button
+                          onClick={() => setExpandedCompleted(isExpanded ? null : sheet.id)}
+                          className="flex items-center gap-3 w-full px-5 py-4 text-left hover:bg-ink-surface/50 transition-colors"
+                        >
+                          <div className="w-9 h-9 rounded bg-ink-green-dim flex items-center justify-center shrink-0">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <p className="text-[15px] sm:text-sm font-medium text-ink-black">
+                                {sheet.driverName}
+                              </p>
+                              {sheet.regNo && (
+                                <span className="text-[12px] sm:text-xs font-mono text-ink-muted">
+                                  {sheet.regNo}
+                                </span>
+                              )}
+                              <span className="badge-signed">
+                                <span className="w-1.5 h-1.5 rounded-full bg-ink-green" />
+                                {sheet.signedStops}/{sheet.totalStops} delivered
+                              </span>
+                              {!sheet.archivedFile && (
+                                <span
+                                  className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
+                                  title="The source file was not moved to processed/, so it will not appear in backups"
+                                >
+                                  NOT ARCHIVED
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[12px] sm:text-xs text-ink-muted font-mono mt-1 truncate">
+                              {sheet.sourceFilename} · closed {formatDate(sheet.completedAt)}
+                              {sheet.completedBy ? ` by ${sheet.completedBy}` : ""}
+                            </p>
+                          </div>
+                          <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            className={`text-ink-muted transition-transform shrink-0 ${isExpanded ? "rotate-180" : ""}`}
+                          >
+                            <polyline points="6 9 12 15 18 9" />
+                          </svg>
+                        </button>
+
+                        {isExpanded && (
+                          <div className="border-t border-ink-border divide-y divide-ink-border animate-fade-in">
+                            <div className="grid grid-cols-[2rem_1fr_1fr_auto] gap-2 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50">
+                              <div>#</div>
+                              <div>Invoice</div>
+                              <div>Customer</div>
+                              <div className="text-right">Signed</div>
+                            </div>
+                            {sheet.stops.map((stop) => (
+                              <div
+                                key={`${sheet.id}-${stop.stopNumber}-${stop.invoiceNumber}`}
+                                className="px-4 py-2.5 hover:bg-ink-surface/30 transition-colors"
+                              >
+                                <div className="grid grid-cols-[2rem_1fr_1fr_auto] gap-2 items-center">
+                                  <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">
+                                    {stop.stopNumber}
+                                  </span>
+                                  <span className="font-mono text-[13px] font-medium text-ink-black truncate">
+                                    {stop.invoiceNumber}
+                                  </span>
+                                  <span className="text-[13px] text-ink-muted truncate">
+                                    {stop.customerName}
+                                  </span>
+                                  <div className="flex items-center gap-2 justify-end">
+                                    <CompletedEmailPill status={stop.emailStatus} />
+                                    <span className="text-[12px] font-mono text-ink-muted">
+                                      {stop.signedAt
+                                        ? new Date(stop.signedAt).toLocaleTimeString("en-ZA", {
+                                            hour: "2-digit",
+                                            minute: "2-digit",
+                                          })
+                                        : "—"}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                            <div className="px-4 py-2 text-[11px] text-ink-muted bg-ink-surface/30">
+                              Uploaded {formatDate(sheet.uploadedAt)}
+                              {sheet.archivedFile
+                                ? ` · archived as ${sheet.archivedFile}`
+                                : " · source file was not archived to processed/"}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -1919,18 +2219,6 @@ export default function TripSheetPage() {
         </div>
       )}
 
-      {/* ─── Empty State ────────────────────────────────────────────────── */}
-      {!preview && !loading && tripSheets.length === 0 && (
-        <div className="mt-8 bg-ink-card border border-ink-border rounded p-8 text-center">
-          <p className="text-sm text-ink-muted font-mono">
-            No trip sheets uploaded yet
-          </p>
-          <p className="text-xs text-ink-muted mt-1">
-            Upload a file above to preview and deploy stops to drivers
-          </p>
-        </div>
-      )}
-
       {/* Loading */}
       {loading && (
         <div className="mt-8 bg-ink-card border border-ink-border rounded p-12 text-center">
@@ -1939,5 +2227,51 @@ export default function TripSheetPage() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Where a completed stop's confirmation email got to. Frozen at completion
+ * time, so it is a record of what happened rather than something to act on —
+ * the send queue on the dashboard is where outstanding mail is dealt with.
+ */
+function CompletedEmailPill({ status }: { status: string }) {
+  if (status === "SENT") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-green-dim text-ink-green shrink-0"
+        title="Confirmation email sent"
+      >
+        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+        Emailed
+      </span>
+    );
+  }
+
+  const map: Record<string, { label: string; className: string; title: string }> = {
+    FAILED: {
+      label: "Email failed",
+      className: "bg-ink-red-dim text-ink-red",
+      title: "The confirmation email did not go out",
+    },
+    NO_EMAIL: {
+      label: "No address",
+      className: "bg-ink-amber-dim text-ink-amber",
+      title: "This customer had no email address on file",
+    },
+  };
+
+  const pill = map[status];
+  if (!pill) return null;
+
+  return (
+    <span
+      className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded shrink-0 ${pill.className}`}
+      title={pill.title}
+    >
+      {pill.label}
+    </span>
   );
 }

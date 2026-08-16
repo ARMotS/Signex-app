@@ -228,7 +228,7 @@ export const PATCH = withAuth(async (request: NextRequest) => {
       select: { id: true },
     });
     const validIds = trips.map((t) => t.id);
-    const result = await completeTripSheets(ctx.tenantId, validIds);
+    const result = await completeTripSheets(ctx.tenantId, validIds, ctx.name);
     return NextResponse.json({
       success: true,
       completed: result.completed,
@@ -248,7 +248,7 @@ export const PATCH = withAuth(async (request: NextRequest) => {
     return NextResponse.json({ error: "Trip sheet not found" }, { status: 404 });
   }
 
-  const result = await completeTripSheet(ctx.tenantId, id);
+  const result = await completeTripSheet(ctx.tenantId, id, ctx.name);
   if (!result.success) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }

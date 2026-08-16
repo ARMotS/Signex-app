@@ -4,8 +4,19 @@ import path from "path";
 import { readInvoiceFile, saveSignedInvoice, embedSignatureOnPdf, getInvoiceFolderPath } from "@/lib/invoices";
 import { getOneDriveInvoiceSource, downloadSignedInvoiceByName } from "@/lib/microsoft-graph";
 import { updateStopStatus } from "@/lib/trip-data";
+import { scheduleDeliveryConfirmation } from "@/lib/delivery-notify";
 import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+
+/**
+ * Signing does real work: embedding the signature, writing the signed PDF back
+ * to OneDrive, then — in `after()` — downloading it again as an email
+ * attachment and handing it to an SMTP relay. `after()` work counts toward this
+ * budget, and a timeout would kill the confirmation after the signature had
+ * already been saved, leaving it silently stuck in SENDING until the claim goes
+ * stale. The platform default is far too short for that chain.
+ */
+export const maxDuration = 60;
 
 export const GET = withAuth(async (
   request: NextRequest,
@@ -201,9 +212,20 @@ export const PUT = withAuth(async (
     }
   }
 
+  // Confirm the delivery to the customer automatically. Deferred until after
+  // the response: the signature is already durable, and a driver on a phone at
+  // the door should not be held on an SMTP handshake and a PDF download.
+  // Failures land in the dispatcher's queue — see lib/delivery-notify.ts.
+  if (stopId) {
+    await scheduleDeliveryConfirmation(ctx.tenantId, stopId);
+  }
+
   return NextResponse.json({
     success: true,
     contactId,
     contactHasEmail,
+    // The confirmation is on its way; the client shows a resend control rather
+    // than asking the driver to send it.
+    emailQueued: contactHasEmail,
   });
 });

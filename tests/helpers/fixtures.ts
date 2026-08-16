@@ -45,6 +45,7 @@ export async function resetDatabase() {
   // Order matters: children before parents.
   await p.stop.deleteMany();
   await p.tripSheet.deleteMany();
+  await p.completedTripSheet.deleteMany();
   await p.contact.deleteMany();
   await p.importedFile.deleteMany();
   await p.cloudAccount.deleteMany();

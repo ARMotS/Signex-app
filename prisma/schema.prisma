@@ -44,6 +44,7 @@ model Tenant {
   drivers       Driver[]
   contacts      Contact[]
   tripSheets    TripSheet[]
+  completedTripSheets CompletedTripSheet[]
   stops         Stop[]
   appConfigs    AppConfig[]
   cloudAccounts CloudAccount[]
@@ -155,6 +156,25 @@ enum StopStatus {
   SIGNED
 }
 
+/// Delivery-confirmation email state for one stop.
+///
+/// The confirmation is sent automatically the moment the customer signs, so this
+/// records what became of that attempt. Anything that is not SENT is work the
+/// dispatcher has to finish by hand from the dashboard, which is why "we never
+/// tried", "we tried and it bounced" and "there is no address on file" are three
+/// distinct states rather than one falsy emailSentAt.
+///
+/// SENDING is a claim held for the duration of an attempt. It is what stops the
+/// automatic send and a dispatcher pressing Send at the same moment from mailing
+/// the customer twice. See lib/delivery-notify.ts.
+enum EmailStatus {
+  NOT_SENT
+  SENDING
+  SENT
+  FAILED
+  NO_EMAIL
+}
+
 model Stop {
   id            String     @id @default(cuid())
   stopNumber    Int
@@ -166,6 +186,12 @@ model Stop {
   status        StopStatus @default(PENDING)
   signedAt      DateTime?
   emailSentAt   DateTime?
+  emailStatus   EmailStatus @default(NOT_SENT)
+  emailAttempts Int         @default(0)
+  emailLastAttemptAt DateTime?
+  /// Why the last attempt failed, shown verbatim to the dispatcher. A bad
+  /// address and a dead SMTP relay need different fixes.
+  emailError    String?    @db.Text
   signatureData String?    @db.Text
   tripSheetId   String
   contactId     String?
@@ -185,6 +211,50 @@ model Stop {
   @@index([invoiceNumber])
   @@index([status])
   @@index([contactId])
+  // The dispatcher's outstanding-email queue is read on every dashboard poll.
+  @@index([tenantId, emailStatus])
+  // Drives "signed today" reporting without scanning a scope's whole history.
+  @@index([tenantId, signedAt])
+}
+
+// ─── Completed Trip Sheets (archive) ──────────────────────────────────────
+//
+// Completing a trip sheet deletes it: the stops are done, the source file moves
+// to processed/, and leaving the rows behind would keep them in every driver's
+// run sheet and in the change-feed cursor. That made the day's work vanish the
+// moment it was closed out, so a flat snapshot is written here first.
+//
+// This is an archive, not live data. Nothing joins to it and nothing updates it
+// — the stop list is frozen as JSON at completion time precisely so that later
+// edits to drivers or contacts cannot rewrite what was delivered.
+
+model CompletedTripSheet {
+  id             String   @id @default(cuid())
+  /// The id the trip sheet had before it was deleted. For cross-referencing an
+  /// audit-log entry only; there is no row left to point at.
+  tripSheetId    String
+  driverId       String
+  driverName     String
+  regNo          String?
+  sourceFilename String
+  /// Where the source file landed in processed/, or null if the move failed.
+  archivedFile   String?
+  uploadedAt     DateTime
+  uploadedBy     String
+  completedAt    DateTime @default(now())
+  completedBy    String?
+  totalStops     Int
+  signedStops    Int
+  /// Frozen array of { stopNumber, invoiceNumber, customerName, address, nop,
+  /// signedAt, emailStatus }.
+  stops          Json
+  tenantId       String   @default("")
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([tenantId, completedAt])
+  @@index([tenantId, driverId])
 }
 
 // ─── App Configuration ────────────────────────────────────────────────────

@@ -2,8 +2,17 @@
  * Cross-ADMIN isolation, end-to-end through the real route handlers.
  *
  * Needs a throwaway Postgres:
- *   TEST_DATABASE_URL=postgresql://... npx prisma db push
- *   TEST_DATABASE_URL=postgresql://... npm run test:isolation
+ *   DATABASE_URL_DIRECT=postgresql://...throwaway npx prisma db push
+ *   TEST_DATABASE_URL=postgresql://...throwaway npm run test:isolation
+ *
+ * The two lines use DIFFERENT variables, and it matters. The vitest run reads
+ * TEST_DATABASE_URL and redirects Prisma onto it (tests/setup.ts), so it can
+ * never touch a real database. The Prisma CLI does not: prisma.config.ts loads
+ * .env and takes DATABASE_URL_DIRECT, so `TEST_DATABASE_URL=... prisma db push`
+ * would silently push to whatever .env points at — and `db push` writes no
+ * migration history, so the next `migrate deploy` would then fail on columns
+ * that already exist. Override DATABASE_URL_DIRECT explicitly for the schema
+ * step.
  *
  * Without TEST_DATABASE_URL the suite skips (and says so) rather than passing
  * vacuously — a silently-skipped isolation test is worse than no test.
@@ -31,6 +40,21 @@ import {
 } from "./helpers/fixtures";
 
 vi.mock("@/lib/session", () => sessionMockFactory());
+
+/**
+ * The SMTP relay is stubbed. Beyond keeping the suite off the network, the
+ * recorded recipients are themselves an isolation assertion: whose address a
+ * confirmation would have gone to is the leak that matters most here.
+ */
+const sentEmails: { to: string; invoiceNumber: string }[] = [];
+vi.mock("@/lib/email", () => ({
+  sendDeliveryConfirmation: vi.fn(
+    async (p: { customerEmail: string; invoiceNumber: string }) => {
+      sentEmails.push({ to: p.customerEmail, invoiceNumber: p.invoiceNumber });
+      return { success: true, emailId: `test-${sentEmails.length}` };
+    }
+  ),
+}));
 // Graph calls are stubbed so we can assert WHICH bearer token would be used
 // without talking to Microsoft.
 const graphCalls: { url: string; token: string | null }[] = [];
@@ -70,6 +94,7 @@ suite("cross-ADMIN isolation", () => {
 
   beforeEach(() => {
     graphCalls.length = 0;
+    sentEmails.length = 0;
     useSession(null);
   });
 
@@ -1469,6 +1494,301 @@ suite("cross-ADMIN isolation", () => {
 
       const res = await GET(req("/api/sync"));
       expect(res.status).toBe(401);
+    });
+  });
+
+  // ── Dashboard ────────────────────────────────────────────────────────
+  //
+  // The dashboard is polled all day and aggregates across the whole scope, so a
+  // leak here would be a standing one rather than something you have to go
+  // looking for.
+  describe("dashboard", () => {
+    it("counts and lists only the caller's own scope", async () => {
+      const { GET } = await import("@/app/api/dashboard/route");
+
+      useSession(adminSession(f.a));
+      const a = await (await GET(req("/api/dashboard"))).json();
+
+      // Each scope has exactly one seeded sheet with one stop, so anything that
+      // saw both scopes would report two.
+      expect(a.stats.totalStops).toBe(1);
+      expect(a.stats.activeSheets).toBe(1);
+      expect(a.tripSheets.map((t: any) => t.id)).toEqual([f.a.tripSheet.id]);
+      expect(a.tripSheets.map((t: any) => t.id)).not.toContain(f.b.tripSheet.id);
+
+      const stopIds = a.tripSheets.flatMap((t: any) => t.stops.map((s: any) => s.id));
+      expect(stopIds).not.toContain(f.b.stop.id);
+
+      // Same-name drivers in both scopes: the count, not the name, is the tell.
+      expect(a.drivers).toHaveLength(1);
+      expect(a.drivers[0].driverId).toBe(f.a.driver.id);
+    });
+
+    it("the email queue never surfaces another scope's customer", async () => {
+      const { GET } = await import("@/app/api/dashboard/route");
+
+      // A signed stop in B whose confirmation failed — exactly what the queue
+      // is built to show its own dispatcher.
+      await db().stop.update({
+        where: { id: f.b.stop.id },
+        data: {
+          status: "SIGNED",
+          signedAt: new Date(),
+          contactId: f.b.contact.id,
+          emailStatus: "FAILED",
+          emailError: "relay refused",
+        },
+      });
+
+      useSession(adminSession(f.a));
+      const a = await (await GET(req("/api/dashboard"))).json();
+
+      expect(a.emails.queue.map((q: any) => q.stopId)).not.toContain(f.b.stop.id);
+      expect(a.emails.failed).toBe(0);
+      // ...and the recipient address itself never appears anywhere in A's payload.
+      expect(JSON.stringify(a)).not.toContain("acme-b@example.test");
+
+      // B's own dispatcher does see it — proving the assertion above is scoping,
+      // not the queue being empty for everyone.
+      useSession(adminSession(f.b));
+      const b = await (await GET(req("/api/dashboard"))).json();
+      expect(b.emails.queue.map((q: any) => q.stopId)).toContain(f.b.stop.id);
+      expect(b.emails.failed).toBe(1);
+
+      await db().stop.update({
+        where: { id: f.b.stop.id },
+        data: {
+          status: "PENDING",
+          signedAt: null,
+          contactId: null,
+          emailStatus: "NOT_SENT",
+          emailError: null,
+        },
+      });
+    });
+
+    it("is closed to DRIVER sessions", async () => {
+      const { GET } = await import("@/app/api/dashboard/route");
+      useSession(driverSession(f.a));
+
+      const res = await GET(req("/api/dashboard"));
+      expect(res.status).toBe(403);
+    });
+
+    it("requires a session", async () => {
+      const { GET } = await import("@/app/api/dashboard/route");
+      useSession(null);
+
+      const res = await GET(req("/api/dashboard"));
+      expect(res.status).toBe(401);
+    });
+  });
+
+  // ── Completed trip sheet archive ─────────────────────────────────────
+  describe("the completed trip sheet archive", () => {
+    it("a completed sheet is snapshotted into the caller's scope and no other", async () => {
+      const { saveTripSheet, completeTripSheet } = await import("@/lib/trip-data");
+
+      const trip = await saveTripSheet(f.a.tenantId, {
+        driverId: f.a.driver.id,
+        driverName: f.a.driver.name,
+        regNo: "REG-A",
+        uploadedBy: f.a.admin.id,
+        sourceFilename: "archive-me.csv",
+        stops: [
+          {
+            stopNumber: 1,
+            invoiceNumber: "INV-7001",
+            customerName: "Archive Co",
+            address: "1 Archive Rd",
+            nop: 2,
+            status: "PENDING",
+          },
+        ],
+      });
+
+      await db().stop.updateMany({
+        where: { tripSheetId: trip.id },
+        data: { status: "SIGNED", signedAt: new Date(), emailStatus: "SENT" },
+      });
+
+      const outcome = await completeTripSheet(f.a.tenantId, trip.id, "Admin A");
+      expect(outcome.success).toBe(true);
+
+      // The live sheet is gone; the archive row carries the record.
+      expect(await db().tripSheet.findUnique({ where: { id: trip.id } })).toBeNull();
+
+      const archived = await db().completedTripSheet.findFirst({
+        where: { tripSheetId: trip.id },
+      });
+      expect(archived).not.toBeNull();
+      expect(archived!.tenantId).toBe(f.a.tenantId);
+      expect(archived!.tenantId).not.toBe(f.b.tenantId);
+      expect(archived!.totalStops).toBe(1);
+      expect(archived!.signedStops).toBe(1);
+      expect(archived!.completedBy).toBe("Admin A");
+      expect((archived!.stops as any)[0].invoiceNumber).toBe("INV-7001");
+
+      // ADMIN 2's Completed tab must not show it.
+      const { GET } = await import("@/app/api/trip-sheet/completed/route");
+      useSession(adminSession(f.b));
+      const bodyB = await (await GET(req("/api/trip-sheet/completed?range=all"))).json();
+      expect(bodyB.completed.map((c: any) => c.id)).not.toContain(archived!.id);
+
+      // ADMIN 1's does.
+      useSession(adminSession(f.a));
+      const bodyA = await (await GET(req("/api/trip-sheet/completed?range=all"))).json();
+      expect(bodyA.completed.map((c: any) => c.id)).toContain(archived!.id);
+
+      await db().completedTripSheet.delete({ where: { id: archived!.id } });
+    });
+
+    it("is closed to DRIVER sessions", async () => {
+      const { GET } = await import("@/app/api/trip-sheet/completed/route");
+      useSession(driverSession(f.a));
+
+      const res = await GET(req("/api/trip-sheet/completed"));
+      expect(res.status).toBe(403);
+    });
+  });
+
+  // ── Delivery confirmation email ──────────────────────────────────────
+  describe("delivery confirmation email", () => {
+    /**
+     * Every test here drives a seeded stop through a different email state, and
+     * earlier suites now genuinely attempt a send when they sign one. Resetting
+     * up front rather than cleaning up afterwards means a failing assertion
+     * reports its own problem instead of cascading into the next test.
+     */
+    beforeEach(async () => {
+      for (const stop of [f.a.stop, f.b.stop]) {
+        await db().stop.update({
+          where: { id: stop.id },
+          data: {
+            status: "PENDING",
+            signedAt: null,
+            contactId: null,
+            emailStatus: "NOT_SENT",
+            emailSentAt: null,
+            emailLastAttemptAt: null,
+            emailError: null,
+            emailAttempts: 0,
+          },
+        });
+      }
+    });
+
+    it("cannot be sent to another scope's customer", async () => {
+      const { POST } = await import("@/app/api/invoices/[id]/notify/route");
+
+      await db().stop.update({
+        where: { id: f.b.stop.id },
+        data: { status: "SIGNED", signedAt: new Date(), contactId: f.b.contact.id },
+      });
+
+      useSession(adminSession(f.a));
+      const res = await POST(
+        req(`/api/invoices/${f.b.stop.id}/notify`, {
+          method: "POST",
+          body: { driverName: "Jane Delivery" },
+        }),
+        params({ id: f.b.stop.id })
+      );
+
+      // 404, never 403 — a 403 would confirm the stop exists somewhere else.
+      expect(res.status).toBe(404);
+
+      // No mail was addressed to B's customer, and nothing was recorded against
+      // B's stop.
+      expect(sentEmails).toHaveLength(0);
+      const after = await db().stop.findUnique({ where: { id: f.b.stop.id } });
+      expect(after?.emailAttempts).toBe(0);
+      expect(after?.emailStatus).toBe("NOT_SENT");
+    });
+
+    it("a stop with no contact email is parked for the dispatcher, not retried forever", async () => {
+      const { sendStopDeliveryConfirmation } = await import("@/lib/delivery-notify");
+
+      await db().stop.update({
+        where: { id: f.a.stop.id },
+        data: { status: "SIGNED", signedAt: new Date(), contactId: null },
+      });
+
+      const result = await sendStopDeliveryConfirmation(f.a.tenantId, f.a.stop.id);
+      expect(result.outcome).toBe("no_email");
+      expect(result.sent).toBe(false);
+
+      const row = await db().stop.findUnique({ where: { id: f.a.stop.id } });
+      expect(row?.emailStatus).toBe("NO_EMAIL");
+      // No claim was taken, so nothing counted as an attempt.
+      expect(row?.emailAttempts).toBe(0);
+    });
+
+    it("an unsigned stop is never emailed", async () => {
+      const { sendStopDeliveryConfirmation } = await import("@/lib/delivery-notify");
+
+      const result = await sendStopDeliveryConfirmation(f.a.tenantId, f.a.stop.id);
+      expect(result.outcome).toBe("not_signed");
+
+      const row = await db().stop.findUnique({ where: { id: f.a.stop.id } });
+      expect(row?.emailAttempts).toBe(0);
+    });
+
+    it("a claim already in flight is not sent a second time", async () => {
+      const { sendStopDeliveryConfirmation } = await import("@/lib/delivery-notify");
+
+      // Exactly the state the automatic send leaves behind while it works: a
+      // fresh SENDING claim. A dispatcher pressing Send at this moment must not
+      // put a second copy in the customer's inbox.
+      await db().stop.update({
+        where: { id: f.a.stop.id },
+        data: {
+          status: "SIGNED",
+          signedAt: new Date(),
+          contactId: f.a.contact.id,
+          emailStatus: "SENDING",
+          emailLastAttemptAt: new Date(),
+          emailAttempts: 1,
+        },
+      });
+
+      const result = await sendStopDeliveryConfirmation(f.a.tenantId, f.a.stop.id, {
+        force: true,
+      });
+      expect(result.outcome).toBe("in_flight");
+      expect(sentEmails).toHaveLength(0);
+
+      const row = await db().stop.findUnique({ where: { id: f.a.stop.id } });
+      expect(row?.emailAttempts).toBe(1);
+    });
+
+    it("a stale claim is recoverable — a crashed attempt does not strand a stop", async () => {
+      const { sendStopDeliveryConfirmation } = await import("@/lib/delivery-notify");
+
+      await db().stop.update({
+        where: { id: f.a.stop.id },
+        data: {
+          status: "SIGNED",
+          signedAt: new Date(),
+          contactId: f.a.contact.id,
+          emailStatus: "SENDING",
+          // Older than the lease: whatever held this is not coming back.
+          emailLastAttemptAt: new Date(Date.now() - 10 * 60 * 1000),
+          emailAttempts: 1,
+        },
+      });
+
+      const result = await sendStopDeliveryConfirmation(f.a.tenantId, f.a.stop.id);
+      expect(result.outcome).toBe("sent");
+
+      // Addressed to this scope's contact, not the identically-named one in B.
+      expect(sentEmails).toHaveLength(1);
+      expect(sentEmails[0].to).toBe("acme-a@example.test");
+
+      const row = await db().stop.findUnique({ where: { id: f.a.stop.id } });
+      expect(row?.emailAttempts).toBe(2);
+      expect(row?.emailStatus).toBe("SENT");
+      expect(row?.emailSentAt).not.toBeNull();
     });
   });
 });

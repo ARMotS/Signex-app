@@ -257,6 +257,12 @@ export default function SignInvoicePage() {
     );
   }
 
+  /**
+   * Manual re-send. The confirmation already went out automatically when the
+   * signature saved — this is the "the customer says they didn't get it" button,
+   * not the normal path. If it fails here too, the dispatcher can send it from
+   * the dashboard; the driver is not blocked either way.
+   */
   const handleSendEmail = async () => {
     if (!signedStopId) return;
     setEmailStatus("sending");
@@ -294,26 +300,42 @@ export default function SignInvoicePage() {
         </p>
 
         {contactHasEmail ? (
-          <button
-            onClick={handleSendEmail}
-            disabled={emailStatus === "sending" || emailStatus === "sent"}
-            className={`px-5 py-2.5 text-sm font-mono rounded transition-all ${
-              emailStatus === "sent"
-                ? "bg-ink-green-dim text-ink-green cursor-default"
-                : emailStatus === "failed"
-                ? "bg-red-50 text-ink-red border border-ink-red/20 hover:bg-red-100"
-                : emailStatus === "sending"
-                ? "bg-ink-surface text-ink-muted cursor-wait"
-                : "bg-ink-green text-white hover:bg-ink-green-hover active:scale-[0.98]"
-            }`}
-          >
-            {emailStatus === "idle" && "Send confirmation to customer"}
-            {emailStatus === "sending" && "Sending..."}
-            {emailStatus === "sent" && "✓ Email sent"}
-            {emailStatus === "failed" && "Failed — tap to retry"}
-          </button>
+          <>
+            <div className="flex items-center gap-2 px-4 py-2.5 rounded bg-ink-green-dim border border-ink-green/20 mb-3">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+                <polyline points="22,6 12,13 2,6" />
+              </svg>
+              <p className="text-xs font-mono text-ink-green">
+                {emailStatus === "sent"
+                  ? "Confirmation re-sent to the customer"
+                  : "Confirmation email sent to the customer"}
+              </p>
+            </div>
+            <button
+              onClick={handleSendEmail}
+              disabled={emailStatus === "sending"}
+              className={`px-4 py-2 text-xs font-mono rounded transition-all ${
+                emailStatus === "failed"
+                  ? "bg-red-50 text-ink-red border border-ink-red/20 hover:bg-red-100"
+                  : emailStatus === "sending"
+                  ? "bg-ink-surface text-ink-muted cursor-wait"
+                  : "border border-ink-border text-ink-muted hover:text-ink-black hover:bg-ink-surface"
+              }`}
+            >
+              {emailStatus === "idle" && "Send it again"}
+              {emailStatus === "sending" && "Sending…"}
+              {emailStatus === "sent" && "Send it again"}
+              {emailStatus === "failed" && "Failed — tap to retry"}
+            </button>
+          </>
         ) : (
-          <p className="text-xs text-ink-muted font-mono">No email on file for this customer</p>
+          <div className="text-center">
+            <p className="text-xs text-ink-muted font-mono">No email on file for this customer</p>
+            <p className="text-[11px] text-ink-muted-light mt-1">
+              The office will follow it up from the dashboard
+            </p>
+          </div>
         )}
 
         <button

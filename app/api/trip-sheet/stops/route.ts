@@ -1,8 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTripSheetsForDriver, updateStopStatus } from "@/lib/trip-data";
 import type { StopStatus } from "@/lib/trip-data";
+import { scheduleDeliveryConfirmation } from "@/lib/delivery-notify";
 import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+
+/**
+ * Signing a stop schedules the confirmation email in `after()`, whose work
+ * counts toward this budget. A timeout there would abandon the attempt after
+ * the signature was saved, stranding it in SENDING until the claim goes stale.
+ */
+export const maxDuration = 60;
 
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
@@ -99,7 +107,18 @@ export const PUT = withAuth(async (request: NextRequest) => {
     await ctx.db.stop.update({ where: { id: stopId }, data: { contactId: contact.id } });
     contactId = contact.id;
     contactHasEmail = !!contact.email;
+
+    // Automatic delivery confirmation. Deferred so the driver's device is not
+    // held on an SMTP handshake; anything that fails becomes an item in the
+    // dispatcher's queue. Awaiting is free in a real request — see
+    // scheduleDeliveryConfirmation in lib/delivery-notify.ts.
+    await scheduleDeliveryConfirmation(ctx.tenantId, stopId);
   }
 
-  return NextResponse.json({ success: true, contactId, contactHasEmail });
+  return NextResponse.json({
+    success: true,
+    contactId,
+    contactHasEmail,
+    emailQueued: status === "SIGNED" && contactHasEmail,
+  });
 });

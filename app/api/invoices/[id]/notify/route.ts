@@ -1,85 +1,58 @@
 import { NextRequest, NextResponse } from 'next/server'
-import fs from 'fs'
-import path from 'path'
-import { sendDeliveryConfirmation } from '@/lib/email'
+import { sendStopDeliveryConfirmation } from '@/lib/delivery-notify'
 import { getScope } from '@/lib/tenant'
 import { withAuth } from '@/lib/api-handler'
-import { getInvoiceFolderPath } from '@/lib/invoices'
-import { getOneDriveInvoiceSource, downloadSignedInvoiceByName } from '@/lib/microsoft-graph'
 
 export const runtime = 'nodejs'
 
+/**
+ * Downloads the signed PDF as an attachment and waits on an SMTP relay, and the
+ * dashboard's "Send all" walks the queue one at a time through this endpoint.
+ */
+export const maxDuration = 60
+
+/**
+ * The MANUAL send: a dispatcher on the dashboard, or a driver on the signature
+ * screen, pushing a confirmation that did not go out by itself.
+ *
+ * The automatic send on signature is the normal path (see lib/delivery-notify.ts).
+ * This exists for when that failed, when the customer had no address on file at
+ * the time, or when someone asks for another copy.
+ *
+ * `[id]` is a STOP id, not an invoice filename. Resolved through the scoped
+ * client, so a stop belonging to another ADMIN is not found — this endpoint
+ * cannot be used to email another ADMIN's customer.
+ */
 export const POST = withAuth(async (req: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
   const ctx = await getScope();
   const { id } = await params;
-  const { driverName } = await req.json();
 
-  // Scoped read — a stop id from another ADMIN is not found, so this endpoint
-  // cannot be used to email another ADMIN's customer.
-  const stop = await ctx.db.stop.findFirst({
-    where: { id },
-    include: { contact: true },
+  const body = await req.json().catch(() => ({}));
+  const { driverName } = body ?? {};
+  // Pressing Send by hand means "send it now", including a second copy of one
+  // that already went. An attempt already in flight is still not duplicated.
+  const force = body?.force !== false;
+
+  const result = await sendStopDeliveryConfirmation(ctx.tenantId, id, {
+    driverName: typeof driverName === 'string' ? driverName : undefined,
+    force,
   });
 
-  if (!stop) {
-    return NextResponse.json({ error: 'Stop not found' }, { status: 404 });
+  switch (result.outcome) {
+    case 'not_signed':
+      // 404 covers both "no such stop" and "not yours". A stop that exists but
+      // is unsigned is a 400 the caller can act on.
+      return NextResponse.json({ error: 'Stop not found or not signed yet' }, { status: 404 });
+    case 'no_email':
+      return NextResponse.json({ skipped: true, reason: 'No email on file' });
+    case 'in_flight':
+      return NextResponse.json({
+        skipped: true,
+        reason: 'A confirmation for this delivery is already being sent',
+      });
+    case 'failed':
+      return NextResponse.json({ success: false, error: result.error }, { status: 502 });
+    default:
+      return NextResponse.json({ success: true, recipient: result.recipient });
   }
-  if (stop.status !== 'SIGNED') return NextResponse.json({ error: 'Invoice not signed yet' }, { status: 400 });
-  if (!stop.contact?.email) return NextResponse.json({ skipped: true, reason: 'No email on file' });
-
-  const signedPDFUrl = '';
-
-  // Read signed PDF for attachment (OneDrive or local)
-  let pdfAttachment: { filename: string; content: Buffer } | undefined;
-  if (stop.invoiceFile) {
-    try {
-      const onedrive = await getOneDriveInvoiceSource(ctx.tenantId);
-      if (onedrive) {
-        // One addressed download rather than enumerating the signed folder.
-        const content = await downloadSignedInvoiceByName(
-          ctx.tenantId,
-          stop.invoiceFile
-        );
-        if (content) {
-          pdfAttachment = {
-            filename: `signed-${stop.invoiceFile}`,
-            content,
-          };
-        }
-      } else {
-        const folderPath = await getInvoiceFolderPath(ctx.tenantId);
-        const signedPath = path.join(folderPath, 'signed', stop.invoiceFile);
-        if (fs.existsSync(signedPath)) {
-          pdfAttachment = {
-            filename: `signed-${stop.invoiceFile}`,
-            content: fs.readFileSync(signedPath),
-          };
-        }
-      }
-    } catch (err) {
-      console.error('[notify] Failed to read signed PDF for attachment:', err);
-    }
-  }
-
-  const result = await sendDeliveryConfirmation({
-    customerEmail: stop.contact.email,
-    customerName: stop.contact.companyName,
-    contactPerson: stop.contact.contactPerson ?? undefined,
-    invoiceNumber: stop.invoiceNumber,
-    driverName,
-    deliveryAddress: stop.address,
-    signedAt: stop.signedAt ?? new Date(),
-    signedPDFUrl,
-    companyName: process.env.COMPANY_NAME ?? 'Signex',
-    pdfAttachment,
-  });
-
-  if (result.success) {
-    await ctx.db.stop.update({
-      where: { id },
-      data: { emailSentAt: new Date() },
-    });
-  }
-
-  return NextResponse.json(result);
 });

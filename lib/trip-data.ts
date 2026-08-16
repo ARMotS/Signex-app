@@ -27,6 +27,9 @@ export interface TripStop {
   status: string;
   signedAt?: Date | null;
   emailSentAt?: Date | null;
+  emailStatus?: string;
+  emailError?: string | null;
+  emailAttempts?: number;
   contact?: { email?: string | null };
 }
 
@@ -40,6 +43,34 @@ export interface TripSheet {
   uploadedBy: string;
   sourceFilename: string;
   stops: TripStop[];
+}
+
+/** One frozen stop inside a CompletedTripSheet.stops snapshot. */
+export interface ArchivedStop {
+  stopNumber: number;
+  invoiceNumber: string;
+  customerName: string;
+  address: string;
+  nop: number;
+  signedAt: string | null;
+  emailStatus: string;
+}
+
+export interface CompletedTripSheet {
+  id: string;
+  tripSheetId: string;
+  driverId: string;
+  driverName: string;
+  regNo: string;
+  sourceFilename: string;
+  archivedFile: string | null;
+  uploadedAt: Date;
+  uploadedBy: string;
+  completedAt: Date;
+  completedBy: string | null;
+  totalStops: number;
+  signedStops: number;
+  stops: ArchivedStop[];
 }
 
 // ─── Trip Sheet Operations ────────────────────────────────────────────────
@@ -356,12 +387,14 @@ export async function deleteTripSheet(
 
 /**
  * Complete a trip sheet: verify all stops are SIGNED, move the source file
- * to the processed/ subfolder, and delete the trip sheet from the DB.
+ * to the processed/ subfolder, snapshot it into the archive, and delete the
+ * trip sheet from the DB.
  * Returns { success, error?, archivedFile? }.
  */
 export async function completeTripSheet(
   tenantId: string,
-  tripId: string
+  tripId: string,
+  completedBy?: string
 ): Promise<{ success: boolean; error?: string; archivedFile?: string | null }> {
   try {
     const db = scopedPrisma(tenantId);
@@ -373,7 +406,10 @@ export async function completeTripSheet(
     }
 
     // Verify all stops are SIGNED
-    const stops = await db.stop.findMany({ where: { tripSheetId: tripId } });
+    const stops = await db.stop.findMany({
+      where: { tripSheetId: tripId },
+      orderBy: { stopNumber: "asc" },
+    });
 
     const allSigned = stops.length > 0 && stops.every((s) => s.status === "SIGNED");
     if (!allSigned) {
@@ -397,6 +433,38 @@ export async function completeTripSheet(
         );
       }
     }
+
+    // Snapshot BEFORE the delete. Deleting the sheet is what keeps finished
+    // stops out of every driver's run sheet and out of the change-feed cursor,
+    // but it used to take the day's record with it — a dispatcher who closed
+    // out a route could no longer see it had happened.
+    //
+    // Frozen as JSON on purpose: this is an archive of what was delivered, and
+    // later edits to a driver or a contact must not be able to rewrite it.
+    await db.completedTripSheet.create({
+      data: {
+        tripSheetId: trip.id,
+        driverId: trip.driverId,
+        driverName: driver?.name || "Unknown",
+        regNo: trip.regNo,
+        sourceFilename: trip.sourceFilename,
+        archivedFile,
+        uploadedAt: trip.date,
+        uploadedBy: trip.uploadedBy,
+        completedBy: completedBy ?? null,
+        totalStops: stops.length,
+        signedStops: stops.filter((s) => s.status === "SIGNED").length,
+        stops: stops.map((s) => ({
+          stopNumber: s.stopNumber,
+          invoiceNumber: s.invoiceNumber,
+          customerName: s.customerName,
+          address: s.address,
+          nop: s.nop,
+          signedAt: s.signedAt ? s.signedAt.toISOString() : null,
+          emailStatus: s.emailStatus,
+        })),
+      },
+    });
 
     // Delete the trip sheet (cascades to stops)
     await db.tripSheet.delete({ where: { id: tripId } });
@@ -436,11 +504,12 @@ export async function completeTripSheet(
  */
 export async function completeTripSheets(
   tenantId: string,
-  tripIds: string[]
+  tripIds: string[],
+  completedBy?: string
 ): Promise<{ completed: number; failed: { id: string; error: string }[] }> {
   const results = await mapWithConcurrency(tripIds, async (id) => ({
     id,
-    outcome: await completeTripSheet(tenantId, id),
+    outcome: await completeTripSheet(tenantId, id, completedBy),
   }));
 
   let completed = 0;
@@ -482,6 +551,51 @@ export async function deleteTripSheets(
   }
 
   return { deleted, failed };
+}
+
+/**
+ * Read the completed-trip-sheet archive for one scope, newest first.
+ *
+ * @param opts.since  Inclusive lower bound on completedAt. The trip sheet page
+ *                    passes the start of the dispatcher's local day.
+ * @param opts.until  Exclusive upper bound on completedAt.
+ * @param opts.limit  Hard cap; the archive grows without bound, so every caller
+ *                    gets one whether it asks or not.
+ */
+export async function getCompletedTripSheets(
+  tenantId: string,
+  opts: { since?: Date; until?: Date; limit?: number } = {}
+): Promise<CompletedTripSheet[]> {
+  const db = scopedPrisma(tenantId);
+  const { since, until, limit = 100 } = opts;
+
+  const rows = await db.completedTripSheet.findMany({
+    where:
+      since || until
+        ? { completedAt: { ...(since && { gte: since }), ...(until && { lt: until }) } }
+        : {},
+    orderBy: { completedAt: "desc" },
+    take: Math.min(Math.max(limit, 1), 500),
+  });
+
+  return rows.map((r) => ({
+    id: r.id,
+    tripSheetId: r.tripSheetId,
+    driverId: r.driverId,
+    driverName: r.driverName,
+    regNo: r.regNo || "",
+    sourceFilename: r.sourceFilename,
+    archivedFile: r.archivedFile,
+    uploadedAt: r.uploadedAt,
+    uploadedBy: r.uploadedBy,
+    completedAt: r.completedAt,
+    completedBy: r.completedBy,
+    totalStops: r.totalStops,
+    signedStops: r.signedStops,
+    // Written by completeTripSheet above and never updated, so the shape is
+    // ours — but it is still JSON coming back out of the database.
+    stops: Array.isArray(r.stops) ? (r.stops as unknown as ArchivedStop[]) : [],
+  }));
 }
 
 /**
@@ -530,6 +644,9 @@ function mapStop(stop: {
   status: string;
   signedAt: Date | null;
   emailSentAt?: Date | null;
+  emailStatus?: string;
+  emailError?: string | null;
+  emailAttempts?: number;
   contact?: { email: string | null } | null;
 }): TripStop {
   return {
@@ -543,6 +660,9 @@ function mapStop(stop: {
     status: stop.status,
     signedAt: stop.signedAt,
     emailSentAt: stop.emailSentAt,
+    emailStatus: stop.emailStatus,
+    emailError: stop.emailError,
+    emailAttempts: stop.emailAttempts,
     contact: stop.contact ? { email: stop.contact.email } : undefined,
   };
 }
