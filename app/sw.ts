@@ -79,13 +79,20 @@ const serwist = new Serwist({
     // Cache name is versioned: renaming it discards entries written by an earlier
     // deployment instead of revalidating them, which is what lets a route added
     // after a phone last loaded the app actually resolve.
+    //
+    // BUMP THIS WHENEVER A DRIVER-FACING PAGE CHANGES MEANINGFULLY. Under
+    // stale-while-revalidate a phone serves the cached page first and only picks
+    // up the new one on the load AFTER that, so a behavioural change appears not
+    // to have deployed at all. v3: the signature screen lost its send-email
+    // button when confirmations became automatic, and drivers kept seeing — and
+    // pressing — the old one.
     {
       matcher: ({ url }) =>
         /^\/(dashboard|run|sign|drivers|contacts|invoices|settings|trip-sheet|backups|users)/.test(
           url.pathname
         ),
       handler: new StaleWhileRevalidate({
-        cacheName: "signex-pages-v2",
+        cacheName: "signex-pages-v3",
         plugins: [
           new ExpirationPlugin({
             maxEntries: 30,
@@ -117,7 +124,7 @@ const EXPECTED_RUNTIME_CACHES = new Set([
   "signex-api-cache",
   "signex-static-assets",
   "signex-entry-v2",
-  "signex-pages-v2",
+  "signex-pages-v3",
 ]);
 
 self.addEventListener("activate", (event) => {

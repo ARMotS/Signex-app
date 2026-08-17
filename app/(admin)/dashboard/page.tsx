@@ -96,6 +96,7 @@ interface DashboardData {
     notSent: number;
     sending: number;
     needsAttention: number;
+    untriedWindowDays: number;
     queue: EmailQueueItem[];
   };
   drivers: DriverProgress[];
@@ -844,7 +845,9 @@ export default function DashboardPage() {
                       Send Queue
                     </h2>
                     <p className="text-xs text-ink-muted mt-0.5">
-                      Confirmations that did not go out automatically when the customer signed
+                      Confirmations that did not go out automatically when the customer signed.
+                      Failures stay until dealt with; never-attempted deliveries show for{" "}
+                      {emails?.untriedWindowDays ?? 7} days.
                     </p>
                   </div>
                   {sendableQueue.length > 0 && (

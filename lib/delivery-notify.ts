@@ -183,7 +183,10 @@ export async function sendStopDeliveryConfirmation(
       return { outcome: "sent", sent: true, recipient: stop.contact.email };
     }
 
-    const error = "The mail server rejected the message";
+    // The transport's own words, not a paraphrase — this is what the dispatcher
+    // reads in the queue, and it has to distinguish a wrong SMTP password from
+    // a bad customer address.
+    const error = result.error ?? "The mail server rejected the message";
     await db.stop.updateMany({
       where: { id: stopId },
       data: { emailStatus: "FAILED", emailError: error },

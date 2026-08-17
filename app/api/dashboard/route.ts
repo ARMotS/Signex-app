@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { getAllTripSheets, getCompletedTripSheets } from "@/lib/trip-data";
 import { dayWindow, parseTzOffset } from "@/lib/day-window";
 import { getScope, requireRole } from "@/lib/tenant";
@@ -16,12 +17,46 @@ import { withAuth } from "@/lib/api-handler";
  *
  * `?tzOffset=` puts the day boundary on the viewer's clock — see lib/day-window.
  */
+/**
+ * How far back an untried confirmation is still the dispatcher's problem.
+ *
+ * Confirmations only became automatic when this feature shipped, so every
+ * delivery signed before that has emailStatus NOT_SENT — nobody ever tried,
+ * because there was nothing to try. Without a bound the queue opens on day one
+ * showing the entire history of the workspace, which is not a work list; it is
+ * noise that buries the two deliveries that actually failed this morning.
+ *
+ * FAILED is deliberately NOT bounded (see the query below): the system tried
+ * and could not deliver, and that must never quietly age out of view.
+ */
+const UNTRIED_QUEUE_DAYS = 7;
+
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { searchParams } = new URL(request.url);
   const day = dayWindow(new Date(), parseTzOffset(searchParams.get("tzOffset")));
+
+  const untriedSince = new Date(Date.now() - UNTRIED_QUEUE_DAYS * 24 * 60 * 60 * 1000);
+
+  /**
+   * What counts as outstanding. SENDING is excluded — an attempt in flight is
+   * not yet a problem, and offering a button for it only invites a duplicate.
+   */
+  const outstanding: Prisma.StopWhereInput = {
+    status: "SIGNED",
+    OR: [
+      // Tried and rejected. Always actionable, however old.
+      { emailStatus: "FAILED" },
+      // Never tried, or no address on file — only while it is still this
+      // week's work.
+      {
+        emailStatus: { in: ["NOT_SENT", "NO_EMAIL"] },
+        signedAt: { gte: untriedSince },
+      },
+    ],
+  };
 
   const [
     tripSheets,
@@ -32,6 +67,8 @@ export const GET = withAuth(async (request: NextRequest) => {
     inProgress,
     signedToday,
     emailCounts,
+    sentCount,
+    sendingCount,
     driverRoster,
     needsEmailRows,
     recentSignedRows,
@@ -45,19 +82,22 @@ export const GET = withAuth(async (request: NextRequest) => {
     ctx.db.stop.count({
       where: { status: "SIGNED", signedAt: { gte: day.start, lt: day.end } },
     }),
-    ctx.db.stop.groupBy({ by: ["emailStatus"], _count: true }),
+    // Counted over exactly the set the queue draws from, so the tiles above the
+    // queue can never disagree with the rows inside it.
+    ctx.db.stop.groupBy({ by: ["emailStatus"], where: outstanding, _count: true }),
+
+    // Delivered confirmations, and attempts currently in flight. Counted apart
+    // from the queue because neither is work for anyone.
+    ctx.db.stop.count({ where: { emailStatus: "SENT" } }),
+    ctx.db.stop.count({ where: { emailStatus: "SENDING" } }),
     // Every driver, not just the active ones: a stop signed this morning by an
     // account deactivated this afternoon still has to render with a name.
     ctx.db.driver.findMany({ select: { id: true, name: true, active: true } }),
 
     // The dispatcher's work queue: signed deliveries whose confirmation did not
-    // go out by itself. SENDING is excluded — an attempt in flight is not yet a
-    // problem, and offering a button for it only invites a duplicate send.
+    // go out by itself.
     ctx.db.stop.findMany({
-      where: {
-        status: "SIGNED",
-        emailStatus: { in: ["FAILED", "NO_EMAIL", "NOT_SENT"] },
-      },
+      where: outstanding,
       orderBy: { signedAt: "desc" },
       take: 50,
       select: {
@@ -151,19 +191,17 @@ export const GET = withAuth(async (request: NextRequest) => {
 
   // ─── Email queue ────────────────────────────────────────────────────────
   const emails = {
-    sent: 0,
+    sent: sentCount,
+    sending: sendingCount,
     failed: 0,
     noEmail: 0,
     notSent: 0,
-    sending: 0,
   };
   for (const row of emailCounts) {
     const n = typeof row._count === "number" ? row._count : 0;
     switch (row.emailStatus) {
-      case "SENT": emails.sent += n; break;
       case "FAILED": emails.failed += n; break;
       case "NO_EMAIL": emails.noEmail += n; break;
-      case "SENDING": emails.sending += n; break;
       default: emails.notSent += n; break;
     }
   }
@@ -220,7 +258,13 @@ export const GET = withAuth(async (request: NextRequest) => {
         : null,
     },
 
-    emails: { ...emails, queue: emailQueue, needsAttention: emailQueue.length },
+    emails: {
+      ...emails,
+      queue: emailQueue,
+      needsAttention: emailQueue.length,
+      /** So the UI can say what "not sent" is counted over. */
+      untriedWindowDays: UNTRIED_QUEUE_DAYS,
+    },
     drivers,
     tripSheets,
     completedToday,
