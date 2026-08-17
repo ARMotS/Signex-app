@@ -1650,6 +1650,59 @@ suite("cross-ADMIN isolation", () => {
       const res = await GET(req("/api/trip-sheet/completed"));
       expect(res.status).toBe(403);
     });
+
+    it("the per-day/per-driver report counts only the caller's own scope", async () => {
+      const { GET } = await import("@/app/api/dashboard/completions/route");
+
+      // Identical archive rows in both scopes, completed right now, with
+      // deliberately different delivery counts so a leak shows up as a number.
+      const archive = async (fx: typeof f.a, deliveries: number) =>
+        db().completedTripSheet.create({
+          data: {
+            tripSheetId: `archived-${fx.tenantId}`,
+            driverId: fx.driver.id,
+            driverName: fx.driver.name,
+            regNo: "REG-X",
+            sourceFilename: "report.csv",
+            uploadedAt: new Date(),
+            uploadedBy: fx.admin.id,
+            totalStops: deliveries,
+            signedStops: deliveries,
+            stops: [],
+            tenantId: fx.tenantId,
+          },
+        });
+
+      const rowA = await archive(f.a, 3);
+      const rowB = await archive(f.b, 40);
+
+      useSession(adminSession(f.a));
+      const body = await (
+        await GET(req("/api/dashboard/completions?range=month&tzOffset=0"))
+      ).json();
+
+      expect(body.totals.sheets).toBe(1);
+      expect(body.totals.deliveries).toBe(3);
+      expect(body.byDriver).toHaveLength(1);
+      expect(body.byDriver[0].driverId).toBe(f.a.driver.id);
+      // B's 40 must not appear in any bucket, including the day columns.
+      expect(body.byDay.reduce((s: number, d: { deliveries: number }) => s + d.deliveries, 0)).toBe(3);
+      expect(body.sheets.map((s: { id: string }) => s.id)).not.toContain(rowB.id);
+      // The driver dropdown is this scope's roster only.
+      expect(body.drivers.map((d: { id: string }) => d.id)).toEqual([f.a.driver.id]);
+
+      await db().completedTripSheet.deleteMany({
+        where: { id: { in: [rowA.id, rowB.id] } },
+      });
+    });
+
+    it("the report is closed to DRIVER sessions", async () => {
+      const { GET } = await import("@/app/api/dashboard/completions/route");
+      useSession(driverSession(f.a));
+
+      const res = await GET(req("/api/dashboard/completions"));
+      expect(res.status).toBe(403);
+    });
   });
 
   // ── Delivery confirmation email ──────────────────────────────────────

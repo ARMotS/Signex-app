@@ -10,8 +10,7 @@ import {
 import {
   saveTripSheet,
 } from "@/lib/trip-data";
-import { getCloudFolderInfo } from "@/lib/cloud-detect";
-import { getTripSheetFolderPath } from "@/lib/trip-sheet-folder";
+import { describeCloudProvider } from "@/lib/cloud-detect";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
@@ -23,16 +22,17 @@ export const GET = withAuth(async () => {
   const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
-  const folderInfo = await listTripSheetFiles(ctx.tenantId);
-  const folderPath = await getTripSheetFolderPath(ctx.tenantId);
-  const [cloudInfo, duplicates] = await Promise.all([
-    Promise.resolve(
-      folderPath
-        ? getCloudFolderInfo(folderPath)
-        : { provider: "local" as const, label: "Not configured", icon: "📁", synced: false }
-    ),
+  const [folderInfo, duplicates] = await Promise.all([
+    listTripSheetFiles(ctx.tenantId),
     findDuplicateTripSheetFiles(ctx.tenantId),
   ]);
+
+  // The label comes from whatever actually listed the files. It used to be
+  // re-derived from getTripSheetFolderPath(), which reads only the LOCAL
+  // config — so an ADMIN whose trip sheets live in OneDrive had an empty local
+  // path and got a heading reading "Not configured Folder" above a folder that
+  // was connected and listing files perfectly well.
+  const cloudInfo = describeCloudProvider(folderInfo.provider, folderInfo.accessible);
 
   return NextResponse.json({
     ...folderInfo,

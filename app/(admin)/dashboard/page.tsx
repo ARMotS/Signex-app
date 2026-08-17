@@ -104,7 +104,53 @@ interface DashboardData {
   recentSignatures: RecentSignature[];
 }
 
-type Tab = "overview" | "sheets" | "emails";
+interface CompletionsDay {
+  date: string;
+  sheets: number;
+  deliveries: number;
+  drivers: number;
+}
+
+interface CompletionsDriver {
+  driverId: string;
+  driverName: string;
+  sheets: number;
+  deliveries: number;
+  daysWorked: number;
+  lastCompletedAt: string | null;
+}
+
+interface CompletionsData {
+  range: ReportRange;
+  start: string;
+  end: string;
+  driverId: string | null;
+  totals: {
+    sheets: number;
+    deliveries: number;
+    drivers: number;
+    activeDays: number;
+    avgDeliveriesPerActiveDay: number;
+    busiestDay: { date: string; deliveries: number } | null;
+  };
+  byDay: CompletionsDay[];
+  byDriver: CompletionsDriver[];
+  drivers: { id: string; name: string; active: boolean }[];
+  sheets: {
+    id: string;
+    driverName: string;
+    regNo: string;
+    sourceFilename: string;
+    completedAt: string;
+    completedBy: string | null;
+    totalStops: number;
+    signedStops: number;
+  }[];
+}
+
+type ReportRange = "day" | "week" | "month";
+
+type Tab = "overview" | "sheets" | "completed" | "emails";
 
 const timeFmt: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit" };
 
@@ -142,6 +188,13 @@ export default function DashboardPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Completed-trips report. Deliberately not part of the polled dashboard
+  // payload — a month's aggregation has no business running every few seconds.
+  const [completions, setCompletions] = useState<CompletionsData | null>(null);
+  const [completionsRange, setCompletionsRange] = useState<ReportRange>("week");
+  const [completionsDriver, setCompletionsDriver] = useState<string>("");
+  const [completionsLoading, setCompletionsLoading] = useState(false);
+
   const loadDashboard = useCallback(async () => {
     try {
       // The day boundary follows the machine this is running on, not the
@@ -171,6 +224,32 @@ export default function DashboardPage() {
    * of whenever the page was last opened.
    */
   useLiveSync(loadDashboard);
+
+  const loadCompletions = useCallback(async () => {
+    setCompletionsLoading(true);
+    try {
+      const tzOffset = new Date().getTimezoneOffset();
+      const params = new URLSearchParams({
+        tzOffset: String(tzOffset),
+        range: completionsRange,
+      });
+      if (completionsDriver) params.set("driverId", completionsDriver);
+      const res = await fetch(`/api/dashboard/completions?${params}`);
+      if (res.ok) setCompletions(await res.json());
+    } catch {
+      // Keep the last good report on screen.
+    } finally {
+      setCompletionsLoading(false);
+    }
+  }, [completionsRange, completionsDriver]);
+
+  // Only while the tab is actually being looked at, and again whenever a filter
+  // moves. Nothing here is on the poll path.
+  useEffect(() => {
+    if (tab !== "completed") return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadCompletions();
+  }, [tab, loadCompletions]);
 
   const stats = data?.stats;
   const emails = data?.emails;
@@ -273,6 +352,7 @@ export default function DashboardPage() {
   const tabs: { id: Tab; label: string; badge?: number }[] = [
     { id: "overview", label: "Overview" },
     { id: "sheets", label: "Active Trip Sheets", badge: stats?.activeSheets },
+    { id: "completed", label: "Completed Trips" },
     { id: "emails", label: "Emails", badge: emails?.needsAttention },
   ];
 
@@ -735,6 +815,18 @@ export default function DashboardPage() {
             </div>
           )}
 
+          {/* ─── Completed trips tab ─────────────────────────────────────── */}
+          {tab === "completed" && (
+            <CompletedTripsReport
+              data={completions}
+              loading={completionsLoading}
+              range={completionsRange}
+              driverId={completionsDriver}
+              onRangeChange={setCompletionsRange}
+              onDriverChange={setCompletionsDriver}
+            />
+          )}
+
           {/* ─── Email queue tab ─────────────────────────────────────────── */}
           {tab === "emails" && (
             <div className="animate-fade-in space-y-4">
@@ -813,6 +905,335 @@ export default function DashboardPage() {
       )}
     </div>
   );
+}
+
+// ─── Completed trips report ───────────────────────────────────────────────
+
+const RANGE_LABELS: Record<ReportRange, string> = {
+  day: "Today",
+  week: "This week",
+  month: "This month",
+};
+
+function CompletedTripsReport({
+  data,
+  loading,
+  range,
+  driverId,
+  onRangeChange,
+  onDriverChange,
+}: {
+  data: CompletionsData | null;
+  loading: boolean;
+  range: ReportRange;
+  driverId: string;
+  onRangeChange: (r: ReportRange) => void;
+  onDriverChange: (id: string) => void;
+}) {
+  const byDay = data?.byDay ?? [];
+  const peak = byDay.reduce((m, d) => Math.max(m, d.deliveries), 0);
+  // The day worth naming on the chart. Labelling every column is chaos and goes
+  // unread; the rest of the values live in the tooltip and the tables below.
+  const busiest = data?.totals.busiestDay ?? null;
+
+  return (
+    <div className="animate-fade-in space-y-4">
+      {/* Filters — one row, above the charts */}
+      <div className="flex items-center justify-between gap-3 flex-wrap bg-ink-card border border-ink-border rounded px-4 py-3">
+        <div className="flex items-center gap-1">
+          {(Object.keys(RANGE_LABELS) as ReportRange[]).map((r) => (
+            <button
+              key={r}
+              onClick={() => onRangeChange(r)}
+              className={`px-3 py-1.5 text-xs font-mono rounded transition-colors ${
+                range === r
+                  ? "bg-ink-black text-white"
+                  : "text-ink-muted hover:text-ink-black hover:bg-ink-surface"
+              }`}
+            >
+              {RANGE_LABELS[r]}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label htmlFor="driver-filter" className="text-xs font-mono text-ink-muted">
+            Driver
+          </label>
+          <select
+            id="driver-filter"
+            value={driverId}
+            onChange={(e) => onDriverChange(e.target.value)}
+            className="px-3 py-1.5 text-xs font-mono bg-white border border-ink-border rounded focus:outline-none focus:border-ink-green transition-colors"
+          >
+            <option value="">All drivers</option>
+            {(data?.drivers ?? []).map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+                {d.active ? "" : " (inactive)"}
+              </option>
+            ))}
+          </select>
+          {loading && (
+            <div className="w-3.5 h-3.5 border-2 border-ink-border border-t-ink-green rounded-full animate-spin" />
+          )}
+        </div>
+      </div>
+
+      {!data ? (
+        <div className="bg-ink-card border border-ink-border rounded">
+          <EmptyRow title="Loading…" hint="Fetching completed trips" />
+        </div>
+      ) : (
+        <>
+          {/* Headline numbers — a KPI row, not a one-bar chart */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <MiniStat label="Deliveries" value={data.totals.deliveries} tone="text-ink-green" />
+            <MiniStat label="Sheets Closed" value={data.totals.sheets} tone="text-ink-black" />
+            <MiniStat label="Drivers" value={data.totals.drivers} tone="text-ink-black" />
+            <MiniStat
+              label="Avg / Active Day"
+              value={data.totals.avgDeliveriesPerActiveDay}
+              tone="text-ink-black"
+            />
+          </div>
+
+          {/* Per-day columns. Suppressed for a single day: one column is not a
+              chart, and the KPI row above already carries that number. */}
+          {byDay.length > 1 && (
+          <div className="bg-ink-card border border-ink-border rounded">
+            <div className="px-5 py-4 border-b border-ink-border flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <h2 className="font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
+                  Deliveries per day
+                </h2>
+                <p className="text-xs text-ink-muted mt-0.5">
+                  {formatDayLabel(data.start)} – {formatDayLabel(shiftBack(data.end))}
+                  {data.driverId
+                    ? ` · ${data.byDriver[0]?.driverName ?? "selected driver"}`
+                    : ""}
+                </p>
+              </div>
+              {busiest && (
+                <p className="text-xs font-mono text-ink-muted">
+                  Busiest {formatDayKey(busiest.date)} · {busiest.deliveries}
+                </p>
+              )}
+            </div>
+
+            {peak === 0 ? (
+              <EmptyRow
+                title="Nothing closed out in this period"
+                hint="A sheet appears here once every stop is signed and it is completed"
+              />
+            ) : (
+              <div className="px-5 pt-6 pb-4 overflow-x-auto">
+                <div className="flex items-end gap-[2px] min-w-fit h-40">
+                  {byDay.map((d) => {
+                    const heightPct = peak > 0 ? (d.deliveries / peak) * 100 : 0;
+                    const isBusiest = !!busiest && d.date === busiest.date;
+                    return (
+                      <div
+                        key={d.date}
+                        className="group relative flex-1 min-w-[14px] max-w-[24px] h-full flex flex-col justify-end items-center"
+                        title={`${formatDayKey(d.date)} — ${d.deliveries} deliver${
+                          d.deliveries === 1 ? "y" : "ies"
+                        }, ${d.sheets} sheet${d.sheets === 1 ? "" : "s"}, ${d.drivers} driver${
+                          d.drivers === 1 ? "" : "s"
+                        }`}
+                      >
+                        {isBusiest && (
+                          <span className="absolute -top-5 left-1/2 -translate-x-1/2 text-[10px] font-mono text-ink-black">
+                            {d.deliveries}
+                          </span>
+                        )}
+                        {d.deliveries > 0 ? (
+                          <div
+                            className="w-full bg-ink-green rounded-t-[4px] transition-all duration-500"
+                            style={{ height: `${Math.max(heightPct, 2)}%` }}
+                          />
+                        ) : (
+                          // A day nobody closed out is information. A zero-height
+                          // bar is invisible, so the day keeps a faint stub.
+                          <div className="w-full h-[2px] bg-ink-border" />
+                        )}
+                        {/* Hover readout, bigger than the mark it belongs to */}
+                        <div className="pointer-events-none absolute bottom-full mb-1 hidden group-hover:block z-10 whitespace-nowrap rounded bg-ink-black px-2 py-1 text-[10px] font-mono text-white shadow-lg">
+                          {formatDayKey(d.date)} · {d.deliveries} deliveries
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Axis. Thinned for a month so the labels never collide. */}
+                <div className="flex gap-[2px] min-w-fit mt-2 border-t border-ink-border pt-2">
+                  {byDay.map((d, i) => {
+                    const step = byDay.length > 14 ? 7 : byDay.length > 7 ? 2 : 1;
+                    return (
+                      <div
+                        key={d.date}
+                        className="flex-1 min-w-[14px] max-w-[24px] text-center text-[9px] font-mono text-ink-muted"
+                      >
+                        {i % step === 0 ? formatAxisKey(d.date, byDay.length) : ""}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+          )}
+
+          {/* Per driver — the table view, which is also what carries every value
+              the chart above deliberately leaves unlabelled. */}
+          <div className="bg-ink-card border border-ink-border rounded">
+            <div className="px-5 py-4 border-b border-ink-border">
+              <h2 className="font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
+                Per driver
+              </h2>
+            </div>
+            {data.byDriver.length === 0 ? (
+              <EmptyRow
+                title="No completed trips in this period"
+                hint="Try a wider range, or clear the driver filter"
+              />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50">
+                      <th className="text-left font-medium px-5 py-2">Driver</th>
+                      <th className="text-left font-medium px-3 py-2 w-1/3">Deliveries</th>
+                      <th className="text-right font-medium px-3 py-2">Sheets</th>
+                      <th className="text-right font-medium px-3 py-2">Days</th>
+                      <th className="text-right font-medium px-5 py-2">Last closed</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-ink-border">
+                    {data.byDriver.map((d) => {
+                      const top = data.byDriver[0].deliveries || 1;
+                      return (
+                        <tr key={d.driverId} className="hover:bg-ink-surface/40 transition-colors">
+                          <td className="px-5 py-3">
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-7 h-7 rounded bg-ink-surface flex items-center justify-center shrink-0">
+                                <span className="text-[10px] font-mono font-medium text-ink-muted">
+                                  {initials(d.driverName)}
+                                </span>
+                              </div>
+                              <span className="font-medium text-ink-black truncate">
+                                {d.driverName}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-3 py-3">
+                            <div className="flex items-center gap-2">
+                              {/* Every bar the same hue — length already encodes
+                                  magnitude, so shading it too would spend the
+                                  colour channel on nothing. */}
+                              <div className="flex-1 h-2 bg-ink-surface rounded-full overflow-hidden min-w-[60px]">
+                                <div
+                                  className="h-full bg-ink-green rounded-full transition-all duration-500"
+                                  style={{ width: `${Math.max((d.deliveries / top) * 100, 3)}%` }}
+                                />
+                              </div>
+                              <span className="font-mono text-ink-black tabular-nums w-8 text-right">
+                                {d.deliveries}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-3 py-3 text-right font-mono text-ink-muted tabular-nums">
+                            {d.sheets}
+                          </td>
+                          <td className="px-3 py-3 text-right font-mono text-ink-muted tabular-nums">
+                            {d.daysWorked}
+                          </td>
+                          <td className="px-5 py-3 text-right font-mono text-xs text-ink-muted whitespace-nowrap">
+                            {d.lastCompletedAt ? formatDateTime(d.lastCompletedAt) : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* The individual sheets behind the numbers */}
+          {data.sheets.length > 0 && (
+            <div className="bg-ink-card border border-ink-border rounded">
+              <div className="px-5 py-4 border-b border-ink-border flex items-center justify-between">
+                <h2 className="font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
+                  Closed-out sheets
+                </h2>
+                <span className="text-xs font-mono text-ink-muted">{data.sheets.length}</span>
+              </div>
+              <div className="divide-y divide-ink-border max-h-[420px] overflow-y-auto">
+                {data.sheets.map((s) => (
+                  <div key={s.id} className="flex items-center gap-3 px-5 py-3">
+                    <div className="w-8 h-8 rounded bg-ink-green-dim flex items-center justify-center shrink-0">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-ink-black truncate">
+                        {s.driverName}
+                        {s.regNo && (
+                          <span className="text-ink-muted font-mono text-xs ml-2">{s.regNo}</span>
+                        )}
+                      </p>
+                      <p className="text-xs text-ink-muted truncate">
+                        {s.sourceFilename}
+                        {s.completedBy ? ` · closed by ${s.completedBy}` : ""}
+                      </p>
+                    </div>
+                    <span className="text-xs font-mono text-ink-muted tabular-nums">
+                      {s.signedStops} stops
+                    </span>
+                    <span className="text-xs font-mono text-ink-muted whitespace-nowrap hidden sm:block">
+                      {formatDateTime(s.completedAt)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** `YYYY-MM-DD` is a local day key, so it is read back as a plain calendar date. */
+function formatDayKey(key: string) {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-ZA", {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    timeZone: "UTC",
+  });
+}
+
+function formatAxisKey(key: string, total: number) {
+  const [y, m, d] = key.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  return date.toLocaleDateString("en-ZA", {
+    ...(total > 7 ? { day: "2-digit", month: "short" } : { weekday: "short" }),
+    timeZone: "UTC",
+  });
+}
+
+function formatDayLabel(iso: string) {
+  return new Date(iso).toLocaleDateString("en-ZA", { day: "2-digit", month: "short" });
+}
+
+/** The window end is exclusive, so the label shows the last day inside it. */
+function shiftBack(iso: string) {
+  return new Date(new Date(iso).getTime() - 1).toISOString();
 }
 
 // ─── Small pieces ─────────────────────────────────────────────────────────

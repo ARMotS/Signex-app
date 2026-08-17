@@ -6,7 +6,13 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { dayWindow, parseTzOffset } from "@/lib/day-window";
+import {
+  dayWindow,
+  parseTzOffset,
+  reportWindow,
+  parseReportRange,
+  localDateKey,
+} from "@/lib/day-window";
 
 describe("parseTzOffset", () => {
   it("defaults to UTC when the parameter is missing or unusable", () => {
@@ -84,5 +90,107 @@ describe("dayWindow", () => {
   it("clamps an absurd offset rather than producing a nonsense window", () => {
     const { offsetMinutes } = dayWindow(new Date("2026-08-16T13:45:00.000Z"), 1e9);
     expect(offsetMinutes).toBe(14 * 60);
+  });
+});
+
+describe("parseReportRange", () => {
+  it("accepts the three ranges and rejects everything else", () => {
+    expect(parseReportRange("week")).toBe("week");
+    expect(parseReportRange("month")).toBe("month");
+    expect(parseReportRange("day")).toBe("day");
+    expect(parseReportRange(null)).toBe("day");
+    expect(parseReportRange("year")).toBe("day");
+    expect(parseReportRange("'; DROP TABLE")).toBe("day");
+  });
+});
+
+describe("localDateKey", () => {
+  it("buckets by the local day, not the UTC one", () => {
+    // 23:30 UTC on the 15th is 01:30 local on the 16th at UTC+2.
+    expect(localDateKey(new Date("2026-08-15T23:30:00.000Z"), -120)).toBe("2026-08-16");
+    expect(localDateKey(new Date("2026-08-15T23:30:00.000Z"), 0)).toBe("2026-08-15");
+  });
+
+  it("pads single-digit months and days", () => {
+    expect(localDateKey(new Date("2026-01-05T12:00:00.000Z"), 0)).toBe("2026-01-05");
+  });
+});
+
+describe("reportWindow", () => {
+  // 2026-08-16 is a Sunday; the Monday of its week is 2026-08-10.
+  const sunday = new Date("2026-08-16T09:00:00.000Z");
+
+  it("day covers exactly the local day", () => {
+    const w = reportWindow(sunday, -120, "day");
+    expect(w.dayKeys).toEqual(["2026-08-16"]);
+  });
+
+  it("week runs Monday to Sunday, not a rolling seven days", () => {
+    const w = reportWindow(sunday, -120, "week");
+    expect(w.dayKeys).toHaveLength(7);
+    expect(w.dayKeys[0]).toBe("2026-08-10"); // Monday
+    expect(w.dayKeys[6]).toBe("2026-08-16"); // Sunday — today, at the end
+  });
+
+  it("treats Sunday as the end of its week, not the start", () => {
+    // The classic off-by-one: getUTCDay() returns 0 for Sunday, which without
+    // the ||7 would start the week on the *next* Monday and put today outside
+    // its own window.
+    const w = reportWindow(sunday, -120, "week");
+    expect(w.dayKeys).toContain("2026-08-16");
+    expect(w.start.getTime()).toBeLessThan(sunday.getTime());
+  });
+
+  it("a Monday's week starts on that Monday", () => {
+    const monday = new Date("2026-08-10T09:00:00.000Z");
+    const w = reportWindow(monday, -120, "week");
+    expect(w.dayKeys[0]).toBe("2026-08-10");
+    expect(w.dayKeys).toHaveLength(7);
+  });
+
+  it("month covers the whole calendar month", () => {
+    const w = reportWindow(sunday, -120, "month");
+    expect(w.dayKeys).toHaveLength(31); // August
+    expect(w.dayKeys[0]).toBe("2026-08-01");
+    expect(w.dayKeys[30]).toBe("2026-08-31");
+  });
+
+  it("gets February right", () => {
+    const w = reportWindow(new Date("2026-02-10T09:00:00.000Z"), -120, "month");
+    expect(w.dayKeys).toHaveLength(28);
+    expect(w.dayKeys[27]).toBe("2026-02-28");
+  });
+
+  it("rolls the year over in December", () => {
+    const w = reportWindow(new Date("2026-12-20T09:00:00.000Z"), -120, "month");
+    expect(w.dayKeys[0]).toBe("2026-12-01");
+    expect(w.dayKeys[30]).toBe("2026-12-31");
+    expect(w.end.toISOString()).toBe("2026-12-31T22:00:00.000Z"); // 1 Jan local
+  });
+
+  it("day keys are contiguous with no gaps or repeats", () => {
+    const w = reportWindow(sunday, -120, "month");
+    expect(new Set(w.dayKeys).size).toBe(w.dayKeys.length);
+  });
+
+  it("every day key falls inside the window it describes", () => {
+    // Guards the boundary arithmetic: a key outside [start, end) would silently
+    // render a column that can never receive data.
+    for (const range of ["day", "week", "month"] as const) {
+      const w = reportWindow(sunday, -120, range);
+      for (const key of w.dayKeys) {
+        const [y, m, d] = key.split("-").map(Number);
+        // Midday local, safely inside whichever day the key names.
+        const noon = new Date(Date.UTC(y, m - 1, d, 12) + -120 * 60_000);
+        expect(noon >= w.start && noon < w.end).toBe(true);
+      }
+    }
+  });
+
+  it("works west of UTC", () => {
+    const w = reportWindow(new Date("2026-08-16T02:00:00.000Z"), 300, "week");
+    // 02:00 UTC on Sunday the 16th is 21:00 local on Saturday the 15th.
+    expect(w.dayKeys[6]).toBe("2026-08-16");
+    expect(w.dayKeys).toContain("2026-08-15");
   });
 });

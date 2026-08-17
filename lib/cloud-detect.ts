@@ -68,7 +68,33 @@ export function detectCloudProvider(folderPath: string): CloudProvider {
 }
 
 /**
- * Get display information about a cloud folder path.
+ * How a provider is named in the UI.
+ *
+ * Split out from getCloudFolderInfo because a OneDrive folder reached through
+ * the Graph API has no local path to inspect — `fs.existsSync` on it is
+ * meaningless, and deriving the label from a path the machine cannot see is
+ * what produced headings like "Not configured Folder" above a folder that was
+ * connected and listing files perfectly well.
+ */
+export function describeCloudProvider(
+  provider: CloudProvider,
+  synced: boolean
+): CloudFolderInfo {
+  switch (provider) {
+    case "onedrive":
+      return { provider, label: "OneDrive", icon: "☁️", synced };
+    case "gdrive":
+      return { provider, label: "Google Drive", icon: "📁", synced };
+    default:
+      return { provider: "local", label: "Local Folder", icon: "💻", synced };
+  }
+}
+
+/**
+ * Get display information about a LOCAL cloud-sync folder path.
+ *
+ * Only meaningful for a path on this machine. For a folder listed over the
+ * Graph API, describe the provider directly instead.
  */
 export function getCloudFolderInfo(folderPath: string): CloudFolderInfo {
   const provider = detectCloudProvider(folderPath);
@@ -80,29 +106,7 @@ export function getCloudFolderInfo(folderPath: string): CloudFolderInfo {
     // ignore access errors
   }
 
-  switch (provider) {
-    case "onedrive":
-      return {
-        provider,
-        label: "OneDrive",
-        icon: "☁️",
-        synced: exists,
-      };
-    case "gdrive":
-      return {
-        provider,
-        label: "Google Drive",
-        icon: "📁",
-        synced: exists,
-      };
-    default:
-      return {
-        provider: "local",
-        label: "Local Folder",
-        icon: "💻",
-        synced: exists,
-      };
-  }
+  return describeCloudProvider(provider, exists);
 }
 
 /**

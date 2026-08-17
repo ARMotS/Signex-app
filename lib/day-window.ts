@@ -62,3 +62,81 @@ export function dayWindow(now: Date = new Date(), offsetMinutes = 0): DayWindow 
 
   return { start, end, offsetMinutes: offset };
 }
+
+// ─── Reporting ranges ─────────────────────────────────────────────────────
+
+export type ReportRange = "day" | "week" | "month";
+
+export function parseReportRange(raw: string | null | undefined): ReportRange {
+  return raw === "week" || raw === "month" ? raw : "day";
+}
+
+export interface ReportWindow extends DayWindow {
+  range: ReportRange;
+  /** Every local day in the window, in order, as `YYYY-MM-DD` keys. */
+  dayKeys: string[];
+}
+
+/**
+ * The local day, calendar week or calendar month containing `now`.
+ *
+ * Calendar-based rather than rolling: a dispatcher comparing this week to last
+ * week means Monday-to-Sunday, and a rolling seven days would silently shift
+ * the comparison every time they looked. The week starts on Monday.
+ */
+export function reportWindow(
+  now: Date = new Date(),
+  offsetMinutes = 0,
+  range: ReportRange = "day"
+): ReportWindow {
+  const today = dayWindow(now, offsetMinutes);
+  const offsetMs = today.offsetMinutes * 60_000;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  let start = today.start;
+  let end = today.end;
+
+  if (range === "week") {
+    // getUTCDay on the shifted instant is the LOCAL weekday. Sunday is 0, and
+    // a Monday-based week wants it treated as day 7.
+    const localToday = new Date(today.start.getTime() - offsetMs);
+    const weekday = localToday.getUTCDay() || 7;
+    start = new Date(today.start.getTime() - (weekday - 1) * DAY_MS);
+    end = new Date(start.getTime() + 7 * DAY_MS);
+  } else if (range === "month") {
+    const localToday = new Date(today.start.getTime() - offsetMs);
+    const firstOfMonth = Date.UTC(
+      localToday.getUTCFullYear(),
+      localToday.getUTCMonth(),
+      1
+    );
+    const firstOfNext = Date.UTC(
+      localToday.getUTCFullYear(),
+      localToday.getUTCMonth() + 1,
+      1
+    );
+    start = new Date(firstOfMonth + offsetMs);
+    end = new Date(firstOfNext + offsetMs);
+  }
+
+  const dayKeys: string[] = [];
+  for (let t = start.getTime(); t < end.getTime(); t += DAY_MS) {
+    dayKeys.push(localDateKey(new Date(t), today.offsetMinutes));
+  }
+
+  return { start, end, offsetMinutes: today.offsetMinutes, range, dayKeys };
+}
+
+/**
+ * Which local day a timestamp falls on, as `YYYY-MM-DD`.
+ *
+ * Used to bucket rows into days in application code, because the database
+ * stores UTC and cannot know the viewer's offset.
+ */
+export function localDateKey(date: Date, offsetMinutes = 0): string {
+  const local = new Date(date.getTime() - offsetMinutes * 60_000);
+  const y = local.getUTCFullYear();
+  const m = String(local.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(local.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useLiveSync } from "@/hooks/useLiveSync";
 
 interface TripStop {
@@ -152,6 +152,9 @@ export default function TripSheetPage() {
   const [tripTab, setTripTab] = useState<"active" | "completed">("active");
   const [completedSheets, setCompletedSheets] = useState<CompletedTripSheet[]>([]);
   const [completedRange, setCompletedRange] = useState<"today" | "all">("today");
+  /** Local midnight, as the server computed it. Reading the clock during render
+   *  is impure, so "Today" is decided from this rather than from `new Date()`. */
+  const [completedDayStart, setCompletedDayStart] = useState<string | null>(null);
   const [completedLoading, setCompletedLoading] = useState(false);
   const [expandedCompleted, setExpandedCompleted] = useState<string | null>(null);
 
@@ -253,6 +256,7 @@ export default function TripSheetPage() {
       if (res.ok) {
         const data = await res.json();
         setCompletedSheets(data.completed || []);
+        setCompletedDayStart(data.dayStart ?? null);
       }
     } catch {
       // ignore — the tab keeps whatever it last showed
@@ -313,6 +317,63 @@ export default function TripSheetPage() {
   }, [fetchTripSheets, fetchCompletedSheets]);
 
   useLiveSync(refreshTripData);
+
+  /**
+   * Completed sheets grouped into the days they were closed out on.
+   *
+   * Grouped in the browser rather than the API because `new Date(iso)` here is
+   * already in the dispatcher's own timezone — the server would have to be told
+   * the offset to reach the same answer.
+   */
+  const completedByDay = useMemo(() => {
+    const groups = new Map<
+      string,
+      { key: string; label: string; sheets: CompletedTripSheet[]; deliveries: number }
+    >();
+
+    const dayKey = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+        d.getDate()
+      ).padStart(2, "0")}`;
+
+    // Derived from the window the API reported, not from the clock — reading
+    // the clock during render is impure and can relabel rows on a stray
+    // re-render.
+    const todayStart = completedDayStart ? new Date(completedDayStart) : null;
+    const today = todayStart ? dayKey(todayStart) : null;
+    const yesterday = todayStart
+      ? dayKey(new Date(todayStart.getTime() - 24 * 60 * 60 * 1000))
+      : null;
+
+    for (const sheet of completedSheets) {
+      const when = new Date(sheet.completedAt);
+      const key = dayKey(when);
+
+      const group = groups.get(key) ?? {
+        key,
+        label:
+          key === today
+            ? "Today"
+            : key === yesterday
+            ? "Yesterday"
+            : when.toLocaleDateString("en-ZA", {
+                weekday: "long",
+                day: "2-digit",
+                month: "short",
+                year: "numeric",
+              }),
+        sheets: [] as CompletedTripSheet[],
+        deliveries: 0,
+      };
+
+      group.sheets.push(sheet);
+      group.deliveries += sheet.signedStops;
+      groups.set(key, group);
+    }
+
+    // The API already returns newest first, so insertion order is date order.
+    return [...groups.values()];
+  }, [completedSheets, completedDayStart]);
 
   // ─── File Upload ──────────────────────────────────────────────────────
 
@@ -1976,8 +2037,22 @@ export default function TripSheetPage() {
                   </p>
                 </div>
               ) : (
-                <div className="space-y-3 p-4 stagger-children">
-                  {completedSheets.map((sheet) => {
+                <div className="p-4 space-y-6">
+                  {completedByDay.map((group) => (
+                    <div key={group.key}>
+                      {/* Day heading — the run sheet for that date, in one block */}
+                      <div className="flex items-baseline justify-between gap-3 mb-2.5 pb-1.5 border-b border-ink-border">
+                        <h3 className="font-mono text-[12px] font-medium text-ink-black uppercase tracking-wide">
+                          {group.label}
+                        </h3>
+                        <p className="text-[11px] font-mono text-ink-muted">
+                          {group.sheets.length} sheet{group.sheets.length !== 1 ? "s" : ""}
+                          {" · "}
+                          <span className="text-ink-green">{group.deliveries} deliveries</span>
+                        </p>
+                      </div>
+                      <div className="space-y-3 stagger-children">
+                  {group.sheets.map((sheet) => {
                     const isExpanded = expandedCompleted === sheet.id;
                     return (
                       <div
@@ -2084,6 +2159,9 @@ export default function TripSheetPage() {
                       </div>
                     );
                   })}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
