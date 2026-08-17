@@ -24,8 +24,6 @@ export default function SignInvoicePage() {
   const [stop, setStop] = useState<StopData | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [contactHasEmail, setContactHasEmail] = useState(false);
-  const [signedStopId, setSignedStopId] = useState<string | null>(null);
-  const [emailStatus, setEmailStatus] = useState<"idle" | "sending" | "sent" | "failed">("idle");
 
   // Fetch stop data to get invoice filename
   const fetchStopData = useCallback(async () => {
@@ -194,7 +192,6 @@ export default function SignInvoicePage() {
         }
 
         setContactHasEmail(!!data.contactHasEmail);
-        setSignedStopId(stop.id);
       } else {
         // No PDF linked — just update the stop status to SIGNED
         const res = await fetch("/api/trip-sheet/stops", {
@@ -215,7 +212,6 @@ export default function SignInvoicePage() {
         }
 
         setContactHasEmail(!!data.contactHasEmail);
-        setSignedStopId(stop.id);
       }
 
       setStatus("done");
@@ -257,35 +253,17 @@ export default function SignInvoicePage() {
     );
   }
 
-  /**
-   * Manual re-send. The confirmation already went out automatically when the
-   * signature saved — this is the "the customer says they didn't get it" button,
-   * not the normal path. If it fails here too, the dispatcher can send it from
-   * the dashboard; the driver is not blocked either way.
-   */
-  const handleSendEmail = async () => {
-    if (!signedStopId) return;
-    setEmailStatus("sending");
-    try {
-      const stored = localStorage.getItem("signex-driver");
-      const driverName = stored ? JSON.parse(stored).name : "Driver";
-      const res = await fetch(`/api/invoices/${signedStopId}/notify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ driverName }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setEmailStatus("sent");
-      } else {
-        setEmailStatus("failed");
-      }
-    } catch {
-      setEmailStatus("failed");
-    }
-  };
-
   // ─── Success state ────────────────────────────────────────────
+  //
+  // There is deliberately no "send the email" button here. The confirmation is
+  // sent automatically when the signature saves, so a button would only ever
+  // send a SECOND copy to the customer — a manual press means "send it now" and
+  // is allowed to re-send an already-sent stop. The screen also could not say
+  // whether it had worked: the send is deferred past this response, so there is
+  // no outcome to report at the moment the driver is looking.
+  //
+  // Anything that does not send becomes an item in the dispatcher's queue on the
+  // dashboard. That is the fallback, not the driver at the customer's door.
   if (status === "done") {
     return (
       <div className="flex-1 flex flex-col items-center justify-center px-6 animate-scale-in">
@@ -300,35 +278,17 @@ export default function SignInvoicePage() {
         </p>
 
         {contactHasEmail ? (
-          <>
-            <div className="flex items-center gap-2 px-4 py-2.5 rounded bg-ink-green-dim border border-ink-green/20 mb-3">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
-                <polyline points="22,6 12,13 2,6" />
-              </svg>
-              <p className="text-xs font-mono text-ink-green">
-                {emailStatus === "sent"
-                  ? "Confirmation re-sent to the customer"
-                  : "Confirmation email sent to the customer"}
-              </p>
-            </div>
-            <button
-              onClick={handleSendEmail}
-              disabled={emailStatus === "sending"}
-              className={`px-4 py-2 text-xs font-mono rounded transition-all ${
-                emailStatus === "failed"
-                  ? "bg-red-50 text-ink-red border border-ink-red/20 hover:bg-red-100"
-                  : emailStatus === "sending"
-                  ? "bg-ink-surface text-ink-muted cursor-wait"
-                  : "border border-ink-border text-ink-muted hover:text-ink-black hover:bg-ink-surface"
-              }`}
-            >
-              {emailStatus === "idle" && "Send it again"}
-              {emailStatus === "sending" && "Sending…"}
-              {emailStatus === "sent" && "Send it again"}
-              {emailStatus === "failed" && "Failed — tap to retry"}
-            </button>
-          </>
+          <div className="flex items-center gap-2 px-4 py-2.5 rounded bg-ink-green-dim border border-ink-green/20">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+              <polyline points="22,6 12,13 2,6" />
+            </svg>
+            {/* "On its way", not "sent" — the send happens after this response,
+                so claiming it has landed would be a guess. */}
+            <p className="text-xs font-mono text-ink-green">
+              Confirmation email on its way to the customer
+            </p>
+          </div>
         ) : (
           <div className="text-center">
             <p className="text-xs text-ink-muted font-mono">No email on file for this customer</p>
