@@ -768,30 +768,45 @@ export default function TripSheetPage() {
             Manage trip sheets and deploy stops to drivers
           </p>
         </div>
-        <button
-          onClick={() => setShowUpload(!showUpload)}
-          className={`flex items-center gap-2 px-4 py-2.5 font-mono text-sm font-medium rounded transition-all shrink-0 ${
-            showUpload
-              ? "bg-ink-black text-white hover:bg-ink-black/90"
-              : "bg-ink-green text-white hover:bg-ink-green-hover active:scale-[0.98]"
-          }`}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            {showUpload ? (
-              <>
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </>
-            ) : (
-              <>
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="17 8 12 3 7 8" />
-                <line x1="12" y1="3" x2="12" y2="15" />
-              </>
-            )}
-          </svg>
-          {showUpload ? "Close" : "Upload Trip Sheet"}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <a
+            href="/api/trip-sheet/template"
+            download
+            className="flex items-center gap-2 px-4 py-2.5 font-mono text-sm font-medium rounded border border-ink-border text-ink-black bg-ink-card hover:bg-ink-surface hover:border-ink-muted-light transition-all"
+            title="Download a blank .xlsx with the right columns and your driver names"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Template
+          </a>
+          <button
+            onClick={() => setShowUpload(!showUpload)}
+            className={`flex items-center gap-2 px-4 py-2.5 font-mono text-sm font-medium rounded transition-all ${
+              showUpload
+                ? "bg-ink-black text-white hover:bg-ink-black/90"
+                : "bg-ink-green text-white hover:bg-ink-green-hover active:scale-[0.98]"
+            }`}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {showUpload ? (
+                <>
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </>
+              ) : (
+                <>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </>
+              )}
+            </svg>
+            {showUpload ? "Close" : "Upload Trip Sheet"}
+          </button>
+        </div>
       </div>
 
       {/* ─── Stats Bar ──────────────────────────────────────────────────── */}
@@ -1184,6 +1199,18 @@ export default function TripSheetPage() {
                 </span>
               ))}
             </div>
+            <p className="text-xs text-ink-muted mt-4">
+              Not sure of the columns?{" "}
+              {/* Inside a click-to-browse zone — the anchor must not also open the file picker. */}
+              <a
+                href="/api/trip-sheet/template"
+                download
+                onClick={(e) => e.stopPropagation()}
+                className="text-ink-green font-medium underline underline-offset-2 hover:text-ink-green-hover"
+              >
+                Download the .xlsx template
+              </a>
+            </p>
           </>
         )}
       </div>
