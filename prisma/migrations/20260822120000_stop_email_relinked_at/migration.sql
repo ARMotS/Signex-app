@@ -1,0 +1,23 @@
+-- Rescue deliveries whose customer was added to Contacts only after signing.
+--
+-- Stop.contactId was written exactly once, when a trip sheet was deployed. A
+-- stop whose customer did not exist as a Contact at that moment kept contactId
+-- NULL forever: adding the contact afterwards never back-filled the link. The
+-- delivery was therefore stuck at emailStatus NO_EMAIL with no way out, because
+-- the send path resolves the recipient through Stop.contact — so even pressing
+-- Send by hand re-marked it NO_EMAIL rather than delivering it.
+--
+-- Contacts are now re-matched to unlinked stops whenever one is added or
+-- imported. That fixes the link, but leaves a second problem: the dispatcher's
+-- queue bounds untried confirmations to the last few days, so a delivery whose
+-- contact arrives a week late would be repaired and still never seen.
+--
+-- emailRelinkedAt records the moment a signed, unsendable stop gained a usable
+-- contact. It is the flag that lets the dashboard show such a stop regardless of
+-- how long ago the delivery was signed, without also re-opening the queue to the
+-- entire history of never-attempted stops that the age bound exists to keep out.
+--
+-- Nullable with no default and no backfill: NULL means "never rescued", which is
+-- the correct reading for every row that already exists.
+
+ALTER TABLE "Stop" ADD COLUMN "emailRelinkedAt" TIMESTAMP(3);

@@ -19,10 +19,19 @@ interface ContactData {
   notes?: string | null;
 }
 
+/**
+ * What POST /api/contacts answers with: the contact, plus what saving it
+ * repaired. Adding a customer can rescue deliveries that were signed before the
+ * contact existed and so had nowhere to send their confirmation.
+ */
+interface SavedContact extends ContactData {
+  relinked?: { linked: number; nowSendable: number; sendableStopIds: string[] };
+}
+
 interface AddContactPanelProps {
   open: boolean;
   onClose: () => void;
-  onSaved: (contact: ContactData) => void;
+  onSaved: (contact: SavedContact) => void;
   contact?: ContactData | null;
 }
 

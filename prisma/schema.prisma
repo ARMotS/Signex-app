@@ -192,6 +192,12 @@ model Stop {
   /// Why the last attempt failed, shown verbatim to the dispatcher. A bad
   /// address and a dead SMTP relay need different fixes.
   emailError    String?    @db.Text
+  /// When a contact was attached to this stop AFTER it was already signed and
+  /// found to have nowhere to send — i.e. the admin finally added the missing
+  /// customer. Such a stop is actionable again however old the delivery is, so
+  /// the dashboard exempts it from the untried-queue age bound. Null means the
+  /// stop has never been rescued this way.
+  emailRelinkedAt DateTime?
   signatureData String?    @db.Text
   tripSheetId   String
   contactId     String?

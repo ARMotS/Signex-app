@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { relinkUnmatchedStops, type RelinkSummary } from "@/lib/contact-matcher";
 
 // ─── GET ──────────────────────────────────────────────────────────────────────
 
@@ -95,5 +96,15 @@ export const POST = withAuth(async (request: NextRequest) => {
     },
   });
 
-  return NextResponse.json(contact, { status: 201 });
+  // A delivery may already be signed and waiting on exactly this contact.
+  // Best-effort: the contact is saved either way, and a re-link problem must
+  // never turn a successful add into an error the admin has to decipher.
+  let relinked: RelinkSummary = { linked: 0, nowSendable: 0, sendableStopIds: [] };
+  try {
+    relinked = await relinkUnmatchedStops(ctx.tenantId);
+  } catch (err) {
+    console.error("[contacts] Could not re-link stops after adding a contact:", err);
+  }
+
+  return NextResponse.json({ ...contact, relinked }, { status: 201 });
 });

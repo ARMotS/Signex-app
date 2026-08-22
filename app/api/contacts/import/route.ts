@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { parseContactSheet } from "@/lib/contact-parser";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { relinkUnmatchedStops, type RelinkSummary } from "@/lib/contact-matcher";
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
@@ -77,5 +78,15 @@ export const POST = withAuth(async (request: NextRequest) => {
     saved++;
   }
 
-  return NextResponse.json({ saved, skipped, updated });
+  // Run once for the whole file, not per contact: an import is exactly the case
+  // where a batch of signed deliveries is waiting on customers that did not
+  // exist yet. Best-effort — the contacts are saved regardless.
+  let relinked: RelinkSummary = { linked: 0, nowSendable: 0, sendableStopIds: [] };
+  try {
+    relinked = await relinkUnmatchedStops(ctx.tenantId);
+  } catch (err) {
+    console.error("[contacts/import] Could not re-link stops after import:", err);
+  }
+
+  return NextResponse.json({ saved, skipped, updated, relinked });
 });

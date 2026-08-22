@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { AddContactPanel } from "./AddContactPanel";
+import { RelinkPrompt } from "./RelinkPrompt";
 
 interface Contact {
   id: string;
@@ -37,6 +38,8 @@ export function ContactsTable() {
   const [loading, setLoading] = useState(true);
   const [panelOpen, setPanelOpen] = useState(false);
   const [editing, setEditing] = useState<Contact | null>(null);
+  /** Signed deliveries the contact just saved rescued — see RelinkPrompt. */
+  const [relinked, setRelinked] = useState<string[]>([]);
   const LIMIT = 50;
 
   const load = useCallback(async () => {
@@ -80,6 +83,14 @@ export function ContactsTable() {
 
   return (
     <>
+      {/* Lives out here rather than inside the panel: the panel closes on save,
+          which would take the prompt with it. */}
+      {relinked.length > 0 && (
+        <div className="mb-4">
+          <RelinkPrompt stopIds={relinked} onSent={() => setRelinked([])} />
+        </div>
+      )}
+
       <div className="bg-white rounded-xl border border-zinc-200 overflow-hidden">
         {/* Toolbar */}
         <div className="px-5 py-4 border-b border-zinc-100 flex flex-col sm:flex-row gap-3 items-start sm:items-center">
@@ -239,7 +250,11 @@ export function ContactsTable() {
         open={panelOpen}
         onClose={() => setPanelOpen(false)}
         contact={editing}
-        onSaved={() => { setPanelOpen(false); load(); }}
+        onSaved={(saved) => {
+          setPanelOpen(false);
+          setRelinked(saved?.relinked?.sendableStopIds ?? []);
+          load();
+        }}
       />
     </>
   );

@@ -7,6 +7,7 @@
 
 import { useCallback, useState } from "react";
 import { useDropzone } from "react-dropzone";
+import { RelinkPrompt } from "./RelinkPrompt";
 
 interface ParsedContact {
   companyName: string;
@@ -34,6 +35,8 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
   const [currentFile, setCurrentFile] = useState<File | null>(null);
   const [overwrite, setOverwrite] = useState(false);
   const [result, setResult] = useState<{ saved: number; skipped: number; updated: number } | null>(null);
+  /** Signed deliveries this import rescued — see RelinkPrompt. */
+  const [relinked, setRelinked] = useState<string[]>([]);
 
   const isPDF = currentFile
     ? currentFile.type === "application/pdf" || currentFile.name.toLowerCase().endsWith(".pdf")
@@ -80,6 +83,7 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Import failed");
       setResult({ saved: data.saved, skipped: data.skipped, updated: data.updated || 0 });
+      setRelinked(data.relinked?.sendableStopIds ?? []);
       setState("done");
       onImported?.();
     } catch (err) {
@@ -94,6 +98,7 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
     setCurrentFile(null);
     setOverwrite(false);
     setResult(null);
+    setRelinked([]);
     setErrorMsg("");
   }
 
@@ -261,6 +266,8 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
                 )}
               </div>
             </div>
+            <RelinkPrompt stopIds={relinked} onSent={onImported} />
+
             <button onClick={reset} className="w-full py-2 text-sm border border-zinc-200 rounded-lg text-zinc-600 hover:bg-zinc-50 transition-colors font-medium">
               Import another file
             </button>
