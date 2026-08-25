@@ -115,7 +115,8 @@ const COLUMN_PATTERNS: Record<string, RegExp[]> = {
   ],
 };
 
-function detectColumn(header: string): string | null {
+/** Exported for tests: the template headers must land on the right fields. */
+export function detectColumn(header: string): string | null {
   const trimmed = header.trim();
   if (!trimmed) return null;
 

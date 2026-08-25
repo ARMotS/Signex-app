@@ -1844,4 +1844,181 @@ suite("cross-ADMIN isolation", () => {
       expect(row?.emailSentAt).not.toBeNull();
     });
   });
+
+  // ── Contacts added after a delivery was already signed ────────────────
+  /**
+   * Stop.contactId used to be written only when a trip sheet was deployed, so a
+   * customer who was not yet in Contacts left the delivery unreachable: marked
+   * "no address on file", and un-rescuable, because the send path resolves the
+   * recipient through Stop.contact and therefore just re-marked it. Adding the
+   * contact now repairs the link.
+   */
+  describe("rescuing a delivery whose contact arrived late", () => {
+    /** A signed delivery for a company that does not exist in Contacts yet. */
+    async function orphanSignedStop(
+      fx: Fixtures["a"],
+      customerName: string,
+      signedAt: Date
+    ) {
+      return db().stop.create({
+        data: {
+          stopNumber: 90,
+          invoiceNumber: `INV-ORPHAN-${fx.tenantId.slice(0, 6)}`,
+          customerName,
+          address: "Somewhere",
+          tripSheetId: fx.tripSheet.id,
+          tenantId: fx.tenantId,
+          status: "SIGNED",
+          signedAt,
+          contactId: null,
+          emailStatus: "NO_EMAIL",
+        },
+        select: { id: true },
+      });
+    }
+
+    beforeEach(() => {
+      sentEmails.length = 0;
+    });
+
+    it("links the stop and re-arms it once the customer is added", async () => {
+      const { POST } = await import("@/app/api/contacts/route");
+      const stop = await orphanSignedStop(f.a, "Late Arrival Ltd", new Date());
+
+      useSession(adminSession(f.a));
+      const res = await POST(
+        req("/api/contacts", {
+          method: "POST",
+          body: { companyName: "Late Arrival Ltd", email: "late@example.test" },
+        })
+      );
+      expect(res.status).toBe(201);
+
+      const body = await res.json();
+      expect(body.relinked.nowSendable).toBe(1);
+      expect(body.relinked.sendableStopIds).toContain(stop.id);
+
+      const row = await db().stop.findUnique({ where: { id: stop.id } });
+      expect(row?.contactId).toBe(body.id);
+      // NO_EMAIL was a statement about the world, and the world changed.
+      expect(row?.emailStatus).toBe("NOT_SENT");
+      expect(row?.emailRelinkedAt).not.toBeNull();
+
+      await db().stop.delete({ where: { id: stop.id } });
+    });
+
+    it("the rescued delivery can then actually be sent — the old dead end", async () => {
+      const { POST: createContact } = await import("@/app/api/contacts/route");
+      const { POST: notify } = await import("@/app/api/invoices/[id]/notify/route");
+      const stop = await orphanSignedStop(f.a, "Second Chance Co", new Date());
+
+      useSession(adminSession(f.a));
+      await createContact(
+        req("/api/contacts", {
+          method: "POST",
+          body: { companyName: "Second Chance Co", email: "second@example.test" },
+        })
+      );
+
+      // Before the fix this returned {skipped: true, reason: 'No email on file'}
+      // however many times it was pressed.
+      const res = await notify(
+        req(`/api/invoices/${stop.id}/notify`, { method: "POST", body: {} }),
+        params({ id: stop.id })
+      );
+      const body = await res.json();
+
+      expect(body.success).toBe(true);
+      expect(sentEmails).toHaveLength(1);
+      expect(sentEmails[0].to).toBe("second@example.test");
+
+      await db().stop.delete({ where: { id: stop.id } });
+    });
+
+    it("never reaches across scopes to link another ADMIN's stop", async () => {
+      const { POST } = await import("@/app/api/contacts/route");
+      // Both scopes have a signed delivery for an identically named company —
+      // the normal case, since these are real trading names.
+      const stopA = await orphanSignedStop(f.a, "Shared Name Ltd", new Date());
+      const stopB = await orphanSignedStop(f.b, "Shared Name Ltd", new Date());
+
+      useSession(adminSession(f.a));
+      const body = await (
+        await POST(
+          req("/api/contacts", {
+            method: "POST",
+            body: { companyName: "Shared Name Ltd", email: "shared-a@example.test" },
+          })
+        )
+      ).json();
+
+      expect(body.relinked.sendableStopIds).toEqual([stopA.id]);
+
+      // B's identically-named delivery is untouched: still unlinked, still
+      // NO_EMAIL, and pointed at nothing in A's scope.
+      const rowB = await db().stop.findUnique({ where: { id: stopB.id } });
+      expect(rowB?.contactId).toBeNull();
+      expect(rowB?.emailStatus).toBe("NO_EMAIL");
+      expect(rowB?.emailRelinkedAt).toBeNull();
+
+      await db().stop.deleteMany({ where: { id: { in: [stopA.id, stopB.id] } } });
+    });
+
+    it("surfaces a rescued delivery in the queue however old it is", async () => {
+      const { GET } = await import("@/app/api/dashboard/route");
+      const { POST } = await import("@/app/api/contacts/route");
+
+      // Signed well beyond the untried-queue age bound. Without the exemption
+      // the repair would be invisible and the customer never confirmed.
+      const longAgo = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+      const stop = await orphanSignedStop(f.a, "Ancient Delivery Co", longAgo);
+
+      useSession(adminSession(f.a));
+      await POST(
+        req("/api/contacts", {
+          method: "POST",
+          body: { companyName: "Ancient Delivery Co", email: "ancient@example.test" },
+        })
+      );
+
+      const body = await (await GET(req("/api/dashboard?tzOffset=0"))).json();
+      const queued = body.emails.queue.find(
+        (q: { stopId: string }) => q.stopId === stop.id
+      );
+
+      expect(queued).toBeDefined();
+      expect(queued.sendable).toBe(true);
+      expect(queued.relinked).toBe(true);
+      expect(queued.recipient).toBe("ancient@example.test");
+
+      await db().stop.delete({ where: { id: stop.id } });
+    });
+
+    it("leaves a stop alone when the new contact has no address either", async () => {
+      const { POST } = await import("@/app/api/contacts/route");
+      const stop = await orphanSignedStop(f.a, "No Address Ltd", new Date());
+
+      useSession(adminSession(f.a));
+      const body = await (
+        await POST(
+          req("/api/contacts", {
+            method: "POST",
+            // Added, but nobody filled in an email — the delivery is still stuck.
+            body: { companyName: "No Address Ltd", phone: "+27 11 555 0000" },
+          })
+        )
+      ).json();
+
+      expect(body.relinked.nowSendable).toBe(0);
+
+      const row = await db().stop.findUnique({ where: { id: stop.id } });
+      // Linked, so editing the contact later is enough to finish the job...
+      expect(row?.contactId).toBe(body.id);
+      // ...but still correctly reported as having nowhere to send.
+      expect(row?.emailStatus).toBe("NO_EMAIL");
+      expect(row?.emailRelinkedAt).toBeNull();
+
+      await db().stop.delete({ where: { id: stop.id } });
+    });
+  });
 });

@@ -55,6 +55,15 @@ export const GET = withAuth(async (request: NextRequest) => {
         emailStatus: { in: ["NOT_SENT", "NO_EMAIL"] },
         signedAt: { gte: untriedSince },
       },
+      // Rescued: the admin finally added the customer this delivery was waiting
+      // on. Exempt from the age bound on purpose — the delivery only became
+      // sendable just now, and the whole point of repairing the link is that
+      // someone gets to act on it. Bounding by signedAt would silently discard
+      // exactly the backlog the repair exists to recover.
+      {
+        emailStatus: { in: ["NOT_SENT", "NO_EMAIL"] },
+        emailRelinkedAt: { not: null },
+      },
     ],
   };
 
@@ -108,6 +117,7 @@ export const GET = withAuth(async (request: NextRequest) => {
         emailStatus: true,
         emailError: true,
         emailAttempts: true,
+        emailRelinkedAt: true,
         contact: { select: { id: true, email: true, companyName: true } },
         tripSheet: { select: { driverId: true } },
       },
@@ -215,6 +225,8 @@ export const GET = withAuth(async (request: NextRequest) => {
     emailStatus: s.emailStatus,
     emailError: s.emailError,
     emailAttempts: s.emailAttempts,
+    /** Set when this delivery was rescued by a contact added after signing. */
+    relinked: s.emailRelinkedAt !== null,
     contactId: s.contact?.id ?? null,
     recipient: s.contact?.email ?? null,
     /** False means "fix the contact first" — there is nowhere to send it. */

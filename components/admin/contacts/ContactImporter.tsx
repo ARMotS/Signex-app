@@ -7,6 +7,7 @@
 
 import { useCallback, useState } from "react";
 import { useDropzone } from "react-dropzone";
+import { RelinkPrompt } from "./RelinkPrompt";
 
 interface ParsedContact {
   companyName: string;
@@ -34,6 +35,8 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
   const [currentFile, setCurrentFile] = useState<File | null>(null);
   const [overwrite, setOverwrite] = useState(false);
   const [result, setResult] = useState<{ saved: number; skipped: number; updated: number } | null>(null);
+  /** Signed deliveries this import rescued — see RelinkPrompt. */
+  const [relinked, setRelinked] = useState<string[]>([]);
 
   const isPDF = currentFile
     ? currentFile.type === "application/pdf" || currentFile.name.toLowerCase().endsWith(".pdf")
@@ -80,6 +83,7 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Import failed");
       setResult({ saved: data.saved, skipped: data.skipped, updated: data.updated || 0 });
+      setRelinked(data.relinked?.sendableStopIds ?? []);
       setState("done");
       onImported?.();
     } catch (err) {
@@ -94,14 +98,32 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
     setCurrentFile(null);
     setOverwrite(false);
     setResult(null);
+    setRelinked([]);
     setErrorMsg("");
   }
 
   return (
     <div className="bg-white rounded-xl border border-zinc-200 overflow-hidden">
-      <div className="px-5 py-4 border-b border-zinc-100">
-        <h2 className="text-sm font-semibold font-mono text-zinc-900">Import contacts</h2>
-        <p className="text-xs text-zinc-500 mt-0.5">Upload a spreadsheet (.csv, .xlsx) or PDF — PDFs are parsed by AI.</p>
+      <div className="px-5 py-4 border-b border-zinc-100 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-semibold font-mono text-zinc-900">Import contacts</h2>
+          <p className="text-xs text-zinc-500 mt-0.5">Upload a spreadsheet (.csv, .xlsx) or PDF — PDFs are parsed by AI.</p>
+        </div>
+        {/* A plain anchor, not <Link>: this is an API route serving a file, and
+            client-side routing would navigate instead of downloading. */}
+        <a
+          href="/api/contacts/template"
+          download
+          className="flex items-center gap-1.5 shrink-0 px-3 py-1.5 text-xs font-medium font-mono rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-50 hover:border-zinc-300 transition-colors"
+          title="Download a blank .xlsx with the columns the importer expects"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          Template
+        </a>
       </div>
       <div className="p-5">
 
@@ -128,6 +150,18 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
                     {isDragActive ? "Drop to upload" : "Drag & drop or click to upload"}
                   </p>
                   <p className="text-xs text-zinc-400 mt-1">CSV, XLSX, XLS, PDF · max 10 MB</p>
+                  <p className="text-xs text-zinc-400 mt-3">
+                    Not sure of the columns?{" "}
+                    {/* Inside a click-to-browse zone — the anchor must not also open the file picker. */}
+                    <a
+                      href="/api/contacts/template"
+                      download
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-zinc-700 font-medium underline underline-offset-2 hover:text-zinc-900"
+                    >
+                      Download the .xlsx template
+                    </a>
+                  </p>
                 </div>
               </div>
             </div>
@@ -232,6 +266,8 @@ export function ContactImporter({ onImported }: { onImported?: () => void } = {}
                 )}
               </div>
             </div>
+            <RelinkPrompt stopIds={relinked} onSent={onImported} />
+
             <button onClick={reset} className="w-full py-2 text-sm border border-zinc-200 rounded-lg text-zinc-600 hover:bg-zinc-50 transition-colors font-medium">
               Import another file
             </button>
