@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useLiveSync } from "@/hooks/useLiveSync";
+import { FilterSearch } from "@/components/admin/FilterSearch";
+import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 
 interface TripStop {
   id: string;
@@ -47,6 +49,14 @@ interface AlreadySignedInvoice {
   source: "database" | "filesystem";
 }
 
+/** A row on the sheet whose PDF is not in the invoice folder. */
+interface MissingInvoice {
+  invoiceNumber: string;
+  customerName: string;
+  driverName: string;
+  stopId: string;
+}
+
 interface PreviewData {
   success: boolean;
   filename?: string;
@@ -56,6 +66,7 @@ interface PreviewData {
     unmatchedInvoices: number;
     driverResults: MatchResult[];
     alreadySigned: AlreadySignedInvoice[];
+    missingInvoices: MissingInvoice[];
   };
 }
 
@@ -173,6 +184,13 @@ export default function TripSheetPage() {
   const [cloudPage, setCloudPage] = useState(1);
   const [tripPage, setTripPage] = useState(1);
 
+  // Search state. Two boxes rather than one: the folder listing and the
+  // deployed sheets are separate piles of paper, and someone hunting an
+  // invoice number in a live run is not also filtering the files still
+  // waiting to be imported.
+  const [cloudQuery, setCloudQuery] = useState("");
+  const [tripQuery, setTripQuery] = useState("");
+
   // Selection state — cloud folder files
   const [selectedCloudFiles, setSelectedCloudFiles] = useState<Set<string>>(new Set());
   const [deletingCloudFiles, setDeletingCloudFiles] = useState(false);
@@ -185,6 +203,23 @@ export default function TripSheetPage() {
 
   // Already-signed invoice skip state
   const [skippedInvoices, setSkippedInvoices] = useState<Set<string>>(new Set());
+
+  // Missing-invoice resolution: upload the PDF, skip the stop, or deploy the
+  // stop without paperwork. The deploy is gated until each one has an answer —
+  // the server re-checks the same rule, so this is a prompt, not the guarantee.
+  const missingFileInputRef = useRef<HTMLInputElement>(null);
+  const bulkInvoiceInputRef = useRef<HTMLInputElement>(null);
+  /** Which missing invoice the hidden file picker was opened for */
+  const [uploadTargetInvoice, setUploadTargetInvoice] = useState<string | null>(null);
+  const [invoiceUploads, setInvoiceUploads] = useState<
+    Record<string, { state: "uploading" | "done" | "failed"; message?: string }>
+  >({});
+  /** A file that clashed with an existing one, held so "Replace" can resend it */
+  const [invoiceConflict, setInvoiceConflict] = useState<
+    { key: string; file: File; invoiceNumber?: string } | null
+  >(null);
+  const [recheckingInvoices, setRecheckingInvoices] = useState(false);
+  const [invoiceDestination, setInvoiceDestination] = useState<string | null>(null);
 
   // Complete/archive state
   const [completingTrips, setCompletingTrips] = useState(false);
@@ -282,6 +317,13 @@ export default function TripSheetPage() {
       .then((data) => setDrivers((data.drivers || []).filter((d: DriverAccount) => d.active)))
       .catch(() => {});
 
+    // Where an uploaded invoice would land — shown before anyone uploads, so
+    // it is obvious whether the PDF is going to OneDrive or the synced folder.
+    fetch("/api/invoices/upload")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => setInvoiceDestination(data?.destination ?? null))
+      .catch(() => {});
+
     // Auto-poll the cloud folder every 30 seconds.
     //
     // Skipped while the tab is hidden: this call lists a remote OneDrive folder
@@ -318,6 +360,64 @@ export default function TripSheetPage() {
 
   useLiveSync(refreshTripData);
 
+  // ─── Search narrowing ──────────────────────────────────────────────────
+  //
+  // Every list on this page arrives whole — the folder in one response, the
+  // sheets in another — so narrowing happens here rather than over the
+  // network. The matching rules live in lib/search-match.ts.
+
+  const cloudTokens = useMemo(() => tokenizeQuery(cloudQuery), [cloudQuery]);
+  const tripTokens = useMemo(() => tokenizeQuery(tripQuery), [tripQuery]);
+
+  const visibleCloudFiles = useMemo(() => {
+    const files = cloudFolder?.files ?? [];
+    if (cloudTokens.length === 0) return files;
+    return files.filter((f) => matchesTokens(cloudTokens, [f.filename]));
+  }, [cloudFolder, cloudTokens]);
+
+  /**
+   * A sheet matches on its own details or on any stop it carries, so typing an
+   * invoice number answers "which driver has this one?" — the question being
+   * asked when the phone rings, and the reason searching only the header would
+   * be useless here.
+   */
+  const visibleTripSheets = useMemo(() => {
+    if (tripTokens.length === 0) return tripSheets;
+    return tripSheets.filter(
+      (t) =>
+        matchesTokens(tripTokens, [t.driverName, t.regNo, t.sourceFilename]) ||
+        t.stops.some((s) =>
+          matchesTokens(tripTokens, [s.invoiceNumber, s.customerName, s.address])
+        )
+    );
+  }, [tripSheets, tripTokens]);
+
+  const visibleCompletedSheets = useMemo(() => {
+    if (tripTokens.length === 0) return completedSheets;
+    return completedSheets.filter(
+      (c) =>
+        matchesTokens(tripTokens, [c.driverName, c.regNo, c.sourceFilename, c.archivedFile]) ||
+        c.stops.some((s) =>
+          matchesTokens(tripTokens, [s.invoiceNumber, s.customerName, s.address])
+        )
+    );
+  }, [completedSheets, tripTokens]);
+
+  /** Marks the stop that put its sheet in the list, inside an expanded sheet. */
+  const stopMatchesQuery = (stop: {
+    invoiceNumber: string;
+    customerName: string;
+    address?: string;
+  }) =>
+    tripTokens.length > 0 &&
+    matchesTokens(tripTokens, [stop.invoiceNumber, stop.customerName, stop.address]);
+
+  // Which pile the shared search box is counting against, so its readout
+  // always describes the tab in front of it.
+  const tripSearchTotal = tripTab === "active" ? tripSheets.length : completedSheets.length;
+  const tripSearchMatches =
+    tripTab === "active" ? visibleTripSheets.length : visibleCompletedSheets.length;
+
   /**
    * Completed sheets grouped into the days they were closed out on.
    *
@@ -345,7 +445,7 @@ export default function TripSheetPage() {
       ? dayKey(new Date(todayStart.getTime() - 24 * 60 * 60 * 1000))
       : null;
 
-    for (const sheet of completedSheets) {
+    for (const sheet of visibleCompletedSheets) {
       const when = new Date(sheet.completedAt);
       const key = dayKey(when);
 
@@ -373,7 +473,7 @@ export default function TripSheetPage() {
 
     // The API already returns newest first, so insertion order is date order.
     return [...groups.values()];
-  }, [completedSheets, completedDayStart]);
+  }, [visibleCompletedSheets, completedDayStart]);
 
   // ─── File Upload ──────────────────────────────────────────────────────
 
@@ -382,6 +482,8 @@ export default function TripSheetPage() {
     setPreview(null);
     setUploadedFile(file);
     setUploading(true);
+    setInvoiceUploads({});
+    setInvoiceConflict(null);
 
     try {
       const formData = new FormData();
@@ -408,6 +510,143 @@ export default function TripSheetPage() {
     } finally {
       setUploading(false);
     }
+  };
+
+  // ─── Missing Invoices ─────────────────────────────────────────────────
+
+  /**
+   * Re-run the preview against the invoice folder as it stands now.
+   *
+   * A newly uploaded PDF only becomes a match when the sheet is parsed again,
+   * so this is what turns "No PDF" into a matched stop. Skip decisions are
+   * carried over deliberately — only the invoice matching is being refreshed,
+   * and re-seeding them from `alreadySigned` would silently undo the
+   * dispatcher's choices.
+   */
+  const refreshPreview = async () => {
+    if (!uploadedFile && !importSourceFile) return;
+    setRecheckingInvoices(true);
+    setError(null);
+
+    try {
+      let res: Response;
+      if (uploadedFile) {
+        const formData = new FormData();
+        formData.append("file", uploadedFile);
+        res = await fetch("/api/trip-sheet", { method: "POST", body: formData });
+      } else {
+        res = await fetch("/api/trip-sheet/folder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: importSourceFile }),
+        });
+      }
+
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Could not re-check the trip sheet");
+        return;
+      }
+
+      setPreview(data);
+      setInvoiceConflict(null);
+      // Upload results are deliberately kept: a row that matched has gone from
+      // the list, and its "saved" line is the only confirmation of where the
+      // PDF went. They are cleared when a different sheet is previewed.
+    } catch {
+      setError("Failed to re-check invoices");
+    } finally {
+      setRecheckingInvoices(false);
+    }
+  };
+
+  /**
+   * Send one PDF to the invoice folder. `invoiceNumber` names the saved file
+   * after the number on the sheet, which is what makes the re-check match it;
+   * without one the file keeps its own name and matches on that instead.
+   */
+  const uploadInvoicePdf = async (
+    file: File,
+    opts: { invoiceNumber?: string; overwrite?: boolean } = {}
+  ): Promise<boolean> => {
+    const key = opts.invoiceNumber ?? file.name;
+    setInvoiceUploads((prev) => ({ ...prev, [key]: { state: "uploading" } }));
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      if (opts.invoiceNumber) formData.append("invoiceNumber", opts.invoiceNumber);
+      if (opts.overwrite) formData.append("overwrite", "true");
+
+      const res = await fetch("/api/invoices/upload", { method: "POST", body: formData });
+      const data = await res.json();
+
+      if (!res.ok) {
+        if (res.status === 409 && data.conflict) {
+          setInvoiceConflict({ key, file, invoiceNumber: opts.invoiceNumber });
+        }
+        setInvoiceUploads((prev) => ({
+          ...prev,
+          [key]: { state: "failed", message: data.error || "Upload failed" },
+        }));
+        return false;
+      }
+
+      if (data.location) setInvoiceDestination(data.location);
+      setInvoiceUploads((prev) => ({
+        ...prev,
+        [key]: { state: "done", message: data.filename },
+      }));
+      return true;
+    } catch {
+      setInvoiceUploads((prev) => ({
+        ...prev,
+        [key]: { state: "failed", message: "Upload failed" },
+      }));
+      return false;
+    }
+  };
+
+  const handleMissingInvoiceFile = async (file: File) => {
+    const invoiceNumber = uploadTargetInvoice;
+    setUploadTargetInvoice(null);
+    if (!invoiceNumber) return;
+
+    setInvoiceConflict(null);
+    if (await uploadInvoicePdf(file, { invoiceNumber })) {
+      await refreshPreview();
+    }
+  };
+
+  /** Bulk add: each file keeps its own name and the re-parse does the matching. */
+  const handleBulkInvoiceFiles = async (files: File[]) => {
+    setInvoiceConflict(null);
+    let anySaved = false;
+    for (const file of files) {
+      if (await uploadInvoicePdf(file)) anySaved = true;
+    }
+    if (anySaved) await refreshPreview();
+  };
+
+  const handleReplaceConflict = async () => {
+    if (!invoiceConflict) return;
+    const { file, invoiceNumber } = invoiceConflict;
+    setInvoiceConflict(null);
+    if (await uploadInvoicePdf(file, { invoiceNumber, overwrite: true })) {
+      await refreshPreview();
+    }
+  };
+
+  /**
+   * The server refused the deploy because stops would have gone out with no
+   * PDF behind them. Only reachable when this tab's view of the invoice folder
+   * was stale, so re-preview to show what the server actually saw.
+   */
+  const handleMissingInvoiceRejection = async (message?: string) => {
+    setError(
+      `${message || "Some invoices have no PDF"}. Upload the PDFs, or skip those stops.`
+    );
+    await refreshPreview();
   };
 
   const handleDeploy = async () => {
@@ -444,13 +683,16 @@ export default function TripSheetPage() {
         });
         const data = await res.json();
 
-        if (!res.ok) {
+        if (res.status === 409 && data.code === "MISSING_INVOICES") {
+          await handleMissingInvoiceRejection(data.error);
+        } else if (!res.ok) {
           setError(data.error || "Deploy failed");
         } else {
           setPreview(null);
           setImportSourceFile(null);
           setAssignToDriverId("");
           setSkippedInvoices(new Set());
+          setInvoiceUploads({});
           fetchTripSheets();
           fetchCloudFolder();
         }
@@ -483,13 +725,16 @@ export default function TripSheetPage() {
         });
         const data = await res.json();
 
-        if (!res.ok) {
+        if (res.status === 409 && data.code === "MISSING_INVOICES") {
+          await handleMissingInvoiceRejection(data.error);
+        } else if (!res.ok) {
           setError(data.error || "Deploy failed");
         } else {
           setPreview(null);
           setUploadedFile(null);
           setAssignToDriverId("");
           setSkippedInvoices(new Set());
+          setInvoiceUploads({});
           fetchTripSheets();
         }
       }
@@ -541,7 +786,9 @@ export default function TripSheetPage() {
 
   const toggleAllCloudFiles = () => {
     if (!cloudFolder) return;
-    const allFilenames = cloudFolder.files.map((f) => f.filename);
+    // "All" means all of what the search left on screen. Reaching past the
+    // query would hand a batch delete rows nobody can see.
+    const allFilenames = visibleCloudFiles.map((f) => f.filename);
     if (selectedCloudFiles.size === allFilenames.length) {
       setSelectedCloudFiles(new Set());
     } else {
@@ -558,6 +805,10 @@ export default function TripSheetPage() {
         dupeFiles.add(group.filenames[i]);
       }
     }
+    // Show what was just selected: a live query would otherwise leave most of
+    // it off screen while the action bar went on counting it.
+    setCloudQuery("");
+    setCloudPage(1);
     setSelectedCloudFiles(dupeFiles);
   };
 
@@ -597,11 +848,28 @@ export default function TripSheetPage() {
   };
 
   const toggleAllTrips = () => {
-    if (selectedTrips.size === tripSheets.length) {
+    if (selectedTrips.size === visibleTripSheets.length) {
       setSelectedTrips(new Set());
     } else {
-      setSelectedTrips(new Set(tripSheets.map((t) => t.id)));
+      setSelectedTrips(new Set(visibleTripSheets.map((t) => t.id)));
     }
+  };
+
+  /**
+   * Narrowing a list drops its selection with it. Otherwise Complete Selected
+   * or Delete Selected would still be holding sheets the query has since taken
+   * off the screen, which is not what the count in the action bar implies.
+   */
+  const handleCloudQueryChange = (next: string) => {
+    setCloudQuery(next);
+    setCloudPage(1);
+    setSelectedCloudFiles(new Set());
+  };
+
+  const handleTripQueryChange = (next: string) => {
+    setTripQuery(next);
+    setTripPage(1);
+    setSelectedTrips(new Set());
   };
 
   const handleBatchDeleteTrips = async () => {
@@ -757,6 +1025,37 @@ export default function TripSheetPage() {
     (r) => r.stops.every((s) => skippedInvoices.has(s.invoiceNumber))
   );
 
+  // Rows the sheet left unassigned are not deployed until a driver is picked,
+  // so their missing PDFs are not yet anyone's problem. Mirrors the same rule
+  // in collectMissingInvoices() on the server.
+  const unassignedStopIds = useMemo(
+    () => new Set(unassignedResult?.stops.map((s) => s.id) ?? []),
+    [unassignedResult]
+  );
+
+  const missingInvoices = useMemo(
+    () =>
+      (preview?.preview.missingInvoices ?? []).filter(
+        (m) => assignToDriverId || !unassignedStopIds.has(m.stopId)
+      ),
+    [preview, assignToDriverId, unassignedStopIds]
+  );
+
+  /** Still needs an answer: no PDF, not skipped. */
+  const unresolvedMissing = useMemo(
+    () => missingInvoices.filter((m) => !skippedInvoices.has(m.invoiceNumber)),
+    [missingInvoices, skippedInvoices]
+  );
+
+  const missingBlocksDeploy = unresolvedMissing.length > 0;
+
+  /** Upload results with no missing-invoice row of their own — bulk adds, and
+   *  rows that have since matched and left the list. */
+  const bulkUploadResults = useMemo(() => {
+    const rowKeys = new Set(missingInvoices.map((m) => m.invoiceNumber));
+    return Object.entries(invoiceUploads).filter(([key]) => !rowKeys.has(key));
+  }, [invoiceUploads, missingInvoices]);
+
   return (
     <div className="animate-fade-in">
       <div className="flex items-start justify-between mb-8 gap-4">
@@ -895,12 +1194,12 @@ export default function TripSheetPage() {
 
           {cloudFolder.files.length > 0 ? (
             <>
-            {/* Select all row */}
-            <div className="flex items-center gap-3 px-5 py-2 border-b border-ink-border bg-ink-surface/30">
+            {/* Select all row + search */}
+            <div className="flex items-center gap-3 px-5 py-2 border-b border-ink-border bg-ink-surface/30 flex-wrap">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={cloudFolder.files.length > 0 && selectedCloudFiles.size === cloudFolder.files.length}
+                  checked={visibleCloudFiles.length > 0 && selectedCloudFiles.size === visibleCloudFiles.length}
                   onChange={toggleAllCloudFiles}
                   className="w-3.5 h-3.5 rounded border-ink-border text-ink-green accent-[#00C07F] cursor-pointer"
                 />
@@ -908,9 +1207,18 @@ export default function TripSheetPage() {
                   {selectedCloudFiles.size > 0 ? `${selectedCloudFiles.size} selected` : "Select all"}
                 </span>
               </label>
+              <FilterSearch
+                value={cloudQuery}
+                onChange={handleCloudQueryChange}
+                placeholder="Search filename…"
+                matchCount={visibleCloudFiles.length}
+                totalCount={cloudFolder.files.length}
+                noun="file"
+                className="ml-auto"
+              />
             </div>
             <div className="divide-y divide-ink-border">
-              {cloudFolder.files
+              {visibleCloudFiles
                 .slice((cloudPage - 1) * ITEMS_PER_PAGE, cloudPage * ITEMS_PER_PAGE)
                 .map((file) => (
                 <div
@@ -981,6 +1289,8 @@ export default function TripSheetPage() {
                             // Auto-select all already-signed invoices for skipping
                             const signed = data.preview?.alreadySigned || [];
                             setSkippedInvoices(new Set(signed.map((s: AlreadySignedInvoice) => s.invoiceNumber)));
+                            setInvoiceUploads({});
+                            setInvoiceConflict(null);
                           }
                         } catch {
                           setError("Failed to import file");
@@ -1010,6 +1320,19 @@ export default function TripSheetPage() {
                   )}
                 </div>
               ))}
+              {visibleCloudFiles.length === 0 && (
+                <div className="px-5 py-8 text-center">
+                  <p className="text-sm font-mono text-ink-muted">
+                    No file matches “{cloudQuery.trim()}”
+                  </p>
+                  <button
+                    onClick={() => handleCloudQueryChange("")}
+                    className="mt-3 px-3 py-1.5 text-xs font-mono text-ink-muted bg-ink-surface border border-ink-border rounded hover:text-ink-black hover:border-ink-black/30 transition-all"
+                  >
+                    Clear search
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Selection action bar */}
@@ -1040,12 +1363,12 @@ export default function TripSheetPage() {
             )}
 
             {/* Cloud files pagination */}
-            {cloudFolder.files.length > ITEMS_PER_PAGE && (() => {
-              const totalCloudPages = Math.ceil(cloudFolder.files.length / ITEMS_PER_PAGE);
+            {visibleCloudFiles.length > ITEMS_PER_PAGE && (() => {
+              const totalCloudPages = Math.ceil(visibleCloudFiles.length / ITEMS_PER_PAGE);
               return (
                 <div className="flex items-center justify-between px-5 py-2.5 border-t border-ink-border bg-ink-surface/30">
                   <p className="text-xs font-mono text-ink-muted">
-                    {(cloudPage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(cloudPage * ITEMS_PER_PAGE, cloudFolder.files.length)} of {cloudFolder.files.length}
+                    {(cloudPage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(cloudPage * ITEMS_PER_PAGE, visibleCloudFiles.length)} of {visibleCloudFiles.length}
                   </p>
                   <div className="flex items-center gap-1">
                     <button
@@ -1330,6 +1653,199 @@ export default function TripSheetPage() {
               </div>
             )}
 
+            {/* Missing invoices — upload the PDF, or skip the stop.
+                The hidden pickers below are shared by every row; the row that
+                opened one is remembered in uploadTargetInvoice. */}
+            <input
+              ref={missingFileInputRef}
+              type="file"
+              accept="application/pdf,.pdf"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                // Cleared so picking the same file twice still fires onChange.
+                e.target.value = "";
+                if (file) handleMissingInvoiceFile(file);
+              }}
+            />
+            <input
+              ref={bulkInvoiceInputRef}
+              type="file"
+              accept="application/pdf,.pdf"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = "";
+                if (files.length > 0) handleBulkInvoiceFiles(files);
+              }}
+            />
+
+            {missingInvoices.length > 0 && (
+              <div className="mb-4 border border-ink-amber/40 rounded overflow-hidden">
+                <div className="flex items-start gap-3 px-4 py-3 bg-ink-amber-dim">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-amber shrink-0 mt-0.5">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                    <line x1="12" y1="9" x2="12" y2="13" />
+                    <line x1="12" y1="17" x2="12.01" y2="17" />
+                  </svg>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-ink-black">
+                      {unresolvedMissing.length > 0
+                        ? `${unresolvedMissing.length} invoice${unresolvedMissing.length !== 1 ? "s are" : " is"} not in the invoice folder`
+                        : `All ${missingInvoices.length} missing invoice${missingInvoices.length !== 1 ? "s" : ""} accounted for`}
+                    </p>
+                    <p className="text-xs text-ink-muted mt-0.5">
+                      Upload the PDF, or skip the stop.
+                      {invoiceDestination && (
+                        <>
+                          {" "}Uploads are saved to{" "}
+                          <span className="font-mono break-all">{invoiceDestination}</span>.
+                        </>
+                      )}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <button
+                      onClick={() => bulkInvoiceInputRef.current?.click()}
+                      disabled={recheckingInvoices}
+                      className="text-xs font-mono text-ink-muted hover:text-ink-black transition-colors disabled:opacity-50 whitespace-nowrap"
+                      title="Add PDFs keeping their own filenames — the re-check matches them"
+                    >
+                      Add PDFs…
+                    </button>
+                    <button
+                      onClick={refreshPreview}
+                      disabled={recheckingInvoices}
+                      className="text-xs font-mono text-ink-muted hover:text-ink-black transition-colors disabled:opacity-50 whitespace-nowrap"
+                    >
+                      {recheckingInvoices ? "Checking…" : "Re-check"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSkippedInvoices((prev) => {
+                          const next = new Set(prev);
+                          if (unresolvedMissing.length === 0) {
+                            for (const m of missingInvoices) next.delete(m.invoiceNumber);
+                          } else {
+                            for (const m of missingInvoices) next.add(m.invoiceNumber);
+                          }
+                          return next;
+                        });
+                      }}
+                      className="text-xs font-mono text-ink-muted hover:text-ink-black transition-colors whitespace-nowrap"
+                    >
+                      {unresolvedMissing.length === 0 ? "Include all" : "Skip all"}
+                    </button>
+                  </div>
+                </div>
+                <div className="divide-y divide-ink-border">
+                  {missingInvoices.map((inv) => {
+                    const upload = invoiceUploads[inv.invoiceNumber];
+                    const isSkipped = skippedInvoices.has(inv.invoiceNumber);
+                    const hasConflict = invoiceConflict?.key === inv.invoiceNumber;
+                    return (
+                      <div
+                        key={inv.stopId}
+                        className={`flex items-center gap-3 px-4 py-2.5 text-xs ${isSkipped ? "opacity-60" : ""}`}
+                      >
+                        <span className="font-mono font-medium text-ink-black min-w-[100px]">
+                          {inv.invoiceNumber}
+                        </span>
+                        <span className="text-ink-muted truncate flex-1">
+                          {inv.customerName}
+                          <span className="text-ink-muted-light"> · {inv.driverName}</span>
+                        </span>
+
+                        {upload?.state === "failed" && (
+                          <span className="text-ink-red truncate max-w-[220px]" title={upload.message}>
+                            {upload.message}
+                          </span>
+                        )}
+                        {hasConflict && (
+                          <button
+                            onClick={handleReplaceConflict}
+                            className="px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-ink-red/10 text-ink-red hover:bg-ink-red/20 transition-colors"
+                          >
+                            Replace
+                          </button>
+                        )}
+
+                        <button
+                          onClick={() => {
+                            setUploadTargetInvoice(inv.invoiceNumber);
+                            missingFileInputRef.current?.click();
+                          }}
+                          disabled={upload?.state === "uploading" || recheckingInvoices}
+                          className="flex items-center gap-1 px-2 py-1 rounded border border-ink-border font-mono text-[10px] font-medium text-ink-black hover:bg-ink-surface transition-colors disabled:opacity-50 whitespace-nowrap"
+                        >
+                          {upload?.state === "uploading" ? (
+                            <>
+                              <span className="w-3 h-3 border-2 border-ink-muted/30 border-t-ink-muted rounded-full animate-spin" />
+                              Uploading…
+                            </>
+                          ) : (
+                            <>
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                <polyline points="17 8 12 3 7 8" />
+                                <line x1="12" y1="3" x2="12" y2="15" />
+                              </svg>
+                              Upload PDF
+                            </>
+                          )}
+                        </button>
+
+                        <label className="flex items-center gap-1.5 cursor-pointer text-ink-muted hover:text-ink-black transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={isSkipped}
+                            onChange={() => {
+                              setSkippedInvoices((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(inv.invoiceNumber)) next.delete(inv.invoiceNumber);
+                                else next.add(inv.invoiceNumber);
+                                return next;
+                              });
+                            }}
+                            className="w-3.5 h-3.5 rounded border-ink-border text-ink-amber focus:ring-ink-amber/30"
+                          />
+                          <span className="font-mono">Skip</span>
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Files added by name rather than against a row — a bulk add
+                    that matched nothing still needs to report itself. */}
+                {bulkUploadResults.length > 0 && (
+                  <div className="px-4 py-2 border-t border-ink-border bg-ink-surface/30 space-y-1">
+                    {bulkUploadResults.map(([name, result]) => (
+                      <p key={name} className="text-[11px] font-mono flex items-center gap-2">
+                        <span className="text-ink-muted truncate max-w-[240px]">{name}</span>
+                        <span
+                          className={
+                            result.state === "done"
+                              ? "text-ink-green"
+                              : result.state === "failed"
+                                ? "text-ink-red"
+                                : "text-ink-muted"
+                          }
+                        >
+                          {result.state === "done"
+                            ? "saved"
+                            : result.state === "failed"
+                              ? result.message || "failed"
+                              : "uploading…"}
+                        </span>
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Driver breakdown */}
             {assignedResults && assignedResults.length > 0 && (
               <div className="space-y-3">
@@ -1508,10 +2024,36 @@ export default function TripSheetPage() {
               </svg>
               <div>
                 <p className="text-sm font-medium text-ink-black">
-                  All invoices on this trip sheet have already been signed
+                  Every stop on this trip sheet is being skipped
                 </p>
                 <p className="text-xs text-ink-muted mt-1">
-                  There are no remaining stops to deploy. Please upload a new trip sheet.
+                  {missingInvoices.length > 0
+                    ? "Nothing is left to deploy. Uncheck a stop and upload its invoice, or upload a new trip sheet."
+                    : "There are no remaining stops to deploy. Please upload a new trip sheet."}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Unresolved missing invoices block the deploy outright. The PDF is
+              the physical record the signature is embedded on, so a stop with
+              no invoice has nothing to leave behind. The server enforces the
+              same rule against a fresh listing of the folder. */}
+          {unresolvedMissing.length > 0 && !allStopsSkipped && (
+            <div className="border border-ink-red/30 rounded p-4 bg-ink-red/5 flex items-start gap-3">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-red shrink-0 mt-0.5">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              <div className="flex-1">
+                <p className="text-sm font-medium text-ink-black">
+                  {unresolvedMissing.length} stop{unresolvedMissing.length !== 1 ? "s have" : " has"} no invoice PDF — deploy is blocked
+                </p>
+                <p className="text-xs text-ink-muted mt-1">
+                  The signature is embedded on the invoice, so a stop without one
+                  leaves no physical record of the delivery. Upload the missing
+                  PDFs above, or skip those stops to leave them off this run.
                 </p>
               </div>
             </div>
@@ -1525,6 +2067,8 @@ export default function TripSheetPage() {
                 setUploadedFile(null);
                 setImportSourceFile(null);
                 setSkippedInvoices(new Set());
+                setInvoiceUploads({});
+                setInvoiceConflict(null);
                 setError(null);
               }}
               className="px-5 py-2.5 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
@@ -1533,7 +2077,13 @@ export default function TripSheetPage() {
             </button>
             <button
               onClick={handleDeploy}
-              disabled={deploying || allStopsSkipped || ((!assignedResults || assignedResults.length === 0) && !assignToDriverId)}
+              disabled={
+                deploying ||
+                recheckingInvoices ||
+                missingBlocksDeploy ||
+                allStopsSkipped ||
+                ((!assignedResults || assignedResults.length === 0) && !assignToDriverId)
+              }
               className="flex items-center gap-2 px-6 py-2.5 bg-ink-green text-white font-mono text-sm font-medium rounded hover:bg-ink-green-hover active:scale-[0.98] transition-all disabled:opacity-50"
             >
               {deploying ? (
@@ -1610,6 +2160,22 @@ export default function TripSheetPage() {
             </button>
           </div>
 
+          {/* Search row. One box serving both tabs, so a driver's name typed
+              against the live sheets survives the switch into the archive. */}
+          {showActiveTrips && (tripSearchTotal > 0 || tripTokens.length > 0) && (
+            <div className="px-4 py-2.5 border-b border-ink-border bg-ink-surface/30">
+              <FilterSearch
+                value={tripQuery}
+                onChange={handleTripQueryChange}
+                placeholder="Search driver, vehicle, file or invoice…"
+                matchCount={tripSearchMatches}
+                totalCount={tripSearchTotal}
+                noun="sheet"
+                shortcut
+              />
+            </div>
+          )}
+
           {showActiveTrips && tripTab === "active" && tripSheets.length === 0 && (
             <div className="p-8 text-center">
               <p className="text-sm text-ink-muted font-mono">No active trip sheets</p>
@@ -1626,7 +2192,7 @@ export default function TripSheetPage() {
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={tripSheets.length > 0 && selectedTrips.size === tripSheets.length}
+                  checked={visibleTripSheets.length > 0 && selectedTrips.size === visibleTripSheets.length}
                   onChange={toggleAllTrips}
                   className="w-4 h-4 rounded border-ink-border text-ink-green accent-[#00C07F] cursor-pointer"
                 />
@@ -1667,8 +2233,8 @@ export default function TripSheetPage() {
               )}
             </div>
             {(() => {
-              const totalTripPages = Math.ceil(tripSheets.length / ITEMS_PER_PAGE);
-              const paginatedTrips = tripSheets.slice(
+              const totalTripPages = Math.ceil(visibleTripSheets.length / ITEMS_PER_PAGE);
+              const paginatedTrips = visibleTripSheets.slice(
                 (tripPage - 1) * ITEMS_PER_PAGE,
                 tripPage * ITEMS_PER_PAGE
               );
@@ -1679,6 +2245,11 @@ export default function TripSheetPage() {
               const total = trip.stops.length;
               const pct = total > 0 ? Math.round((signed / total) * 100) : 0;
               const isExpanded = expandedTrip === trip.id;
+              // How much of this sheet the query actually hit. A sheet can be
+              // in the list on the strength of one stop out of forty, and the
+              // header is where that gets said without opening it.
+              const stopHits =
+                tripTokens.length > 0 ? trip.stops.filter(stopMatchesQuery).length : 0;
 
               return (
                 <div
@@ -1719,6 +2290,11 @@ export default function TripSheetPage() {
                         <span className="text-[12px] sm:text-xs font-mono text-ink-muted">
                           {trip.regNo}
                         </span>
+                        {stopHits > 0 && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-green-dim text-ink-green border border-ink-green/20">
+                            {stopHits} stop{stopHits !== 1 ? "s" : ""} match
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-3 mt-1">
                         <div className="flex-1 h-1.5 bg-ink-surface rounded-full overflow-hidden max-w-[200px]">
@@ -1816,7 +2392,11 @@ export default function TripSheetPage() {
                       {trip.stops.map((stop) => (
                         <div
                           key={stop.id}
-                          className="px-4 py-3 hover:bg-ink-surface/30 transition-colors"
+                          className={`px-4 py-3 hover:bg-ink-surface/30 transition-colors ${
+                            stopMatchesQuery(stop)
+                              ? "bg-ink-green-dim/20 border-l-2 border-l-ink-green"
+                              : ""
+                          }`}
                         >
                           {/* Line 1: #, Invoice, Customer, NOP */}
                           <div className="grid grid-cols-[2rem_1fr_1fr_3rem] gap-2 items-center">
@@ -1944,11 +2524,28 @@ export default function TripSheetPage() {
               );
             })}
 
+            {visibleTripSheets.length === 0 && (
+              <div className="py-8 text-center">
+                <p className="text-sm font-mono text-ink-muted">
+                  No active sheet matches “{tripQuery.trim()}”
+                </p>
+                <p className="text-xs text-ink-muted mt-1">
+                  Driver, vehicle, source file, invoice number and customer are all searched
+                </p>
+                <button
+                  onClick={() => handleTripQueryChange("")}
+                  className="mt-3 px-3 py-1.5 text-xs font-mono text-ink-muted bg-ink-surface border border-ink-border rounded hover:text-ink-black hover:border-ink-black/30 transition-all"
+                >
+                  Clear search
+                </button>
+              </div>
+            )}
+
             {/* Trip sheets pagination */}
             {totalTripPages > 1 && (
               <div className="flex items-center justify-between px-4 py-3 bg-ink-card border border-ink-border rounded">
                 <p className="text-xs font-mono text-ink-muted">
-                  Showing {(tripPage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(tripPage * ITEMS_PER_PAGE, tripSheets.length)} of {tripSheets.length} trip sheets
+                  Showing {(tripPage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(tripPage * ITEMS_PER_PAGE, visibleTripSheets.length)} of {visibleTripSheets.length} trip sheets
                 </p>
                 <div className="flex items-center gap-1">
                   <button
@@ -2013,13 +2610,15 @@ export default function TripSheetPage() {
               {/* Range toggle + summary */}
               <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-ink-border bg-ink-surface/30 flex-wrap">
                 <p className="text-xs font-mono text-ink-muted">
-                  {completedSheets.length} sheet{completedSheets.length !== 1 ? "s" : ""} closed out
-                  {completedRange === "today" ? " today" : ""}
-                  {completedSheets.length > 0 && (
+                  {visibleCompletedSheets.length} sheet
+                  {visibleCompletedSheets.length !== 1 ? "s" : ""}{" "}
+                  {tripTokens.length > 0 ? "matching" : "closed out"}
+                  {tripTokens.length === 0 && completedRange === "today" ? " today" : ""}
+                  {visibleCompletedSheets.length > 0 && (
                     <>
                       {" · "}
                       <span className="text-ink-green">
-                        {completedSheets.reduce((sum, c) => sum + c.signedStops, 0)} deliveries
+                        {visibleCompletedSheets.reduce((sum, c) => sum + c.signedStops, 0)} deliveries
                       </span>
                     </>
                   )}
@@ -2052,16 +2651,31 @@ export default function TripSheetPage() {
                 </div>
               </div>
 
-              {completedSheets.length === 0 ? (
+              {visibleCompletedSheets.length === 0 ? (
                 <div className="p-8 text-center">
-                  <p className="text-sm text-ink-muted font-mono">
-                    {completedRange === "today"
-                      ? "Nothing closed out today yet"
-                      : "No completed trip sheets"}
-                  </p>
-                  <p className="text-xs text-ink-muted mt-1">
-                    A sheet lands here once every stop is signed and you press Complete
-                  </p>
+                  {tripTokens.length > 0 ? (
+                    <>
+                      <p className="text-sm text-ink-muted font-mono">
+                        No completed sheet matches “{tripQuery.trim()}”
+                      </p>
+                      <p className="text-xs text-ink-muted mt-1">
+                        {completedRange === "today"
+                          ? "Only today's sheets are loaded — switch to All to search the whole archive"
+                          : "Driver, vehicle, source file, invoice number and customer are all searched"}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-sm text-ink-muted font-mono">
+                        {completedRange === "today"
+                          ? "Nothing closed out today yet"
+                          : "No completed trip sheets"}
+                      </p>
+                      <p className="text-xs text-ink-muted mt-1">
+                        A sheet lands here once every stop is signed and you press Complete
+                      </p>
+                    </>
+                  )}
                 </div>
               ) : (
                 <div className="p-4 space-y-6">
@@ -2081,6 +2695,8 @@ export default function TripSheetPage() {
                       <div className="space-y-3 stagger-children">
                   {group.sheets.map((sheet) => {
                     const isExpanded = expandedCompleted === sheet.id;
+                    const stopHits =
+                      tripTokens.length > 0 ? sheet.stops.filter(stopMatchesQuery).length : 0;
                     return (
                       <div
                         key={sheet.id}
@@ -2109,6 +2725,11 @@ export default function TripSheetPage() {
                                 <span className="w-1.5 h-1.5 rounded-full bg-ink-green" />
                                 {sheet.signedStops}/{sheet.totalStops} delivered
                               </span>
+                              {stopHits > 0 && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-green-dim text-ink-green border border-ink-green/20">
+                                  {stopHits} stop{stopHits !== 1 ? "s" : ""} match
+                                </span>
+                              )}
                               {!sheet.archivedFile && (
                                 <span
                                   className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
@@ -2149,7 +2770,11 @@ export default function TripSheetPage() {
                             {sheet.stops.map((stop) => (
                               <div
                                 key={`${sheet.id}-${stop.stopNumber}-${stop.invoiceNumber}`}
-                                className="px-4 py-2.5 hover:bg-ink-surface/30 transition-colors"
+                                className={`px-4 py-2.5 hover:bg-ink-surface/30 transition-colors ${
+                                  stopMatchesQuery(stop)
+                                    ? "bg-ink-green-dim/20 border-l-2 border-l-ink-green"
+                                    : ""
+                                }`}
                               >
                                 <div className="grid grid-cols-[2rem_1fr_1fr_auto] gap-2 items-center">
                                   <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">

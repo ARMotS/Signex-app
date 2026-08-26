@@ -342,4 +342,44 @@ export function req(
   return request;
 }
 
+/**
+ * Build a NextRequest-alike carrying a multipart body.
+ *
+ * File uploads cannot go through `req()` — that JSON-encodes its body, and a
+ * route reading `request.formData()` would see nothing.
+ */
+export function formReq(
+  url: string,
+  form: FormData,
+  method: string = "POST"
+): any {
+  const full = url.startsWith("http") ? url : `http://localhost${url}`;
+  const request = new Request(full, { method, body: form });
+  Object.defineProperty(request, "nextUrl", {
+    value: new URL(full),
+    writable: false,
+  });
+  return request;
+}
+
+/** A minimal but genuine PDF header — routes check for one before saving. */
+export function pdfFile(name: string): File {
+  return new File([Buffer.from("%PDF-1.4\n1 0 obj\n<<>>\nendobj\n")], name, {
+    type: "application/pdf",
+  });
+}
+
+/** A trip sheet CSV naming one stop, for driver `driverName`. */
+export function tripSheetCsv(
+  driverName: string,
+  invoiceNumber: string,
+  regNo: string = "REG-X"
+): File {
+  const csv = [
+    "Date,Driver,REGNO,Customer,INVOICENO,NOP",
+    `2026-08-26,${driverName},${regNo},Acme Trading,${invoiceNumber},3`,
+  ].join("\n");
+  return new File([csv], "run.csv", { type: "text/csv" });
+}
+
 export const params = <T extends object>(p: T) => ({ params: Promise.resolve(p) });

@@ -45,6 +45,22 @@ export interface AlreadySignedInvoice {
   source: "database" | "filesystem";
 }
 
+/**
+ * A row on the sheet whose invoice PDF is not in the invoice folder.
+ *
+ * Reported flat, alongside the per-driver `unmatchedInvoices`, because the
+ * dispatcher resolves these one at a time — upload the PDF or drop the stop —
+ * and needs to see which customer and driver each one belongs to without
+ * walking the driver groups.
+ */
+export interface MissingInvoice {
+  invoiceNumber: string;
+  customerName: string;
+  driverName: string;
+  /** The preview stop this row became, so the UI can key off it */
+  stopId: string;
+}
+
 export interface ParseResult {
   success: boolean;
   error?: string;
@@ -54,6 +70,8 @@ export interface ParseResult {
   matchedInvoices: number;
   unmatchedInvoices: number;
   alreadySigned: AlreadySignedInvoice[];
+  /** Every row with no matching PDF, across all drivers */
+  missingInvoices: MissingInvoice[];
 }
 
 // ─── Column Detection ─────────────────────────────────────────────────────
@@ -150,7 +168,7 @@ function mapColumns(headers: string[]): Record<string, number> {
  * For "IV-365-4.pdf" style filenames, extracts the middle numeric value (365).
  * Strips prefixes, spaces, hyphens. Leading zeros are preserved.
  */
-function normalizeInvoiceNumber(raw: string): string {
+export function normalizeInvoiceNumber(raw: string): string {
   let normalized = String(raw).trim().toUpperCase();
 
   // Strip .pdf extension if present
@@ -227,6 +245,7 @@ export async function parseTripSheet(
         matchedInvoices: 0,
         unmatchedInvoices: 0,
         alreadySigned: [],
+        missingInvoices: [],
       };
     }
 
@@ -240,6 +259,7 @@ export async function parseTripSheet(
         matchedInvoices: 0,
         unmatchedInvoices: 0,
         alreadySigned: [],
+        missingInvoices: [],
       };
     }
 
@@ -257,6 +277,7 @@ export async function parseTripSheet(
         matchedInvoices: 0,
         unmatchedInvoices: 0,
         alreadySigned: [],
+        missingInvoices: [],
       };
     }
 
@@ -341,6 +362,7 @@ export async function parseTripSheet(
     let totalUnmatched = 0;
 
     const driverResults: MatchResult[] = [];
+    const missingInvoices: MissingInvoice[] = [];
 
     for (const [, group] of driverGroupMap) {
       const stops: TripStop[] = [];
@@ -351,15 +373,23 @@ export async function parseTripSheet(
         const numericOnly = normalizedInv.replace(/\D/g, "");
         const matchedFile = invoiceLookup.get(normalizedInv) || invoiceLookup.get(numericOnly);
 
+        const stopId = crypto.randomUUID();
+
         if (matchedFile) {
           totalMatched++;
         } else {
           totalUnmatched++;
           unmatchedInvoices.push(row.invoiceNumber);
+          missingInvoices.push({
+            invoiceNumber: row.invoiceNumber,
+            customerName: row.customerName || "Unknown",
+            driverName: group.driver.name,
+            stopId,
+          });
         }
 
         stops.push({
-          id: crypto.randomUUID(),
+          id: stopId,
           stopNumber: idx + 1,
           invoiceNumber: row.invoiceNumber,
           customerName: row.customerName || "Unknown",
@@ -389,15 +419,23 @@ export async function parseTripSheet(
         const numericOnly = normalizedInv.replace(/\D/g, "");
         const matchedFile = invoiceLookup.get(normalizedInv) || invoiceLookup.get(numericOnly);
 
+        const stopId = crypto.randomUUID();
+
         if (matchedFile) {
           totalMatched++;
         } else {
           totalUnmatched++;
           unmatchedInvoices.push(row.invoiceNumber);
+          missingInvoices.push({
+            invoiceNumber: row.invoiceNumber,
+            customerName: row.customerName || "Unknown",
+            driverName: row.driverName || "Unassigned",
+            stopId,
+          });
         }
 
         stops.push({
-          id: crypto.randomUUID(),
+          id: stopId,
           stopNumber: idx + 1,
           invoiceNumber: row.invoiceNumber,
           customerName: row.customerName || "Unknown",
@@ -433,6 +471,7 @@ export async function parseTripSheet(
       matchedInvoices: totalMatched,
       unmatchedInvoices: totalUnmatched,
       alreadySigned,
+      missingInvoices,
     };
   } catch (err) {
     return {
@@ -444,6 +483,7 @@ export async function parseTripSheet(
       matchedInvoices: 0,
       unmatchedInvoices: 0,
       alreadySigned: [],
+      missingInvoices: [],
     };
   }
 }
@@ -522,4 +562,46 @@ async function detectAlreadySignedInvoices(
   }
 
   return results;
+}
+
+// ─── Deploy-time re-check ─────────────────────────────────────────────────
+
+/**
+ * The stops that would be deployed with no invoice PDF behind them.
+ *
+ * Both deploy routes re-parse the sheet before writing, so this runs against a
+ * *fresh* listing of the invoice folder — not the one the dispatcher saw in the
+ * preview. That is the point: an invoice uploaded (or deleted) between preview
+ * and deploy is accounted for, and a stale browser tab cannot push stops the
+ * driver has no paperwork for.
+ *
+ * Rows the sheet left unassigned are only counted once a driver has been chosen
+ * for them; otherwise they are not being deployed at all.
+ */
+export function collectMissingInvoices(
+  driverResults: MatchResult[],
+  skipInvoices: Set<string>,
+  options: { includeUnassigned?: boolean } = {}
+): MissingInvoice[] {
+  const missing: MissingInvoice[] = [];
+
+  for (const result of driverResults) {
+    if (result.driverId === "__unassigned__" && !options.includeUnassigned) {
+      continue;
+    }
+
+    for (const stop of result.stops) {
+      if (stop.invoiceFile) continue;
+      if (skipInvoices.has(stop.invoiceNumber.toUpperCase())) continue;
+
+      missing.push({
+        invoiceNumber: stop.invoiceNumber,
+        customerName: stop.customerName,
+        driverName: result.driverName,
+        stopId: stop.id,
+      });
+    }
+  }
+
+  return missing;
 }

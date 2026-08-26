@@ -1,7 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
+
+import { FilterSearch } from "@/components/admin/FilterSearch";
+import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 
 interface InvoiceFile {
   name: string;
@@ -32,6 +35,8 @@ export default function InvoicesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"ALL" | "SIGNED" | "UNSIGNED">("ALL");
+  /** Free-text narrowing over the folder listing — see lib/search-match.ts. */
+  const [query, setQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const ITEMS_PER_PAGE = 20;
 
@@ -41,6 +46,14 @@ export default function InvoicesPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteMode, setDeleteMode] = useState<"original_only" | "both">("both");
   const [syncing, setSyncing] = useState(false);
+
+  // Upload — files land in the same folder this page lists, so a PDF added
+  // here is immediately available to match against a trip sheet.
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadResults, setUploadResults] = useState<
+    { name: string; ok: boolean; message: string }[]
+  >([]);
 
   const fetchInvoices = useCallback(() => {
     setLoading(true);
@@ -74,6 +87,39 @@ export default function InvoicesPage() {
       .finally(() => setSyncing(false));
   }, []);
 
+  /**
+   * Send PDFs to the invoice folder, one request each.
+   *
+   * Sequential rather than parallel: this is a handful of files at a time, and
+   * a serial run keeps the per-file result honest — a name clash on one file
+   * must not read as a failure of the batch.
+   */
+  const handleUploadInvoices = async (files: File[]) => {
+    setUploading(true);
+    setUploadResults([]);
+
+    const results: { name: string; ok: boolean; message: string }[] = [];
+    for (const file of files) {
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const res = await fetch("/api/invoices/upload", { method: "POST", body: formData });
+        const json = await res.json();
+        results.push(
+          res.ok
+            ? { name: file.name, ok: true, message: `saved as ${json.filename}` }
+            : { name: file.name, ok: false, message: json.error || "Upload failed" }
+        );
+      } catch {
+        results.push({ name: file.name, ok: false, message: "Upload failed" });
+      }
+    }
+
+    setUploadResults(results);
+    setUploading(false);
+    syncInvoices();
+  };
+
   useEffect(() => {
     fetchInvoices();
   }, [fetchInvoices]);
@@ -95,12 +141,23 @@ export default function InvoicesPage() {
     });
   };
 
-  // Apply filter to invoices
-  const filteredInvoices = data?.invoices.filter((inv) => {
+  // The pills come first and the search box narrows what they left, so the
+  // readout beside the field counts against the pill in force rather than
+  // against the whole folder.
+  const statusFiltered = data?.invoices.filter((inv) => {
     if (filter === "SIGNED") return inv.isSigned;
     if (filter === "UNSIGNED") return !inv.isSigned;
     return true;
   }) ?? [];
+
+  const queryTokens = useMemo(() => tokenizeQuery(query), [query]);
+
+  const filteredInvoices =
+    queryTokens.length === 0
+      ? statusFiltered
+      : statusFiltered.filter((inv) =>
+          matchesTokens(queryTokens, [inv.invoiceNumber, inv.filename, inv.name])
+        );
 
   // Pagination
   const totalPages = Math.max(1, Math.ceil(filteredInvoices.length / ITEMS_PER_PAGE));
@@ -112,6 +169,17 @@ export default function InvoicesPage() {
   // Reset to page 1 when filter changes
   const handleFilterChange = (f: "ALL" | "SIGNED" | "UNSIGNED") => {
     setFilter(f);
+    setCurrentPage(1);
+    setSelectedInvoices(new Set());
+  };
+
+  /**
+   * Narrowing the list drops the selection with it, exactly as the pills do.
+   * Otherwise Delete Selected would still be holding rows the query has since
+   * hidden, which is not what the count in the action bar implies.
+   */
+  const handleQueryChange = (next: string) => {
+    setQuery(next);
     setCurrentPage(1);
     setSelectedInvoices(new Set());
   };
@@ -150,6 +218,10 @@ export default function InvoicesPage() {
         dupeFiles.add(group.filenames[i]);
       }
     }
+    // Show what was just selected: a live query would otherwise leave most of
+    // it off-screen while the action bar counted it.
+    setQuery("");
+    setCurrentPage(1);
     setSelectedInvoices(dupeFiles);
   };
 
@@ -216,6 +288,32 @@ export default function InvoicesPage() {
             </svg>
             {syncing ? "Syncing…" : "Sync"}
           </button>
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept="application/pdf,.pdf"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              // Cleared so re-picking the same file still fires onChange.
+              e.target.value = "";
+              if (files.length > 0) handleUploadInvoices(files);
+            }}
+          />
+          <button
+            onClick={() => uploadInputRef.current?.click()}
+            disabled={uploading || loading}
+            title="Add invoice PDFs to the folder above"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono text-ink-muted bg-ink-card border border-ink-border rounded hover:text-ink-black hover:border-ink-black/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+            {uploading ? "Uploading…" : "Upload"}
+          </button>
         </div>
         {/* Filter pills */}
         <div className="flex gap-1 bg-ink-card border border-ink-border rounded p-0.5">
@@ -255,6 +353,30 @@ export default function InvoicesPage() {
         </div>
       )}
 
+      {/* Upload results — per file, since a name clash on one is not a failure
+          of the batch. */}
+      {uploadResults.length > 0 && (
+        <div className="mb-4 px-4 py-3 bg-ink-card border border-ink-border rounded space-y-1">
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-xs font-mono text-ink-muted">
+              Uploaded {uploadResults.filter((r) => r.ok).length} of {uploadResults.length}
+            </p>
+            <button
+              onClick={() => setUploadResults([])}
+              className="text-xs font-mono text-ink-muted hover:text-ink-black transition-colors"
+            >
+              Dismiss
+            </button>
+          </div>
+          {uploadResults.map((r) => (
+            <p key={r.name} className="text-[11px] font-mono flex items-center gap-2">
+              <span className="text-ink-muted truncate max-w-[280px]">{r.name}</span>
+              <span className={r.ok ? "text-ink-green" : "text-ink-red"}>{r.message}</span>
+            </p>
+          ))}
+        </div>
+      )}
+
       {/* Duplicate warning banner */}
       {data?.duplicates && data.duplicates.length > 0 && (
         <div className="flex items-center gap-3 mb-4 px-4 py-2.5 bg-ink-amber-dim border border-ink-amber/20 rounded">
@@ -276,6 +398,23 @@ export default function InvoicesPage() {
             </svg>
             Select Duplicates
           </button>
+        </div>
+      )}
+
+      {/* Search toolbar. Rendered above the empty state as well as the table —
+          a query that matches nothing would otherwise take its own clear
+          button off the page with it. */}
+      {!loading && !error && data && data.count > 0 && (
+        <div className="mb-4">
+          <FilterSearch
+            value={query}
+            onChange={handleQueryChange}
+            placeholder="Search invoice no. or filename…"
+            matchCount={filteredInvoices.length}
+            totalCount={statusFiltered.length}
+            noun="invoice"
+            shortcut
+          />
         </div>
       )}
 
@@ -312,15 +451,38 @@ export default function InvoicesPage() {
       {/* Filtered empty state */}
       {!loading && !error && data && data.count > 0 && filteredInvoices.length === 0 && (
         <div className="bg-ink-card border-2 border-dashed border-ink-border rounded p-12 text-center">
-          <div className="text-4xl mb-4">{filter === "SIGNED" ? "✍️" : "📋"}</div>
-          <p className="font-mono text-sm font-medium text-ink-black mb-2">
-            No {filter.toLowerCase()} invoices
-          </p>
-          <p className="text-xs text-ink-muted max-w-sm mx-auto">
-            {filter === "SIGNED"
-              ? "No invoices have been signed yet. Drivers will sign invoices during deliveries."
-              : "All invoices have been signed."}
-          </p>
+          <div className="text-4xl mb-4">
+            {queryTokens.length > 0 ? "🔍" : filter === "SIGNED" ? "✍️" : "📋"}
+          </div>
+          {queryTokens.length > 0 ? (
+            <>
+              <p className="font-mono text-sm font-medium text-ink-black mb-2">
+                Nothing matches “{query.trim()}”
+              </p>
+              <p className="text-xs text-ink-muted max-w-sm mx-auto">
+                {filter === "ALL"
+                  ? "No invoice number or filename in this folder contains every word."
+                  : `No ${filter.toLowerCase()} invoice matches — try the All pill above.`}
+              </p>
+              <button
+                onClick={() => handleQueryChange("")}
+                className="mt-4 px-3 py-1.5 text-xs font-mono text-ink-muted bg-ink-surface border border-ink-border rounded hover:text-ink-black hover:border-ink-black/30 transition-all"
+              >
+                Clear search
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="font-mono text-sm font-medium text-ink-black mb-2">
+                No {filter.toLowerCase()} invoices
+              </p>
+              <p className="text-xs text-ink-muted max-w-sm mx-auto">
+                {filter === "SIGNED"
+                  ? "No invoices have been signed yet. Drivers will sign invoices during deliveries."
+                  : "All invoices have been signed."}
+              </p>
+            </>
+          )}
         </div>
       )}
 

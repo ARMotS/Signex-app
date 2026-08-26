@@ -35,6 +35,9 @@ import {
   useSession,
   sessionMockFactory,
   req,
+  formReq,
+  pdfFile,
+  tripSheetCsv,
   params,
   type Fixtures,
 } from "./helpers/fixtures";
@@ -616,7 +619,10 @@ suite("cross-ADMIN isolation", () => {
       expect(await getCloudAccountStatus(f.a.tenantId)).toBeNull();
       expect(await getCloudAccountStatus(f.b.tenantId)).not.toBeNull();
 
-      // Restore for any later test.
+      // Restore for any later test — the SAME row seedFixtures built, folder
+      // paths included. Leaving those two null made scope A silently differ
+      // from scope B for the rest of the file, which is exactly the kind of
+      // order-dependence that makes a later failure look like a product bug.
       const { encryptToken } = await import("@/lib/crypto");
       await db().cloudAccount.create({
         data: {
@@ -627,7 +633,9 @@ suite("cross-ADMIN isolation", () => {
           refreshToken: encryptToken("refresh-token-A"),
           tokenExpiry: new Date(Date.now() + 3_600_000),
           folderItemId: "folder-item-A",
+          folderPath: "/TripSheets-A",
           invoiceFolderItemId: "invoice-folder-A",
+          invoiceFolderPath: "/Invoices-A",
           tenantId: f.a.tenantId,
         },
       });
@@ -2019,6 +2027,202 @@ suite("cross-ADMIN isolation", () => {
       expect(row?.emailRelinkedAt).toBeNull();
 
       await db().stop.delete({ where: { id: stop.id } });
+    });
+  });
+
+  // ── Missing invoices on deploy ───────────────────────────────────────
+  //
+  // A stop is never deployed without its invoice PDF: the signature is embedded
+  // ON the invoice, so a stop without one leaves no physical record of the
+  // delivery. These tests hold that as a rule rather than a prompt — it cannot
+  // be switched off by a request, and it is decided inside the caller's own
+  // scope, against the caller's own invoice folder.
+  //
+  // The stubbed Graph returns an empty folder to everyone, so every invoice
+  // named on a sheet is missing here. That is the case under test.
+  describe("missing invoices", () => {
+    const deployForm = (
+      driverName: string,
+      extra: Record<string, string> = {}
+    ) => {
+      const form = new FormData();
+      form.append("file", tripSheetCsv(driverName, "INV-2001"));
+      form.append("action", "deploy");
+      for (const [key, value] of Object.entries(extra)) form.append(key, value);
+      return form;
+    };
+
+    it("refuses the deploy and writes nothing", async () => {
+      const { POST } = await import("@/app/api/trip-sheet/route");
+      useSession(adminSession(f.a));
+
+      const before = await db().tripSheet.count({
+        where: { tenantId: f.a.tenantId },
+      });
+
+      const res = await POST(
+        formReq("/api/trip-sheet", deployForm(f.a.driver.name))
+      );
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body.code).toBe("MISSING_INVOICES");
+      expect(
+        body.missingInvoices.map((m: { invoiceNumber: string }) => m.invoiceNumber)
+      ).toEqual(["INV-2001"]);
+
+      expect(
+        await db().tripSheet.count({ where: { tenantId: f.a.tenantId } })
+      ).toBe(before);
+    });
+
+    it("cannot be overridden from the request", async () => {
+      // There is deliberately no escape hatch. If this test ever fails,
+      // someone has reintroduced one — see CLAUDE.md, "Missing Invoices".
+      const { POST } = await import("@/app/api/trip-sheet/route");
+      useSession(adminSession(f.a));
+
+      const overrideAttempts: Record<string, string>[] = [
+        { allowMissing: "true" },
+        { allowMissing: "1" },
+        { force: "true" },
+      ];
+
+      for (const extra of overrideAttempts) {
+        const res = await POST(
+          formReq("/api/trip-sheet", deployForm(f.a.driver.name, extra))
+        );
+        expect(res.status).toBe(409);
+      }
+    });
+
+    it("lets the deploy through once the stop is skipped", async () => {
+      // Skipping drops the stop from the run entirely, so nothing goes out
+      // unrecorded — which is why it is an acceptable way past the gate.
+      const { POST } = await import("@/app/api/trip-sheet/route");
+      useSession(adminSession(f.a));
+
+      const res = await POST(
+        formReq(
+          "/api/trip-sheet",
+          deployForm(f.a.driver.name, {
+            skipInvoices: JSON.stringify(["INV-2001"]),
+          })
+        )
+      );
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.deployed).toBe(true);
+      expect(body.totalStops).toBe(0);
+    });
+
+    it("decides the gate in the caller's own scope", async () => {
+      // Both scopes have a driver of this name and a stop with this invoice
+      // number, so the refusal can only name the right driver by scoping.
+      const { POST } = await import("@/app/api/trip-sheet/route");
+      useSession(adminSession(f.b));
+
+      const res = await POST(
+        formReq("/api/trip-sheet", deployForm(f.b.driver.name))
+      );
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body.missingInvoices).toHaveLength(1);
+      expect(body.missingInvoices[0].driverName).toBe(f.b.driver.name);
+
+      // B being refused wrote nothing into A.
+      expect(
+        await db().tripSheet.count({ where: { tenantId: f.a.tenantId } })
+      ).toBe(1);
+    });
+  });
+
+  // ── Invoice upload ───────────────────────────────────────────────────
+  //
+  // Uploading is how a dispatcher resolves a missing invoice, so it writes into
+  // the invoice folder the parser reads from. Which folder that is must come
+  // from the session and nothing else.
+  describe("invoice upload", () => {
+    it("tells each ADMIN only their own destination", async () => {
+      const { GET } = await import("@/app/api/invoices/upload/route");
+
+      useSession(adminSession(f.a));
+      const a = await (await GET(req("/api/invoices/upload"))).json();
+
+      useSession(adminSession(f.b));
+      const b = await (await GET(req("/api/invoices/upload"))).json();
+
+      expect(a.destination).toContain("Invoices-A");
+      expect(a.destination).not.toContain("Invoices-B");
+      expect(b.destination).toContain("Invoices-B");
+      expect(b.destination).not.toContain("Invoices-A");
+    });
+
+    it("is closed to drivers", async () => {
+      const { POST } = await import("@/app/api/invoices/upload/route");
+      useSession(driverSession(f.a));
+
+      const form = new FormData();
+      form.append("file", pdfFile("INV-3001.pdf"));
+
+      expect((await POST(formReq("/api/invoices/upload", form))).status).toBe(403);
+    });
+
+    it("writes with the caller's own token, into the caller's own folder", async () => {
+      const { POST } = await import("@/app/api/invoices/upload/route");
+      useSession(adminSession(f.a));
+
+      const form = new FormData();
+      form.append("file", pdfFile("INV-3001.pdf"));
+      // The stub answers 200 to everything, so the existence probe would read
+      // as a clash. Overwrite takes the test past it, to the write itself.
+      form.append("overwrite", "true");
+
+      expect((await POST(formReq("/api/invoices/upload", form))).status).toBe(200);
+
+      const writes = graphCalls.filter((c) => c.url.includes("/content"));
+      expect(writes.length).toBeGreaterThan(0);
+      for (const call of writes) {
+        expect(call.token).toBe("access-token-A");
+        expect(call.url).toContain("invoice-folder-A");
+        expect(call.url).not.toContain("invoice-folder-B");
+      }
+    });
+
+    it("names the saved file after the invoice number, not the upload", async () => {
+      // Matching is by filename, so a scan stored under its camera name would
+      // leave the stop exactly as unmatched as it was.
+      const { POST } = await import("@/app/api/invoices/upload/route");
+      useSession(adminSession(f.a));
+
+      const form = new FormData();
+      form.append("file", pdfFile("scan_0042.pdf"));
+      form.append("invoiceNumber", "INV-2001");
+      form.append("overwrite", "true");
+
+      const body = await (
+        await POST(formReq("/api/invoices/upload", form))
+      ).json();
+
+      expect(body.filename).toBe("INV-2001.pdf");
+    });
+
+    it("refuses a non-PDF however it is named, without reaching Graph", async () => {
+      const { POST } = await import("@/app/api/invoices/upload/route");
+      useSession(adminSession(f.a));
+
+      const form = new FormData();
+      form.append(
+        "file",
+        new File([Buffer.from("PK a zip in disguise")], "INV-4.pdf", {
+          type: "application/pdf",
+        })
+      );
+
+      expect((await POST(formReq("/api/invoices/upload", form))).status).toBe(400);
+      expect(graphCalls.filter((c) => c.url.includes("/content"))).toHaveLength(0);
     });
   });
 });

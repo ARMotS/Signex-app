@@ -29,6 +29,7 @@ import {
   downloadInvoiceByName,
   deleteFileById,
   uploadSignedInvoiceToOneDrive,
+  uploadFileToFolder,
 } from "./microsoft-graph";
 
 /** Default fallback folder (relative to project root) */
@@ -564,4 +565,192 @@ export async function findDuplicateInvoices(
   }
 
   return duplicates;
+}
+
+// ─── Uploading an invoice ─────────────────────────────────────────────────
+//
+// A trip sheet routinely arrives before the PDFs it refers to. Rather than
+// leave the dispatcher to open the sync folder in Explorer and drop the file in
+// by hand — on a machine that may not be the one running Signex — the missing
+// invoice can be uploaded from the import screen. It is written to whatever
+// this scope reads its invoices from: the connected OneDrive folder, or the
+// locally synced folder configured in Settings. Uploading anywhere else would
+// produce a file the parser cannot see.
+
+/** Largest single invoice PDF accepted. Matches the trip sheet upload cap. */
+export const MAX_INVOICE_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+export interface InvoiceDestination {
+  kind: "onedrive" | "local";
+  /** Human-readable location, shown to the admin after a save */
+  label: string;
+  /** OneDrive folder item id — set when kind === "onedrive" */
+  folderItemId?: string;
+  /** Absolute local folder path — set when kind === "local" */
+  folderPath?: string;
+}
+
+/**
+ * Where a newly uploaded invoice would land for this scope.
+ *
+ * Deliberately mirrors the resolution order in `listInvoiceFiles` /
+ * `readInvoiceFile`: OneDrive first, then the configured local folder. Writing
+ * and reading must resolve identically or an upload would appear to succeed and
+ * then never match.
+ */
+export async function getInvoiceUploadDestination(
+  tenantId: string
+): Promise<InvoiceDestination> {
+  const onedrive = await getOneDriveInvoiceSource(tenantId);
+  if (onedrive?.folderItemId) {
+    return {
+      kind: "onedrive",
+      label: `OneDrive: ${onedrive.folderPath || "invoice folder"}`,
+      folderItemId: onedrive.folderItemId,
+    };
+  }
+
+  const folderPath = await getInvoiceFolderPath(tenantId);
+  return { kind: "local", label: folderPath, folderPath };
+}
+
+/** Characters Windows refuses in a filename, plus the path separators. */
+const ILLEGAL_FILENAME_CHARS = /[<>:"|?*\\/]/g;
+
+/**
+ * Reduce a caller-supplied name to a safe invoice filename, or null if nothing
+ * usable is left.
+ *
+ * The name reaches us from a form field, so it gets the same treatment as the
+ * filenames handed to Graph path addressing: no separators, no traversal, no
+ * control characters. The `.pdf` suffix is enforced because the invoice folder
+ * listing only considers PDFs — a file saved without it would be invisible to
+ * the very matching this upload exists to satisfy.
+ */
+export function sanitizeInvoiceFilename(raw: string): string | null {
+  const base = String(raw ?? "")
+    .split(/[\\/]/)
+    .pop() ?? "";
+
+  const stripped = Array.from(base.trim())
+    .filter((ch) => ch.charCodeAt(0) >= 32 && ch.charCodeAt(0) !== 127)
+    .join("")
+    .replace(ILLEGAL_FILENAME_CHARS, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!stripped || stripped === "." || stripped === "..") return null;
+
+  const withoutExt = stripped.replace(/\.pdf$/i, "").replace(/\.+$/, "").trim();
+  if (!withoutExt) return null;
+
+  return `${withoutExt.slice(0, 180)}.pdf`;
+}
+
+/**
+ * The filename an invoice number should be saved under so the trip sheet
+ * parser will match it back. Both sides are normalized before comparison, so
+ * naming the file after the number as written on the sheet is enough.
+ */
+export function invoiceFilenameForNumber(invoiceNumber: string): string | null {
+  return sanitizeInvoiceFilename(invoiceNumber);
+}
+
+/**
+ * Cheap content check — the extension alone is caller-controlled.
+ * Some producers emit a few bytes of preamble before the header, so the whole
+ * first block is searched rather than only offset 0.
+ */
+export function looksLikePdf(buffer: Buffer): boolean {
+  return buffer.subarray(0, 1024).includes("%PDF-");
+}
+
+export interface SaveInvoiceResult {
+  success: boolean;
+  /** The name the file was actually stored under */
+  filename?: string;
+  /** Where it landed, for display */
+  location?: string;
+  /** True when a file of that name already existed and overwrite was not set */
+  conflict?: boolean;
+  error?: string;
+}
+
+/**
+ * Write an invoice PDF into this scope's invoice folder.
+ *
+ * Never overwrites silently: an invoice number is an identifier, and quietly
+ * replacing the PDF behind one would change what a driver is about to present
+ * at the door. A conflict comes back for the caller to confirm.
+ */
+export async function saveInvoiceFile(
+  tenantId: string,
+  filename: string,
+  buffer: Buffer,
+  options: { overwrite?: boolean } = {}
+): Promise<SaveInvoiceResult> {
+  const safe = sanitizeInvoiceFilename(filename);
+  if (!safe) {
+    return { success: false, error: "Invalid filename" };
+  }
+
+  const dest = await getInvoiceUploadDestination(tenantId);
+
+  if (dest.kind === "onedrive") {
+    try {
+      if (!options.overwrite) {
+        const existing = await getInvoiceItemByName(tenantId, safe);
+        if (existing) {
+          return {
+            success: false,
+            conflict: true,
+            filename: safe,
+            error: `"${safe}" already exists in the invoice folder`,
+          };
+        }
+      }
+
+      await uploadFileToFolder(
+        tenantId,
+        dest.folderItemId!,
+        safe,
+        buffer,
+        "application/pdf"
+      );
+      return { success: true, filename: safe, location: dest.label };
+    } catch (err) {
+      console.error(`Failed to upload invoice ${safe} to OneDrive:`, err);
+      return { success: false, error: "Failed to upload to OneDrive" };
+    }
+  }
+
+  const folderPath = dest.folderPath!;
+  const resolvedFolder = path.resolve(folderPath);
+  const resolved = path.resolve(path.join(folderPath, safe));
+
+  // Belt and braces: sanitizeInvoiceFilename has already removed separators.
+  if (path.dirname(resolved) !== resolvedFolder) {
+    return { success: false, error: "Invalid filename — directory traversal detected" };
+  }
+
+  try {
+    if (!fs.existsSync(resolvedFolder)) {
+      fs.mkdirSync(resolvedFolder, { recursive: true });
+    }
+
+    if (!options.overwrite && fs.existsSync(resolved)) {
+      return {
+        success: false,
+        conflict: true,
+        filename: safe,
+        error: `"${safe}" already exists in the invoice folder`,
+      };
+    }
+
+    fs.writeFileSync(resolved, buffer);
+    return { success: true, filename: safe, location: dest.label };
+  } catch (err) {
+    console.error(`Failed to save invoice ${safe} to ${folderPath}:`, err);
+    return { success: false, error: "Failed to write to the invoice folder" };
+  }
 }
