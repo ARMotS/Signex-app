@@ -43,6 +43,7 @@ function hashSecret(secret: string): string {
 export async function resetDatabase() {
   const p = db();
   // Order matters: children before parents.
+  await p.collection.deleteMany();
   await p.stop.deleteMany();
   await p.tripSheet.deleteMany();
   await p.completedTripSheet.deleteMany();
@@ -66,6 +67,7 @@ export interface ScopeFixture {
   contact: { id: string; companyName: string };
   tripSheet: { id: string };
   stop: { id: string; invoiceNumber: string };
+  collection: { id: string; collectionNo: string };
 }
 
 export interface Fixtures {
@@ -76,8 +78,9 @@ export interface Fixtures {
 
 /**
  * Build two independent scopes with deliberately COLLIDING data — the same
- * driver name, the same company name, the same invoice number — so that any test
- * which passes could only pass because of scoping, not because the values differ.
+ * driver name, the same company name, the same invoice number, the same
+ * collection number — so that any test which passes could only pass because of
+ * scoping, not because the values differ.
  */
 export async function seedFixtures(): Promise<Fixtures> {
   const p = db();
@@ -183,6 +186,23 @@ export async function seedFixtures(): Promise<Fixtures> {
       select: { id: true, invoiceNumber: true },
     });
 
+    // Same collection number in both scopes, for the same reason the invoice
+    // number is the same: collection numbers are sequential per company, so a
+    // collision across scopes is the normal case.
+    const collection = await p.collection.create({
+      data: {
+        collectionNo: "COL-500",
+        type: "CREDIT_RETURN",
+        originalInvoiceNo: "INV-1001",
+        expectedQty: 2,
+        sourceFilePath: `COL-500-${label}.pdf`,
+        tripSheetId: tripSheet.id,
+        stopId: stop.id,
+        tenantId: tenant.id,
+      },
+      select: { id: true, collectionNo: true },
+    });
+
     await p.cloudAccount.create({
       data: {
         provider: "onedrive",
@@ -195,6 +215,8 @@ export async function seedFixtures(): Promise<Fixtures> {
         folderPath: `/TripSheets-${label}`,
         invoiceFolderItemId: `invoice-folder-${label}`,
         invoiceFolderPath: `/Invoices-${label}`,
+        collectionsFolderItemId: `collections-folder-${label}`,
+        collectionsFolderPath: `/Collections-${label}`,
         tenantId: tenant.id,
       },
     });
@@ -211,10 +233,15 @@ export async function seedFixtures(): Promise<Fixtures> {
           key: "tripSheetFolderPath",
           value: `C:\\TripSheets-${label}`,
         },
+        {
+          tenantId: tenant.id,
+          key: "collectionsFolderPath",
+          value: `C:\\Collections-${label}`,
+        },
       ],
     });
 
-    return { tenantId: tenant.id, admin, driver, contact, tripSheet, stop };
+    return { tenantId: tenant.id, admin, driver, contact, tripSheet, stop, collection };
   };
 
   const a = await build("A");
@@ -378,6 +405,24 @@ export function tripSheetCsv(
   const csv = [
     "Date,Driver,REGNO,Customer,INVOICENO,NOP",
     `2026-08-26,${driverName},${regNo},Acme Trading,${invoiceNumber},3`,
+  ].join("\n");
+  return new File([csv], "run.csv", { type: "text/csv" });
+}
+
+/**
+ * A trip sheet CSV carrying a delivery and a collection at the same customer.
+ * Used to prove a deployed collection lands in the uploader's scope and nowhere
+ * else.
+ */
+export function tripSheetCsvWithCollection(
+  driverName: string,
+  invoiceNumber: string,
+  collectionNo: string,
+  regNo: string = "REG-X"
+): File {
+  const csv = [
+    "Date,Driver,REGNO,Customer,INVOICENO,COLLECTNO,COLLECTTYPE,NOP",
+    `2026-08-26,${driverName},${regNo},Acme Trading,${invoiceNumber},${collectionNo},Credit Return,3`,
   ].join("\n");
   return new File([csv], "run.csv", { type: "text/csv" });
 }

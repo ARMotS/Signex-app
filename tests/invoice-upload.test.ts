@@ -110,6 +110,7 @@ function driverResult(overrides: Partial<MatchResult> = {}): MatchResult {
     regNo: "CA 123-456",
     stops: [],
     unmatchedInvoices: [],
+    unmatchedCollections: [],
     ...overrides,
   };
 }

@@ -11,14 +11,51 @@
 import { scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
 import { StopStatus as PrismaStopStatus } from "@prisma/client";
+import type {
+  CollectionStatus,
+  CollectionType,
+  UpliftSubtype,
+} from "@prisma/client";
+import { isTerminalStatus } from "./collections";
 import { moveToProcessed } from "./trip-sheet-folder";
 import { mapWithConcurrency } from "./concurrency";
 
 export type StopStatus = "PENDING" | "IN_PROGRESS" | "SIGNED";
 
+/**
+ * One collection hanging off a stop.
+ *
+ * A collection is the mirror image of a delivery: goods going back with the
+ * driver, signed for the same way. It lives on the stop rather than beside it
+ * so a driver sees one visit to one address with two lists — Deliveries and
+ * Collections — instead of two unrelated jobs at the same place.
+ */
+export interface TripCollection {
+  id: string;
+  collectionNo: string;
+  type: CollectionType;
+  upliftSubtype?: UpliftSubtype | null;
+  notes?: string | null;
+  originalInvoiceNo?: string | null;
+  status: CollectionStatus | string;
+  exceptionReason?: string | null;
+  expectedQty?: number | null;
+  collectedQty?: number | null;
+  /** The pending document matched out of Collections/Pending, if any */
+  sourceFileId?: string | null;
+  sourceFilePath?: string | null;
+  /** The stamped output in Collections/Signed, once the driver has closed it */
+  signedFileId?: string | null;
+  signedFilePath?: string | null;
+  signedByName?: string | null;
+  collectedAt?: Date | null;
+  driverId?: string | null;
+}
+
 export interface TripStop {
   id: string;
   stopNumber: number;
+  /** Empty on a collection-only stop — nothing is being delivered there. */
   invoiceNumber: string;
   customerName: string;
   address: string;
@@ -31,6 +68,7 @@ export interface TripStop {
   emailError?: string | null;
   emailAttempts?: number;
   contact?: { email?: string | null };
+  collections?: TripCollection[];
 }
 
 export interface TripSheet {
@@ -56,6 +94,34 @@ export interface ArchivedStop {
   emailStatus: string;
 }
 
+/**
+ * One frozen collection inside a CompletedTripSheet.collections snapshot.
+ *
+ * Carries both file references on purpose. The Collection row cascades away
+ * with the trip sheet, so this is the only record left of where the stamped PDF
+ * and the original document went — and the archive view offers both. A
+ * NOT_AVAILABLE collection has no signed file and still belongs here: "we went
+ * and it was not there" is part of a complete record.
+ */
+export interface ArchivedCollection {
+  collectionNo: string;
+  type: string;
+  upliftSubtype: string | null;
+  originalInvoiceNo: string | null;
+  status: string;
+  exceptionReason: string | null;
+  notes: string | null;
+  expectedQty: number | null;
+  collectedQty: number | null;
+  customerName: string;
+  stopNumber: number | null;
+  signedByName: string | null;
+  collectedAt: string | null;
+  sourceFilePath: string | null;
+  signedFileId: string | null;
+  signedFilePath: string | null;
+}
+
 export interface CompletedTripSheet {
   id: string;
   tripSheetId: string;
@@ -70,7 +136,10 @@ export interface CompletedTripSheet {
   completedBy: string | null;
   totalStops: number;
   signedStops: number;
+  totalCollections: number;
+  collectedCollections: number;
   stops: ArchivedStop[];
+  collections: ArchivedCollection[];
 }
 
 // ─── Trip Sheet Operations ────────────────────────────────────────────────
@@ -87,7 +156,7 @@ export async function saveTripSheet(
     regNo: string;
     uploadedBy: string;
     sourceFilename: string;
-    stops: Omit<TripStop, "id">[];
+    stops: (Omit<TripStop, "id"> & { collections?: Omit<TripCollection, "id">[] })[];
   }
 ): Promise<TripSheet> {
   const db = scopedPrisma(tenantId);
@@ -120,12 +189,66 @@ export async function saveTripSheet(
     orderBy: { stopNumber: "asc" },
   });
 
+  // Collections are written after the stops rather than nested inside them:
+  // Collection carries composite foreign keys to BOTH the trip sheet and the
+  // stop, and a nested create under Stop has no way to name the trip sheet that
+  // is being created in the same statement. Stop numbers are unique within a
+  // sheet (the deploy route renumbers them), so they are what the preview rows
+  // are joined back to their persisted stops by.
+  const stopIdByNumber = new Map(stops.map((s) => [s.stopNumber, s.id]));
+
+  for (const stop of trip.stops) {
+    if ((stop.collections?.length ?? 0) > 0 && !stopIdByNumber.has(stop.stopNumber)) {
+      // Both deploy paths renumber stops 1..n before calling this, so a stop
+      // number that does not come back is a caller bug. Saying so beats writing
+      // a collection with no stop, or dropping it silently — a collection the
+      // driver never sees is goods left at a customer with no record.
+      throw new Error(
+        `saveTripSheet: stop number ${stop.stopNumber} carries collections but did not persist — stop numbers must be unique within a sheet`
+      );
+    }
+  }
+
+  const collectionRows = trip.stops.flatMap((stop) =>
+    (stop.collections ?? []).map((collection) => ({
+      collectionNo: collection.collectionNo,
+      type: collection.type,
+      upliftSubtype: collection.upliftSubtype ?? null,
+      notes: collection.notes ?? null,
+      originalInvoiceNo: collection.originalInvoiceNo ?? null,
+      exceptionReason: null,
+      expectedQty: collection.expectedQty ?? null,
+      sourceFileId: collection.sourceFileId ?? null,
+      sourceFilePath: collection.sourceFilePath ?? null,
+      tripSheetId: created.id,
+      stopId: stopIdByNumber.get(stop.stopNumber)!,
+    }))
+  );
+
+  let collections: Awaited<ReturnType<typeof db.collection.findMany>> = [];
+  if (collectionRows.length > 0) {
+    await db.collection.createMany({ data: collectionRows });
+    collections = await db.collection.findMany({
+      where: { tripSheetId: created.id },
+      orderBy: { collectionNo: "asc" },
+    });
+  }
+
+  const collectionsByStop = new Map<string, typeof collections>();
+  for (const collection of collections) {
+    const existing = collectionsByStop.get(collection.stopId) || [];
+    existing.push(collection);
+    collectionsByStop.set(collection.stopId, existing);
+  }
+
   await logAudit({
     action: "UPLOAD",
     entity: "trip_sheet",
     entityId: created.id,
     userName: trip.uploadedBy,
-    details: `Trip sheet deployed: ${trip.sourceFilename} for driver ${trip.driverName} (${trip.stops.length} stops)`,
+    details: `Trip sheet deployed: ${trip.sourceFilename} for driver ${trip.driverName} (${trip.stops.length} stops${
+      collectionRows.length ? `, ${collectionRows.length} collections` : ""
+    })`,
     tenantId,
   });
 
@@ -138,7 +261,9 @@ export async function saveTripSheet(
     uploadedAt: created.date,
     uploadedBy: created.uploadedBy,
     sourceFilename: created.sourceFilename,
-    stops: stops.map(mapStop),
+    stops: stops.map((s) =>
+      mapStop({ ...s, collections: collectionsByStop.get(s.id) })
+    ),
   };
 }
 
@@ -163,7 +288,14 @@ export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
     db.stop.findMany({
       where: { tripSheetId: { in: trips.map((t) => t.id) } },
       orderBy: { stopNumber: "asc" },
-      include: { contact: { select: { email: true } } },
+      include: {
+        contact: { select: { email: true } },
+        // A stop's collections travel with it everywhere a stop is read. The
+        // driver's run sheet, the dispatcher's trip view and the completion
+        // guard all need them, and a stop whose collections were silently
+        // absent would look finished when it is not.
+        collections: { orderBy: { collectionNo: "asc" } },
+      },
     }),
   ]);
 
@@ -211,7 +343,14 @@ export async function getTripSheet(
     db.stop.findMany({
       where: { tripSheetId: trip.id },
       orderBy: { stopNumber: "asc" },
-      include: { contact: { select: { email: true } } },
+      include: {
+        contact: { select: { email: true } },
+        // A stop's collections travel with it everywhere a stop is read. The
+        // driver's run sheet, the dispatcher's trip view and the completion
+        // guard all need them, and a stop whose collections were silently
+        // absent would look finished when it is not.
+        collections: { orderBy: { collectionNo: "asc" } },
+      },
     }),
   ]);
 
@@ -252,7 +391,14 @@ export async function getTripSheetsForDriver(
     db.stop.findMany({
       where: { tripSheetId: { in: trips.map((t) => t.id) } },
       orderBy: { stopNumber: "asc" },
-      include: { contact: { select: { email: true } } },
+      include: {
+        contact: { select: { email: true } },
+        // A stop's collections travel with it everywhere a stop is read. The
+        // driver's run sheet, the dispatcher's trip view and the completion
+        // guard all need them, and a stop whose collections were silently
+        // absent would look finished when it is not.
+        collections: { orderBy: { collectionNo: "asc" } },
+      },
     }),
   ]);
 
@@ -419,6 +565,29 @@ export async function completeTripSheet(
       };
     }
 
+    // A stop is not finished until everything at that address is finished —
+    // every invoice signed AND every collection given a final outcome. Closing
+    // out a trip with a collection still PENDING would delete the row and leave
+    // goods the customer believes were taken with no record at all, because the
+    // archive below can only freeze what it can see.
+    const collections = await db.collection.findMany({
+      where: { tripSheetId: tripId },
+      orderBy: { collectionNo: "asc" },
+    });
+
+    const outstanding = collections.filter((c) => !isTerminalStatus(c.status));
+    if (outstanding.length > 0) {
+      return {
+        success: false,
+        error: `Cannot complete: ${outstanding.length} collection(s) have no outcome yet (${outstanding
+          .slice(0, 3)
+          .map((c) => c.collectionNo)
+          .join(", ")}${outstanding.length > 3 ? "…" : ""})`,
+      };
+    }
+
+    const stopById = new Map(stops.map((s) => [s.id, s]));
+
     const driver = await db.driver.findFirst({ where: { id: trip.driverId } });
 
     // Move source file to processed/ subfolder — in this scope's own folder or
@@ -454,6 +623,10 @@ export async function completeTripSheet(
         completedBy: completedBy ?? null,
         totalStops: stops.length,
         signedStops: stops.filter((s) => s.status === "SIGNED").length,
+        totalCollections: collections.length,
+        collectedCollections: collections.filter(
+          (c) => c.status === "COLLECTED" || c.status === "PARTIAL"
+        ).length,
         stops: stops.map((s) => ({
           stopNumber: s.stopNumber,
           invoiceNumber: s.invoiceNumber,
@@ -463,6 +636,33 @@ export async function completeTripSheet(
           signedAt: s.signedAt ? s.signedAt.toISOString() : null,
           emailStatus: s.emailStatus,
         })),
+        // Frozen for the same reason the stops are, and carrying both file
+        // references: the Collection rows cascade away with the trip sheet
+        // below, so this is the whole record the archive view and the
+        // credit-return report read afterwards. The PDFs themselves stay in
+        // Collections/Signed permanently — nothing is moved or deleted when a
+        // trip closes.
+        collections: collections.map((c) => {
+          const stop = stopById.get(c.stopId);
+          return {
+            collectionNo: c.collectionNo,
+            type: c.type,
+            upliftSubtype: c.upliftSubtype,
+            originalInvoiceNo: c.originalInvoiceNo,
+            status: c.status,
+            exceptionReason: c.exceptionReason,
+            notes: c.notes,
+            expectedQty: c.expectedQty,
+            collectedQty: c.collectedQty,
+            customerName: stop?.customerName ?? "Unknown",
+            stopNumber: stop?.stopNumber ?? null,
+            signedByName: c.signedByName,
+            collectedAt: c.collectedAt ? c.collectedAt.toISOString() : null,
+            sourceFilePath: c.sourceFilePath,
+            signedFileId: c.signedFileId,
+            signedFilePath: c.signedFilePath,
+          };
+        }),
       },
     });
 
@@ -474,7 +674,9 @@ export async function completeTripSheet(
       entity: "trip_sheet",
       entityId: tripId,
       userName: trip.uploadedBy,
-      details: `Trip sheet completed for driver ${driver?.name || "Unknown"} (${stops.length} stops, all signed)${
+      details: `Trip sheet completed for driver ${driver?.name || "Unknown"} (${stops.length} stops, all signed${
+        collections.length ? `; ${collections.length} collections closed out` : ""
+      })${
         trip.sourceFilename
           ? archivedFile
             ? ` — archived ${trip.sourceFilename} to processed/`
@@ -592,9 +794,16 @@ export async function getCompletedTripSheets(
     completedBy: r.completedBy,
     totalStops: r.totalStops,
     signedStops: r.signedStops,
+    totalCollections: r.totalCollections,
+    collectedCollections: r.collectedCollections,
     // Written by completeTripSheet above and never updated, so the shape is
     // ours — but it is still JSON coming back out of the database.
     stops: Array.isArray(r.stops) ? (r.stops as unknown as ArchivedStop[]) : [],
+    // Null on every trip archived before collections existed, which reads
+    // correctly as "this trip had none".
+    collections: Array.isArray(r.collections)
+      ? (r.collections as unknown as ArchivedCollection[])
+      : [],
   }));
 }
 
@@ -648,6 +857,7 @@ function mapStop(stop: {
   emailError?: string | null;
   emailAttempts?: number;
   contact?: { email: string | null } | null;
+  collections?: RawCollection[] | null;
 }): TripStop {
   return {
     id: stop.id,
@@ -664,5 +874,265 @@ function mapStop(stop: {
     emailError: stop.emailError,
     emailAttempts: stop.emailAttempts,
     contact: stop.contact ? { email: stop.contact.email } : undefined,
+    collections: stop.collections ? stop.collections.map(mapCollection) : undefined,
   };
+}
+
+/** The Collection columns mapStop is handed, whichever query loaded them. */
+interface RawCollection {
+  id: string;
+  collectionNo: string;
+  type: CollectionType;
+  upliftSubtype: UpliftSubtype | null;
+  notes: string | null;
+  originalInvoiceNo: string | null;
+  status: CollectionStatus;
+  exceptionReason: string | null;
+  expectedQty: number | null;
+  collectedQty: number | null;
+  sourceFileId: string | null;
+  sourceFilePath: string | null;
+  signedFileId: string | null;
+  signedFilePath: string | null;
+  signedByName: string | null;
+  collectedAt: Date | null;
+  driverId: string | null;
+}
+
+/**
+ * Note what is deliberately NOT mapped: `signature`. It is a full-size PNG data
+ * URL and every stop list would otherwise carry one per collection, over a
+ * mobile connection, for a payload nothing on those screens renders.
+ */
+function mapCollection(collection: RawCollection): TripCollection {
+  return {
+    id: collection.id,
+    collectionNo: collection.collectionNo,
+    type: collection.type,
+    upliftSubtype: collection.upliftSubtype,
+    notes: collection.notes,
+    originalInvoiceNo: collection.originalInvoiceNo,
+    status: collection.status,
+    exceptionReason: collection.exceptionReason,
+    expectedQty: collection.expectedQty,
+    collectedQty: collection.collectedQty,
+    sourceFileId: collection.sourceFileId,
+    sourceFilePath: collection.sourceFilePath,
+    signedFileId: collection.signedFileId,
+    signedFilePath: collection.signedFilePath,
+    signedByName: collection.signedByName,
+    collectedAt: collection.collectedAt,
+    driverId: collection.driverId,
+  };
+}
+
+// ─── Collections reporting ────────────────────────────────────────────────
+//
+// Accounts reconciles credit returns from two places, because a collection has
+// two lives. While its trip is open it is a Collection row; once the trip is
+// closed out the row cascades away and it survives as a frozen entry in that
+// trip's CompletedTripSheet.collections snapshot.
+//
+// Merging them here rather than at each call site is what keeps "credit returns
+// in September" from silently meaning "credit returns in September on trips
+// nobody has closed yet" — which, at the end of a month, is almost none of them.
+
+/** One collection as the dispatcher and accounts see it, live or archived. */
+export interface CollectionRecord {
+  /** Null once the trip is closed — the row is gone and this is a snapshot. */
+  id: string | null;
+  collectionNo: string;
+  type: string;
+  upliftSubtype: string | null;
+  originalInvoiceNo: string | null;
+  status: string;
+  exceptionReason: string | null;
+  notes: string | null;
+  expectedQty: number | null;
+  collectedQty: number | null;
+  customerName: string;
+  stopNumber: number | null;
+  signedByName: string | null;
+  collectedAt: Date | null;
+  sourceFilePath: string | null;
+  signedFileId: string | null;
+  signedFilePath: string | null;
+  driverId: string | null;
+  driverName: string | null;
+  /** The live trip sheet, or the archived trip's original id. */
+  tripSheetId: string;
+  /** True when this came out of a CompletedTripSheet snapshot. */
+  archived: boolean;
+  /** The archive row it came from, for linking back to the completed trip. */
+  completedTripSheetId: string | null;
+}
+
+export interface CollectionQuery {
+  type?: CollectionType;
+  status?: CollectionStatus;
+  /** Inclusive lower bound on collectedAt (archived rows included by trip). */
+  since?: Date;
+  /** Exclusive upper bound. */
+  until?: Date;
+  driverId?: string;
+  tripSheetId?: string;
+  /** Default true. Set false for "what is still outstanding today". */
+  includeArchived?: boolean;
+  /** Default false — only collections that reached an outcome. */
+  onlyCompleted?: boolean;
+  limit?: number;
+}
+
+/**
+ * Read collections across the live trips and the archive.
+ *
+ * The date bound is applied to `collectedAt` on both sides — the moment the
+ * driver closed it out, not the moment the trip was archived, because a trip
+ * closed on Monday can contain a collection made on Friday. A collection with
+ * no outcome yet has no collectedAt and so falls outside any date range by
+ * construction, which is the right answer for a credit report and the wrong one
+ * for an outstanding-work list; that is what `onlyCompleted` distinguishes.
+ */
+export async function listCollections(
+  tenantId: string,
+  query: CollectionQuery = {}
+): Promise<CollectionRecord[]> {
+  const db = scopedPrisma(tenantId);
+  const {
+    type,
+    status,
+    since,
+    until,
+    driverId,
+    tripSheetId,
+    includeArchived = true,
+    onlyCompleted = false,
+    limit = 500,
+  } = query;
+
+  const cap = Math.min(Math.max(limit, 1), 2000);
+
+  const inRange = (at: Date | null): boolean => {
+    if (!since && !until) return true;
+    if (!at) return false;
+    if (since && at < since) return false;
+    if (until && at >= until) return false;
+    return true;
+  };
+
+  const live = await db.collection.findMany({
+    where: {
+      ...(type && { type }),
+      ...(status && { status }),
+      ...(tripSheetId && { tripSheetId }),
+      ...(driverId && { tripSheet: { driverId } }),
+      ...(onlyCompleted && { collectedAt: { not: null } }),
+      ...((since || until) && {
+        collectedAt: {
+          ...(since && { gte: since }),
+          ...(until && { lt: until }),
+        },
+      }),
+    },
+    include: {
+      stop: { select: { customerName: true, stopNumber: true } },
+      tripSheet: { select: { driverId: true, driver: { select: { name: true } } } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: cap,
+  });
+
+  const records: CollectionRecord[] = live.map((c) => ({
+    id: c.id,
+    collectionNo: c.collectionNo,
+    type: c.type,
+    upliftSubtype: c.upliftSubtype,
+    originalInvoiceNo: c.originalInvoiceNo,
+    status: c.status,
+    exceptionReason: c.exceptionReason,
+    notes: c.notes,
+    expectedQty: c.expectedQty,
+    collectedQty: c.collectedQty,
+    customerName: c.stop.customerName,
+    stopNumber: c.stop.stopNumber,
+    signedByName: c.signedByName,
+    collectedAt: c.collectedAt,
+    sourceFilePath: c.sourceFilePath,
+    signedFileId: c.signedFileId,
+    signedFilePath: c.signedFilePath,
+    driverId: c.tripSheet.driverId,
+    driverName: c.tripSheet.driver?.name ?? null,
+    tripSheetId: c.tripSheetId,
+    archived: false,
+    completedTripSheetId: null,
+  }));
+
+  if (!includeArchived) return records.slice(0, cap);
+
+  // The archive is filtered in JS because the collections are JSON. Bounded
+  // rather than open-ended: the candidate archive rows are narrowed by driver
+  // and by a generous completedAt window first, so this never walks a scope's
+  // whole history. A collection is closed out on the trip that carried it, so
+  // an archive row completed before the window opened cannot hold one inside it.
+  const archives = await db.completedTripSheet.findMany({
+    where: {
+      totalCollections: { gt: 0 },
+      ...(driverId && { driverId }),
+      ...(tripSheetId && { tripSheetId }),
+      ...(since && { completedAt: { gte: since } }),
+    },
+    orderBy: { completedAt: "desc" },
+    take: 500,
+  });
+
+  for (const archive of archives) {
+    const frozen = Array.isArray(archive.collections)
+      ? (archive.collections as unknown as ArchivedCollection[])
+      : [];
+
+    for (const c of frozen) {
+      if (type && c.type !== type) continue;
+      if (status && c.status !== status) continue;
+
+      const collectedAt = c.collectedAt ? new Date(c.collectedAt) : null;
+      if (onlyCompleted && !collectedAt) continue;
+      if (!inRange(collectedAt)) continue;
+
+      records.push({
+        id: null,
+        collectionNo: c.collectionNo,
+        type: c.type,
+        upliftSubtype: c.upliftSubtype,
+        originalInvoiceNo: c.originalInvoiceNo,
+        status: c.status,
+        exceptionReason: c.exceptionReason,
+        notes: c.notes,
+        expectedQty: c.expectedQty,
+        collectedQty: c.collectedQty,
+        customerName: c.customerName,
+        stopNumber: c.stopNumber,
+        signedByName: c.signedByName,
+        collectedAt,
+        sourceFilePath: c.sourceFilePath,
+        signedFileId: c.signedFileId,
+        signedFilePath: c.signedFilePath,
+        driverId: archive.driverId,
+        driverName: archive.driverName,
+        tripSheetId: archive.tripSheetId,
+        archived: true,
+        completedTripSheetId: archive.id,
+      });
+    }
+  }
+
+  // Newest outcome first; anything still outstanding sorts to the top, because
+  // that is what a dispatcher is looking for in a mixed list.
+  records.sort((a, b) => {
+    if (!a.collectedAt && !b.collectedAt) return 0;
+    if (!a.collectedAt) return -1;
+    if (!b.collectedAt) return 1;
+    return b.collectedAt.getTime() - a.collectedAt.getTime();
+  });
+
+  return records.slice(0, cap);
 }

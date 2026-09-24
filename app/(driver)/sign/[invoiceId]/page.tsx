@@ -2,6 +2,7 @@
 
 import { useParams, useRouter } from "next/navigation";
 import { useRef, useState, useEffect, useCallback } from "react";
+import SignaturePad, { type SignaturePadHandle } from "@/components/SignaturePad";
 
 interface StopData {
   id: string;
@@ -17,8 +18,10 @@ interface StopData {
 export default function SignInvoicePage() {
   const params = useParams();
   const router = useRouter();
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isDrawing, setIsDrawing] = useState(false);
+  // The canvas itself now lives in components/SignaturePad, because the
+  // collection screen captures a signature the same way and two copies of that
+  // drawing code would have drifted apart.
+  const padRef = useRef<SignaturePadHandle>(null);
   const [hasSignature, setHasSignature] = useState(false);
   const [status, setStatus] = useState<"idle" | "loading" | "saving" | "done" | "error">("loading");
   const [stop, setStop] = useState<StopData | null>(null);
@@ -70,103 +73,15 @@ export default function SignInvoicePage() {
     fetchStopData();
   }, [fetchStopData]);
 
-  // Canvas drawing logic
-  useEffect(() => {
-    if (status !== "idle") return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
-      ctx.scale(dpr, dpr);
-      ctx.strokeStyle = "#0F0F0F";
-      ctx.lineWidth = 2.5;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-    };
-
-    resize();
-    window.addEventListener("resize", resize);
-
-    let drawing = false;
-    let lastX = 0;
-    let lastY = 0;
-
-    const getPos = (e: MouseEvent | TouchEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
-      const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
-      return { x: clientX - rect.left, y: clientY - rect.top };
-    };
-
-    const start = (e: MouseEvent | TouchEvent) => {
-      e.preventDefault();
-      drawing = true;
-      const pos = getPos(e);
-      lastX = pos.x;
-      lastY = pos.y;
-      setIsDrawing(true);
-      setHasSignature(true);
-    };
-
-    const move = (e: MouseEvent | TouchEvent) => {
-      if (!drawing) return;
-      e.preventDefault();
-      const pos = getPos(e);
-      ctx.beginPath();
-      ctx.moveTo(lastX, lastY);
-      ctx.lineTo(pos.x, pos.y);
-      ctx.stroke();
-      lastX = pos.x;
-      lastY = pos.y;
-    };
-
-    const end = () => {
-      drawing = false;
-      setIsDrawing(false);
-    };
-
-    canvas.addEventListener("mousedown", start);
-    canvas.addEventListener("mousemove", move);
-    canvas.addEventListener("mouseup", end);
-    canvas.addEventListener("touchstart", start, { passive: false });
-    canvas.addEventListener("touchmove", move, { passive: false });
-    canvas.addEventListener("touchend", end);
-
-    return () => {
-      window.removeEventListener("resize", resize);
-      canvas.removeEventListener("mousedown", start);
-      canvas.removeEventListener("mousemove", move);
-      canvas.removeEventListener("mouseup", end);
-      canvas.removeEventListener("touchstart", start);
-      canvas.removeEventListener("touchmove", move);
-      canvas.removeEventListener("touchend", end);
-    };
-  }, [status]);
-
-  const handleClear = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    setHasSignature(false);
-  };
-
   const handleConfirm = async () => {
-    if (!stop || !canvasRef.current || !hasSignature) return;
+    if (!stop || !hasSignature) return;
+
+    const signatureImage = padRef.current?.toDataURL();
+    if (!signatureImage) return;
 
     setStatus("saving");
 
     try {
-      // Export canvas as PNG data URL
-      const signatureImage = canvasRef.current.toDataURL("image/png");
 
       if (stop.invoiceFile) {
         // PDF exists — embed signature on PDF and save to signed folder
@@ -353,42 +268,15 @@ export default function SignInvoicePage() {
 
       {/* Signature area — sticky at bottom */}
       <div className="bg-ink-card border-t border-ink-border p-4">
-        <p className="text-xs font-mono text-ink-muted uppercase tracking-wide mb-3">
-          Customer Signature
-        </p>
+        <SignaturePad ref={padRef} onChange={setHasSignature} />
 
-        <div className="relative border-2 border-dashed border-ink-border rounded bg-ink-surface">
-          {/* Baseline */}
-          <div className="absolute bottom-8 left-4 right-4 border-b border-ink-border" />
-
-          <canvas
-            ref={canvasRef}
-            className="w-full rounded cursor-crosshair"
-            style={{ height: "120px", touchAction: "none" }}
-          />
-
-          {!hasSignature && (
-            <p className="absolute inset-0 flex items-center justify-center text-ink-muted text-sm font-mono pointer-events-none">
-              Sign here
-            </p>
-          )}
-        </div>
-
-        <div className="flex gap-3 mt-3">
-          <button
-            onClick={handleClear}
-            className="px-4 py-2.5 text-sm font-mono border border-ink-border rounded hover:bg-ink-surface transition-colors touch-target"
-          >
-            Clear
-          </button>
-          <button
-            onClick={handleConfirm}
-            disabled={!hasSignature}
-            className="flex-1 py-2.5 bg-ink-green text-white text-sm font-mono font-medium rounded disabled:opacity-40 disabled:cursor-not-allowed hover:bg-ink-green-hover active:scale-[0.98] transition-all touch-target"
-          >
-            {status === "saving" ? "Saving…" : "Confirm & Save"}
-          </button>
-        </div>
+        <button
+          onClick={handleConfirm}
+          disabled={!hasSignature}
+          className="w-full mt-3 py-2.5 bg-ink-green text-white text-sm font-mono font-medium rounded disabled:opacity-40 disabled:cursor-not-allowed hover:bg-ink-green-hover active:scale-[0.98] transition-all touch-target"
+        >
+          {status === "saving" ? "Saving…" : "Confirm & Save"}
+        </button>
       </div>
     </div>
   );

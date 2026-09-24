@@ -34,6 +34,8 @@ export interface SyncCursor {
   tripSheets: number;
   /** Number of stops in view. */
   stops: number;
+  /** Number of collections in view. */
+  collections: number;
 }
 
 interface TableStamp {
@@ -41,10 +43,23 @@ interface TableStamp {
   count: number;
 }
 
-/** Pure formatting, split out so the cursor rules can be tested without a database. */
-export function formatCursor(tripSheets: TableStamp, stops: TableStamp): string {
+/**
+ * Pure formatting, split out so the cursor rules can be tested without a
+ * database.
+ *
+ * Collections are a third table in the stamp rather than folded into the stop
+ * one. A driver recording a collection outcome does not touch the stop row, so
+ * without this the run sheet would keep showing a collection as outstanding —
+ * and on another device, a collection an office correction had changed. The
+ * cursor is opaque, so widening it needs no client release.
+ */
+export function formatCursor(
+  tripSheets: TableStamp,
+  stops: TableStamp,
+  collections: TableStamp
+): string {
   const stamp = (t: TableStamp) => `${t.max ? t.max.getTime() : 0}.${t.count}`;
-  return `${stamp(tripSheets)}-${stamp(stops)}`;
+  return `${stamp(tripSheets)}-${stamp(stops)}-${stamp(collections)}`;
 }
 
 /**
@@ -62,7 +77,7 @@ export async function buildSyncCursor(
   const db = scopedPrisma(tenantId);
   const { driverId } = opts;
 
-  const [sheetAgg, stopAgg] = await Promise.all([
+  const [sheetAgg, stopAgg, collectionAgg] = await Promise.all([
     db.tripSheet.aggregate({
       where: driverId ? { driverId } : {},
       _max: { updatedAt: true },
@@ -77,6 +92,15 @@ export async function buildSyncCursor(
       _max: { updatedAt: true },
       _count: true,
     }),
+    db.collection.aggregate({
+      // Narrowed through the trip sheet, not through Collection.driverId: that
+      // column records who COLLECTED and is null until someone has, so keying
+      // on it would leave every outstanding collection out of the driver's own
+      // cursor — the exact rows they are polling for.
+      where: driverId ? { tripSheet: { driverId } } : {},
+      _max: { updatedAt: true },
+      _count: true,
+    }),
   ]);
 
   const tripSheets: TableStamp = {
@@ -87,10 +111,15 @@ export async function buildSyncCursor(
     max: stopAgg._max.updatedAt,
     count: stopAgg._count,
   };
+  const collections: TableStamp = {
+    max: collectionAgg._max.updatedAt,
+    count: collectionAgg._count,
+  };
 
   return {
-    cursor: formatCursor(tripSheets, stops),
+    cursor: formatCursor(tripSheets, stops, collections),
     tripSheets: tripSheets.count,
     stops: stops.count,
+    collections: collections.count,
   };
 }

@@ -18,8 +18,9 @@
  * vacuously — a silently-skipped isolation test is worse than no test.
  *
  * The fixtures give scope A and scope B a driver with the SAME name, a contact
- * with the SAME company name, and a stop with the SAME invoice number. So no
- * assertion here can pass merely because the values happened to differ.
+ * with the SAME company name, a stop with the SAME invoice number, and a
+ * collection with the SAME collection number. So no assertion here can pass
+ * merely because the values happened to differ.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
@@ -38,6 +39,7 @@ import {
   formReq,
   pdfFile,
   tripSheetCsv,
+  tripSheetCsvWithCollection,
   params,
   type Fixtures,
 } from "./helpers/fixtures";
@@ -636,9 +638,39 @@ suite("cross-ADMIN isolation", () => {
           folderPath: "/TripSheets-A",
           invoiceFolderItemId: "invoice-folder-A",
           invoiceFolderPath: "/Invoices-A",
+          collectionsFolderItemId: "collections-folder-A",
+          collectionsFolderPath: "/Collections-A",
           tenantId: f.a.tenantId,
         },
       });
+
+      // Every column seedFixtures sets has to be restored here, or scope A
+      // silently differs from scope B for the rest of the file. Asserted rather
+      // than trusted to review: the last two were added when collections landed
+      // and missing them made a later collections test fail as though the
+      // product had lost track of the folder.
+      const restored = await db().cloudAccount.findFirst({
+        where: { tenantId: f.a.tenantId },
+      });
+      const seeded = await db().cloudAccount.findFirst({
+        where: { tenantId: f.b.tenantId },
+      });
+      for (const key of Object.keys(seeded ?? {})) {
+        if (
+          ["id", "tenantId", "accountEmail", "accountName", "accessToken",
+           "refreshToken", "tokenExpiry", "createdAt", "updatedAt"].includes(key)
+        ) {
+          continue;
+        }
+        const a = (restored as Record<string, unknown>)?.[key];
+        const b = (seeded as Record<string, unknown>)?.[key];
+        // Scope-suffixed values differ by design; what matters is that neither
+        // is null when the other is set.
+        expect(
+          a === null ? "null" : "set",
+          `CloudAccount.${key} was not restored for scope A`
+        ).toBe(b === null ? "null" : "set");
+      }
     });
 
     it("tokens are ciphertext at rest", async () => {
@@ -750,6 +782,249 @@ suite("cross-ADMIN isolation", () => {
       );
       expect(matched?.driverId).toBe(f.a.driver.id);
       expect(matched?.driverId).not.toBe(f.b.driver.id);
+    });
+  });
+
+  // ── Collections ──────────────────────────────────────────────────────
+  //
+  // Collections carry a credit against a customer's account, so a leak here is
+  // a leak of another company's returns and of what their customers sent back.
+  // The report endpoint is also read across a whole scope on every open, like
+  // the dashboard, which makes a scoping bug a standing side channel rather
+  // than a one-off.
+  describe("collections", () => {
+    it("ADMIN 1 sees none of ADMIN 2's collections, despite the identical number", async () => {
+      const { GET } = await import("@/app/api/collections/route");
+      useSession(adminSession(f.a));
+
+      const body = await (await GET(req("/api/collections"))).json();
+
+      const ids = body.collections.map((c: any) => c.id);
+      expect(ids).toContain(f.a.collection.id);
+      expect(ids).not.toContain(f.b.collection.id);
+      expect(body.collections).toHaveLength(1);
+      expect(body.counts.total).toBe(1);
+    });
+
+    it("ADMIN 1 fetching ADMIN 2's collection by direct id gets 404", async () => {
+      const { GET } = await import("@/app/api/collections/[id]/route");
+      useSession(adminSession(f.a));
+
+      const res = await GET(
+        req(`/api/collections/${f.b.collection.id}`),
+        params({ id: f.b.collection.id })
+      );
+
+      // 404, never 403 — a 403 would confirm the row exists somewhere.
+      expect(res.status).toBe(404);
+    });
+
+    it("ADMIN 1 recording an outcome on ADMIN 2's collection gets 404 and changes nothing", async () => {
+      const { PUT } = await import("@/app/api/collections/[id]/route");
+      useSession(adminSession(f.a));
+
+      const res = await PUT(
+        req(`/api/collections/${f.b.collection.id}`, {
+          method: "PUT",
+          body: {
+            status: "COLLECTED",
+            collectedQty: 2,
+            signedByName: "Someone Else",
+            signatureImage: "data:image/png;base64,iVBORw0KGgo=",
+          },
+        }),
+        params({ id: f.b.collection.id })
+      );
+
+      expect(res.status).toBe(404);
+
+      const still = await db().collection.findUnique({
+        where: { id: f.b.collection.id },
+      });
+      expect(still?.status).toBe("PENDING");
+      expect(still?.signedByName).toBeNull();
+    });
+
+    it("ADMIN 1 editing ADMIN 2's collection gets 404 and changes nothing", async () => {
+      const { PATCH } = await import("@/app/api/collections/[id]/route");
+      useSession(adminSession(f.a));
+
+      const res = await PATCH(
+        req(`/api/collections/${f.b.collection.id}`, {
+          method: "PATCH",
+          body: { type: "NON_CREDIT_UPLIFT", upliftSubtype: "DOCUMENTS" },
+        }),
+        params({ id: f.b.collection.id })
+      );
+
+      expect(res.status).toBe(404);
+      const still = await db().collection.findUnique({
+        where: { id: f.b.collection.id },
+      });
+      expect(still?.type).toBe("CREDIT_RETURN");
+    });
+
+    it("a DRIVER cannot reach a collection on another scope's trip", async () => {
+      const { GET } = await import("@/app/api/collections/[id]/route");
+      useSession(driverSession(f.b));
+
+      const res = await GET(
+        req(`/api/collections/${f.a.collection.id}`),
+        params({ id: f.a.collection.id })
+      );
+
+      expect(res.status).toBe(404);
+    });
+
+    it("the database itself rejects a collection pointing at another scope's stop", async () => {
+      // The composite foreign key makes this unrepresentable, not merely
+      // discouraged — the same guarantee Stop has against a foreign contact.
+      await expect(
+        db().collection.create({
+          data: {
+            collectionNo: "COL-CROSS",
+            type: "CREDIT_RETURN",
+            tripSheetId: f.a.tripSheet.id,
+            stopId: f.b.stop.id,
+            tenantId: f.a.tenantId,
+          },
+        })
+      ).rejects.toThrow();
+    });
+
+    it("the scoped client refuses to stamp a foreign scope onto a collection", async () => {
+      const { scopedPrisma } = await import("@/lib/db-scoped");
+
+      await expect(
+        scopedPrisma(f.a.tenantId).collection.updateMany({
+          where: { id: f.b.collection.id },
+          data: { status: "COLLECTED" },
+        })
+      ).resolves.toMatchObject({ count: 0 });
+
+      const still = await db().collection.findUnique({
+        where: { id: f.b.collection.id },
+      });
+      expect(still?.status).toBe("PENDING");
+    });
+
+    it("a deployed collection lands in the uploader's scope and nowhere else", async () => {
+      const { POST } = await import("@/app/api/trip-sheet/route");
+      useSession(adminSession(f.a));
+
+      const form = new FormData();
+      form.set(
+        "file",
+        tripSheetCsvWithCollection(f.a.driver.name, "INV-9100", "COL-9100")
+      );
+      form.set("action", "deploy");
+      // The invoice folder listing is stubbed empty, so the missing-invoice
+      // gate would block this — skipping the invoice is the dispatcher's own
+      // documented way past it.
+      form.set("skipInvoices", JSON.stringify([]));
+
+      const res = await POST(formReq("/api/trip-sheet", form));
+      // Either it deployed, or it was correctly blocked for the missing PDF.
+      // Both outcomes must leave scope B untouched, which is what is asserted.
+      expect([200, 409]).toContain(res.status);
+
+      const inB = await db().collection.findMany({
+        where: { tenantId: f.b.tenantId, collectionNo: "COL-9100" },
+      });
+      expect(inB).toHaveLength(0);
+
+      const inA = await db().collection.findMany({
+        where: { tenantId: f.a.tenantId, collectionNo: "COL-9100" },
+      });
+      for (const c of inA) expect(c.tenantId).toBe(f.a.tenantId);
+
+      // Clean up so later counts stay predictable.
+      await db().collection.deleteMany({ where: { collectionNo: "COL-9100" } });
+      await db().tripSheet.deleteMany({
+        where: { tenantId: f.a.tenantId, sourceFilename: "run.csv" },
+      });
+    });
+
+    it("the change-feed cursor counts only the caller's own collections", async () => {
+      const { buildSyncCursor } = await import("@/lib/sync-cursor");
+
+      const a = await buildSyncCursor(f.a.tenantId);
+      const b = await buildSyncCursor(f.b.tenantId);
+
+      expect(a.collections).toBe(1);
+      expect(b.collections).toBe(1);
+      // /api/sync is polled continuously, so a cursor that moved when ANOTHER
+      // scope wrote would be a permanent, low-bandwidth side channel.
+      expect(a.cursor).not.toBe(b.cursor);
+    });
+
+    it("a driver's cursor covers only their own trip's collections", async () => {
+      const { buildSyncCursor } = await import("@/lib/sync-cursor");
+
+      const own = await buildSyncCursor(f.a.tenantId, { driverId: f.a.driver.id });
+      expect(own.collections).toBe(1);
+
+      // Scope A's driver id, asked for inside scope B: the scoped client sees
+      // no such driver's work at all.
+      const foreign = await buildSyncCursor(f.b.tenantId, { driverId: f.a.driver.id });
+      expect(foreign.collections).toBe(0);
+    });
+
+    it("collection documents resolve against the caller's own collections folder", async () => {
+      const { listCollectionDocuments } = await import("@/lib/collections");
+
+      await listCollectionDocuments(f.a.tenantId);
+
+      const urls = graphCalls.map((c) => c.url).join(" ");
+      expect(urls).toContain("collections-folder-A");
+      expect(urls).not.toContain("collections-folder-B");
+      expect(graphCalls.every((c) => c.token === "access-token-A")).toBe(true);
+    });
+
+    it("serving a document by filename cannot reach another scope's folder", async () => {
+      const { GET } = await import("@/app/api/collections/document/[name]/route");
+      useSession(adminSession(f.a));
+
+      // B's filename, requested by A. The filename is caller-supplied and the
+      // route takes it verbatim, so what stops it crossing a boundary is not the
+      // name — it is that the name is only ever resolved against the CALLER's
+      // own folder, with the caller's own token.
+      const name = "COL-500-B.pdf";
+      await GET(req(`/api/collections/document/${name}`), params({ name }));
+
+      const urls = graphCalls.map((c) => c.url).join(" ");
+
+      // That is the whole claim, and it is asserted on the address rather than
+      // on the response status: the suite's fetch stub answers 200 to every URL,
+      // so a status assertion here would be testing the stub. Against real Graph
+      // the lookup below 404s and the route returns 404.
+      expect(urls).toContain("collections-folder-A");
+      expect(urls).not.toContain("collections-folder-B");
+      expect(graphCalls.every((c) => c.token === "access-token-A")).toBe(true);
+    });
+
+    it("a signed document is read from the caller's own Signed folder", async () => {
+      const { GET } = await import("@/app/api/collections/document/[name]/route");
+      useSession(adminSession(f.b));
+
+      const name = "COL-500-A_COLLECTED.pdf";
+      await GET(
+        req(`/api/collections/document/${name}?signed=true`),
+        params({ name })
+      );
+
+      const urls = graphCalls.map((c) => c.url).join(" ");
+      expect(urls).toContain("collections-folder-B");
+      expect(urls).not.toContain("collections-folder-A");
+      expect(graphCalls.every((c) => c.token === "access-token-B")).toBe(true);
+    });
+
+    it("a DRIVER cannot read the scope-wide collections report", async () => {
+      const { GET } = await import("@/app/api/collections/route");
+      useSession(driverSession(f.a));
+
+      const res = await GET(req("/api/collections"));
+      expect(res.status).toBe(403);
     });
   });
 

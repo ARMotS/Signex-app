@@ -19,7 +19,54 @@ interface TripStop {
   emailStatus?: string;
   emailError?: string | null;
   contact?: { email?: string };
+  collections?: TripCollection[];
 }
+
+/** A collection hanging off a stop — goods coming back with the driver. */
+interface TripCollection {
+  id: string;
+  collectionNo: string;
+  type: "CREDIT_RETURN" | "NON_CREDIT_UPLIFT";
+  upliftSubtype?: string | null;
+  originalInvoiceNo?: string | null;
+  status: "PENDING" | "COLLECTED" | "PARTIAL" | "NOT_AVAILABLE" | "REFUSED";
+  exceptionReason?: string | null;
+  expectedQty?: number | null;
+  collectedQty?: number | null;
+  sourceFilePath?: string | null;
+  signedFilePath?: string | null;
+}
+
+/** One collection frozen into a completed sheet's snapshot. */
+interface ArchivedCollection {
+  collectionNo: string;
+  type: string;
+  upliftSubtype: string | null;
+  originalInvoiceNo: string | null;
+  status: string;
+  exceptionReason: string | null;
+  notes: string | null;
+  expectedQty: number | null;
+  collectedQty: number | null;
+  customerName: string;
+  stopNumber: number | null;
+  signedByName: string | null;
+  collectedAt: string | null;
+  sourceFilePath: string | null;
+  signedFileId: string | null;
+  signedFilePath: string | null;
+}
+
+const COLLECTION_STATUS_LABEL: Record<string, string> = {
+  PENDING: "Pending",
+  COLLECTED: "Collected",
+  PARTIAL: "Partial",
+  NOT_AVAILABLE: "Not available",
+  REFUSED: "Refused",
+};
+
+/** The three outcomes accounts has to look at before raising a credit. */
+const COLLECTION_EXCEPTIONS = new Set(["PARTIAL", "NOT_AVAILABLE", "REFUSED"]);
 
 interface TripSheet {
   id: string;
@@ -40,6 +87,7 @@ interface MatchResult {
   regNo: string;
   stops: TripStop[];
   unmatchedInvoices: string[];
+  unmatchedCollections?: string[];
 }
 
 interface AlreadySignedInvoice {
@@ -64,6 +112,9 @@ interface PreviewData {
     totalRows: number;
     matchedInvoices: number;
     unmatchedInvoices: number;
+    totalCollections?: number;
+    matchedCollections?: number;
+    unmatchedCollections?: number;
     driverResults: MatchResult[];
     alreadySigned: AlreadySignedInvoice[];
     missingInvoices: MissingInvoice[];
@@ -101,7 +152,11 @@ interface CompletedTripSheet {
   completedBy: string | null;
   totalStops: number;
   signedStops: number;
+  totalCollections?: number;
+  collectedCollections?: number;
   stops: ArchivedStop[];
+  /** Absent on trips archived before collections existed — read as []. */
+  collections?: ArchivedCollection[];
 }
 
 interface DriverAccount {
@@ -1582,8 +1637,53 @@ export default function TripSheetPage() {
                     </span>
                   </div>
                 )}
+                {(preview.preview.totalCollections ?? 0) > 0 && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-ink-violet" />
+                    <span
+                      className="text-xs font-mono text-ink-muted"
+                      title={
+                        (preview.preview.unmatchedCollections ?? 0) > 0
+                          ? `${preview.preview.unmatchedCollections} have no document in the collections Pending folder yet. They still deploy — the driver signs a generated receipt.`
+                          : "Every collection has a matching document"
+                      }
+                    >
+                      {preview.preview.totalCollections} collection
+                      {preview.preview.totalCollections === 1 ? "" : "s"}
+                      {(preview.preview.unmatchedCollections ?? 0) > 0
+                        ? ` (${preview.preview.unmatchedCollections} without a document)`
+                        : ""}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
+
+            {/* A missing collection document is a note, not a blocker. The
+                missing-INVOICE gate below is the hard one: the signature is
+                embedded on the invoice, so a delivery without one leaves no
+                physical record. A collection with no document still gets a
+                receipt, generated at signing. */}
+            {(preview.preview.unmatchedCollections ?? 0) > 0 && (
+              <div className="mb-4 flex items-start gap-3 px-4 py-3 rounded border border-ink-violet/20 bg-ink-violet-dim">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-violet shrink-0 mt-0.5">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="16" x2="12" y2="12" />
+                  <line x1="12" y1="8" x2="12.01" y2="8" />
+                </svg>
+                <div>
+                  <p className="text-xs font-mono text-ink-violet">
+                    {preview.preview.unmatchedCollections} collection
+                    {preview.preview.unmatchedCollections === 1 ? " has" : "s have"} no document
+                    in the collections Pending folder
+                  </p>
+                  <p className="text-[11px] text-ink-muted mt-0.5">
+                    This does not block the deploy. The driver captures the signature on a
+                    receipt Signex generates, which is filed in the Signed folder either way.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Already-signed warning */}
             {preview.preview.alreadySigned && preview.preview.alreadySigned.length > 0 && (
@@ -2244,6 +2344,16 @@ export default function TripSheetPage() {
               const signed = trip.stops.filter((s) => s.status === "SIGNED").length;
               const total = trip.stops.length;
               const pct = total > 0 ? Math.round((signed / total) * 100) : 0;
+              // A trip cannot be closed out until its collections have outcomes
+              // too, so the dispatcher needs to see them here rather than
+              // discovering them in the error when Archive is pressed.
+              const tripCollections = trip.stops.flatMap((s) => s.collections ?? []);
+              const collectionsDone = tripCollections.filter(
+                (c) => c.status !== "PENDING"
+              ).length;
+              const collectionExceptions = tripCollections.filter((c) =>
+                COLLECTION_EXCEPTIONS.has(c.status)
+              ).length;
               const isExpanded = expandedTrip === trip.id;
               // How much of this sheet the query actually hit. A sheet can be
               // in the list on the strength of one stop out of forty, and the
@@ -2290,6 +2400,22 @@ export default function TripSheetPage() {
                         <span className="text-[12px] sm:text-xs font-mono text-ink-muted">
                           {trip.regNo}
                         </span>
+                        {tripCollections.length > 0 && (
+                          <span
+                            className="badge-credit"
+                            title={`${collectionsDone} of ${tripCollections.length} collections have an outcome. All of them need one before this sheet can be archived.`}
+                          >
+                            {collectionsDone}/{tripCollections.length} collected
+                          </span>
+                        )}
+                        {collectionExceptions > 0 && (
+                          <span
+                            className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
+                            title="Partial, unavailable or refused — accounts needs to look at these before raising a credit"
+                          >
+                            {collectionExceptions} EXCEPTION{collectionExceptions !== 1 ? "S" : ""}
+                          </span>
+                        )}
                         {stopHits > 0 && (
                           <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-green-dim text-ink-green border border-ink-green/20">
                             {stopHits} stop{stopHits !== 1 ? "s" : ""} match
@@ -2413,6 +2539,79 @@ export default function TripSheetPage() {
                               {stop.nop > 0 ? stop.nop : "—"}
                             </span>
                           </div>
+                          {/* Collections at this stop. Listed under the
+                              delivery rather than beside it, because it is one
+                              visit to one address — the driver sees the same
+                              shape on their run sheet. */}
+                          {(stop.collections?.length ?? 0) > 0 && (
+                            <div className="mt-2 pl-8 space-y-1">
+                              {stop.collections!.map((c) => (
+                                <div
+                                  key={c.id}
+                                  className="flex items-center gap-2 flex-wrap text-[12px]"
+                                >
+                                  <span
+                                    className={
+                                      c.type === "CREDIT_RETURN" ? "badge-credit" : "badge-uplift"
+                                    }
+                                  >
+                                    {c.type === "CREDIT_RETURN" ? "Credit Return" : "Uplift"}
+                                  </span>
+                                  <span className="font-mono text-ink-black">
+                                    {c.collectionNo}
+                                  </span>
+                                  {c.originalInvoiceNo && (
+                                    <span className="text-ink-muted">
+                                      against {c.originalInvoiceNo}
+                                    </span>
+                                  )}
+                                  {(c.collectedQty != null || c.expectedQty != null) && (
+                                    <span className="font-mono text-ink-muted">
+                                      {c.collectedQty ?? 0} of {c.expectedQty ?? "—"}
+                                    </span>
+                                  )}
+                                  <span
+                                    className={
+                                      c.status === "COLLECTED"
+                                        ? "badge-signed"
+                                        : COLLECTION_EXCEPTIONS.has(c.status)
+                                        ? "badge-progress"
+                                        : "badge-pending"
+                                    }
+                                  >
+                                    {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
+                                  </span>
+                                  {c.exceptionReason && (
+                                    <span className="text-ink-amber truncate max-w-[18rem]">
+                                      {c.exceptionReason}
+                                    </span>
+                                  )}
+                                  {c.signedFilePath && (
+                                    <a
+                                      href={`/api/collections/document/${encodeURIComponent(c.signedFilePath)}?signed=true`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="font-mono text-[11px] text-ink-violet hover:underline"
+                                    >
+                                      Receipt
+                                    </a>
+                                  )}
+                                  {c.sourceFilePath && (
+                                    <a
+                                      href={`/api/collections/document/${encodeURIComponent(c.sourceFilePath)}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="font-mono text-[11px] text-ink-muted hover:text-ink-black hover:underline"
+                                    >
+                                      Document
+                                    </a>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
                           {/* Line 2: Email button + Status badge.
                               The confirmation goes out automatically on
                               signature, so this button is a resend — or the
@@ -2486,6 +2685,15 @@ export default function TripSheetPage() {
                                 title="No email address on this contact — add one to send a confirmation"
                               >
                                 No email
+                              </span>
+                            )}
+                            {(stop.collections?.length ?? 0) > 0 && (
+                              <span
+                                className="badge-credit"
+                                title="This stop also has goods coming back"
+                              >
+                                {stop.collections!.length} collection
+                                {stop.collections!.length !== 1 ? "s" : ""}
                               </span>
                             )}
                             <span
@@ -2725,6 +2933,21 @@ export default function TripSheetPage() {
                                 <span className="w-1.5 h-1.5 rounded-full bg-ink-green" />
                                 {sheet.signedStops}/{sheet.totalStops} delivered
                               </span>
+                              {(sheet.collections?.length ?? 0) > 0 && (
+                                <span className="badge-credit">
+                                  {sheet.collectedCollections ?? 0}/{sheet.collections!.length} collected
+                                </span>
+                              )}
+                              {(sheet.collections ?? []).some((c) =>
+                                COLLECTION_EXCEPTIONS.has(c.status)
+                              ) && (
+                                <span
+                                  className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
+                                  title="A collection was partial, unavailable or refused — accounts needs to look at it before raising a credit"
+                                >
+                                  COLLECTION EXCEPTION
+                                </span>
+                              )}
                               {stopHits > 0 && (
                                 <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-green-dim text-ink-green border border-ink-green/20">
                                   {stopHits} stop{stopHits !== 1 ? "s" : ""} match
@@ -2800,6 +3023,96 @@ export default function TripSheetPage() {
                                 </div>
                               </div>
                             ))}
+                            {/* Collections stay reachable as backup after the
+                                trip is closed. The Collection rows cascade away
+                                with the trip sheet, so this reads the frozen
+                                snapshot — including the ones with no signed PDF,
+                                which are exactly the ones a credit clerk has to
+                                chase. */}
+                            {(sheet.collections?.length ?? 0) > 0 && (
+                              <>
+                                <div className="grid grid-cols-[2rem_1fr_1fr_auto] gap-2 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-violet-dim">
+                                  <div>#</div>
+                                  <div>Collection</div>
+                                  <div>Customer</div>
+                                  <div className="text-right">Outcome</div>
+                                </div>
+                                {sheet.collections!.map((c, i) => (
+                                  <div
+                                    key={`${sheet.id}-col-${c.collectionNo}-${i}`}
+                                    className="px-4 py-2.5 hover:bg-ink-surface/30 transition-colors"
+                                  >
+                                    <div className="grid grid-cols-[2rem_1fr_1fr_auto] gap-2 items-center">
+                                      <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">
+                                        {c.stopNumber ?? "—"}
+                                      </span>
+                                      <div className="min-w-0">
+                                        <span className="font-mono text-[13px] font-medium text-ink-black truncate block">
+                                          {c.collectionNo}
+                                        </span>
+                                        <span className="text-[11px] text-ink-muted">
+                                          {c.type === "CREDIT_RETURN" ? "Credit Return" : "Uplift"}
+                                          {c.originalInvoiceNo ? ` · against ${c.originalInvoiceNo}` : ""}
+                                          {c.collectedQty != null || c.expectedQty != null
+                                            ? ` · ${c.collectedQty ?? 0} of ${c.expectedQty ?? "—"}`
+                                            : ""}
+                                        </span>
+                                      </div>
+                                      <div className="min-w-0">
+                                        <span className="text-[13px] text-ink-muted truncate block">
+                                          {c.customerName}
+                                        </span>
+                                        {c.exceptionReason && (
+                                          <span className="text-[11px] text-ink-amber truncate block">
+                                            {c.exceptionReason}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-2 justify-end">
+                                        <span
+                                          className={
+                                            c.status === "COLLECTED"
+                                              ? "badge-signed"
+                                              : COLLECTION_EXCEPTIONS.has(c.status)
+                                              ? "badge-progress"
+                                              : "badge-pending"
+                                          }
+                                        >
+                                          {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
+                                        </span>
+                                        {c.signedFilePath ? (
+                                          <a
+                                            href={`/api/collections/document/${encodeURIComponent(c.signedFilePath)}?signed=true`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="text-[11px] font-mono text-ink-violet hover:underline"
+                                          >
+                                            Receipt
+                                          </a>
+                                        ) : (
+                                          <span
+                                            className="text-[11px] font-mono text-ink-muted-light"
+                                            title="No signed document was written for this collection"
+                                          >
+                                            No receipt
+                                          </span>
+                                        )}
+                                        {c.sourceFilePath && (
+                                          <a
+                                            href={`/api/collections/document/${encodeURIComponent(c.sourceFilePath)}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="text-[11px] font-mono text-ink-muted hover:text-ink-black hover:underline"
+                                          >
+                                            Original
+                                          </a>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </>
+                            )}
                             <div className="px-4 py-2 text-[11px] text-ink-muted bg-ink-surface/30">
                               Uploaded {formatDate(sheet.uploadedAt)}
                               {sheet.archivedFile

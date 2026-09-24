@@ -43,6 +43,22 @@ const globalForPrisma = globalThis as unknown as {
  */
 const POOL_MAX = Math.max(1, Number(process.env.DATABASE_POOL_MAX ?? 5));
 
+/**
+ * How long to wait for a connection from the pool before giving up.
+ *
+ * Five seconds is right for the deployed runtime: the database sits next to the
+ * function, and a wait longer than that means something is wrong that waiting
+ * will not fix. It is wrong for a test run against a distant Neon endpoint,
+ * where a suspended compute's cold start alone can exceed it — the isolation
+ * suite failed on "timeout exceeded when trying to connect" rather than on
+ * anything it was written to check. Overridable so that run can raise it; the
+ * default is unchanged, so production behaves exactly as before.
+ */
+const CONNECT_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.DATABASE_CONNECT_TIMEOUT_MS ?? 5000)
+);
+
 function isNeon(url: string): boolean {
   return /\.neon\.tech/i.test(url);
 }
@@ -97,7 +113,7 @@ function createPool(): pg.Pool {
     connectionString: resolveRuntimeUrl(),
     max: POOL_MAX,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
     // Keeps sockets alive between warm invocations so a busy instance is not
     // paying TLS setup on every request.
     keepAlive: true,

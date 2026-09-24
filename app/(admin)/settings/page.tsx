@@ -10,6 +10,8 @@ interface OneDriveAccount {
   folderItemId?: string;
   invoiceFolderPath?: string;
   invoiceFolderItemId?: string;
+  collectionsFolderPath?: string;
+  collectionsFolderItemId?: string;
 }
 
 interface OneDriveFolder {
@@ -42,6 +44,9 @@ interface FolderValidation {
   writable: boolean;
   fileCount: number;
   pdfCount: number;
+  /** Files of the kind this folder is FOR — PDFs, trip sheets, or collections. */
+  matchedFileCount: number;
+  matchedFileLabel?: string;
   error?: string;
 }
 
@@ -64,8 +69,13 @@ interface Settings {
   invoiceFolderType: string;
   tripSheetFolderPath: string;
   tripSheetFolderType: string;
+  collectionsFolderPath: string;
+  collectionsFolderType: string;
   signaturePosition: SignaturePosition;
 }
+
+/** The three folders an ADMIN configures. Collections is a SIBLING of invoices. */
+type FolderTarget = "invoices" | "tripsheets" | "collections";
 
 interface CloudSyncRoot {
   provider: string;
@@ -81,13 +91,15 @@ export default function SettingsPage() {
     invoiceFolderType: "local",
     tripSheetFolderPath: "",
     tripSheetFolderType: "local",
+    collectionsFolderPath: "",
+    collectionsFolderType: "local",
     signaturePosition: DEFAULT_SIG_POSITION,
   });
   const [selectedPath, setSelectedPath] = useState("");
   const [browseData, setBrowseData] = useState<BrowseResult | null>(null);
   const [browsing, setBrowsing] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
-  const [browserTarget, setBrowserTarget] = useState<"invoices" | "tripsheets">("invoices");
+  const [browserTarget, setBrowserTarget] = useState<FolderTarget>("invoices");
   const [validation, setValidation] = useState<FolderValidation | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<{
@@ -106,6 +118,13 @@ export default function SettingsPage() {
   const [tsManualPath, setTsManualPath] = useState("");
   const [tsShowManualInput, setTsShowManualInput] = useState(false);
 
+  // Collections folder state
+  const [colSelectedPath, setColSelectedPath] = useState("");
+  const [colValidation, setColValidation] = useState<FolderValidation | null>(null);
+  const [colSaving, setColSaving] = useState(false);
+  const [colSaveResult, setColSaveResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [colManualPath, setColManualPath] = useState("");
+
   // Cloud sync roots
   const [cloudRoots, setCloudRoots] = useState<CloudSyncRoot[]>([]);
 
@@ -117,7 +136,7 @@ export default function SettingsPage() {
   const [onedriveFolders, setOnedriveFolders] = useState<OneDriveFolder[]>([]);
   const [onedriveBrowsing, setOnedriveBrowsing] = useState(false);
   const [onedriveBrowserOpen, setOnedriveBrowserOpen] = useState(false);
-  const [onedriveBrowserTarget, setOnedriveBrowserTarget] = useState<"tripsheets" | "invoices">("tripsheets");
+  const [onedriveBrowserTarget, setOnedriveBrowserTarget] = useState<FolderTarget>("tripsheets");
   const [onedriveBreadcrumbs, setOnedriveBreadcrumbs] = useState<{ id: string; name: string }[]>([]);
   const [onedriveFolderSaving, setOnedriveFolderSaving] = useState(false);
   const [onedriveMessage, setOnedriveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -144,6 +163,7 @@ export default function SettingsPage() {
         setSettings(data);
         setSelectedPath(data.invoiceFolderPath || "");
         setTsSelectedPath(data.tripSheetFolderPath || "");
+        setColSelectedPath(data.collectionsFolderPath || "");
         if (data.signaturePosition) {
           setSigPosition(data.signaturePosition);
         }
@@ -347,7 +367,7 @@ export default function SettingsPage() {
   const sigHasChanges = JSON.stringify(sigPosition) !== JSON.stringify(settings.signaturePosition || DEFAULT_SIG_POSITION);
 
   // Browse a folder
-  const browseTo = useCallback(async (targetPath: string = "", type: "invoices" | "tripsheets" = "invoices") => {
+  const browseTo = useCallback(async (targetPath: string = "", type: FolderTarget = "invoices") => {
     setBrowsing(true);
     try {
       const params = new URLSearchParams();
@@ -367,18 +387,25 @@ export default function SettingsPage() {
   }, []);
 
   // Open browser for a specific target
-  const openBrowser = useCallback((target: "invoices" | "tripsheets" = "invoices") => {
+  const openBrowser = useCallback((target: FolderTarget = "invoices") => {
     setBrowserTarget(target);
     setBrowserOpen(true);
-    const startPath = target === "tripsheets" ? tsSelectedPath : selectedPath;
+    const startPath =
+      target === "tripsheets"
+        ? tsSelectedPath
+        : target === "collections"
+        ? colSelectedPath
+        : selectedPath;
     browseTo(startPath || "", target);
-  }, [selectedPath, tsSelectedPath, browseTo]);
+  }, [selectedPath, tsSelectedPath, colSelectedPath, browseTo]);
 
   // Select a folder
   const selectFolder = useCallback(
     async (folderPath: string) => {
       if (browserTarget === "tripsheets") {
         setTsSelectedPath(folderPath);
+      } else if (browserTarget === "collections") {
+        setColSelectedPath(folderPath);
       } else {
         setSelectedPath(folderPath);
       }
@@ -394,12 +421,16 @@ export default function SettingsPage() {
         const result = await res.json();
         if (browserTarget === "tripsheets") {
           setTsValidation(result);
+        } else if (browserTarget === "collections") {
+          setColValidation(result);
         } else {
           setValidation(result);
         }
       } catch {
         if (browserTarget === "tripsheets") {
           setTsValidation(null);
+        } else if (browserTarget === "collections") {
+          setColValidation(null);
         } else {
           setValidation(null);
         }
@@ -493,6 +524,58 @@ export default function SettingsPage() {
   const tsHasChanges = tsSelectedPath !== (settings.tripSheetFolderPath || "");
   const tsCanSave = tsHasChanges && (tsSelectedPath === "" || (tsValidation?.valid ?? false));
 
+  // Collections folder: test + save.
+  //
+  // The test is explicit rather than implicit on typing, because it is also
+  // where the server checks that the path does not overlap the invoice folder —
+  // an answer an admin should get while they are looking at the field, not when
+  // a driver ends up holding the wrong paperwork.
+  const handleColTest = async (candidate?: string) => {
+    const target = (candidate ?? colManualPath.trim() ?? colSelectedPath).trim();
+    if (!target) return;
+
+    setColSelectedPath(target);
+    setColManualPath("");
+    try {
+      const res = await fetch("/api/settings/validate-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: target, type: "collections" }),
+      });
+      setColValidation(await res.json());
+    } catch {
+      setColValidation(null);
+    }
+  };
+
+  const handleColSave = async () => {
+    setColSaving(true);
+    setColSaveResult(null);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ collectionsFolderPath: colSelectedPath }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSettings((prev) => ({ ...prev, collectionsFolderPath: colSelectedPath }));
+        setColSaveResult({ success: true, message: "Collections folder saved" });
+        setColValidation(null);
+      } else {
+        setColSaveResult({ success: false, message: data.error || "Failed to save" });
+      }
+    } catch {
+      setColSaveResult({ success: false, message: "Network error" });
+    } finally {
+      setColSaving(false);
+      setTimeout(() => setColSaveResult(null), 6000);
+    }
+  };
+
+  const colHasChanges = colSelectedPath !== (settings.collectionsFolderPath || "");
+  const colCanSave = colHasChanges && (colSelectedPath === "" || (colValidation?.valid ?? false));
+
   // OneDrive: initiate OAuth flow
   const handleOnedriveConnect = async () => {
     setOnedriveConnecting(true);
@@ -542,7 +625,7 @@ export default function SettingsPage() {
   };
 
   // OneDrive: open folder browser
-  const openOnedriveBrowser = (target: "tripsheets" | "invoices" = "tripsheets") => {
+  const openOnedriveBrowser = (target: FolderTarget = "tripsheets") => {
     setOnedriveBrowserTarget(target);
     setOnedriveBrowserOpen(true);
     setOnedriveBreadcrumbs([]);
@@ -582,11 +665,18 @@ export default function SettingsPage() {
       if (res.ok) {
         if (onedriveBrowserTarget === "invoices") {
           setOnedrive((prev) => prev ? { ...prev, invoiceFolderPath: folderPath, invoiceFolderItemId: folder.id } : prev);
+        } else if (onedriveBrowserTarget === "collections") {
+          setOnedrive((prev) => prev ? { ...prev, collectionsFolderPath: folderPath, collectionsFolderItemId: folder.id } : prev);
         } else {
           setOnedrive((prev) => prev ? { ...prev, folderPath, folderItemId: folder.id } : prev);
         }
         setOnedriveBrowserOpen(false);
-        const label = onedriveBrowserTarget === "invoices" ? "Invoice folder" : "Trip sheet folder";
+        const label =
+          onedriveBrowserTarget === "invoices"
+            ? "Invoice folder"
+            : onedriveBrowserTarget === "collections"
+            ? "Collections folder"
+            : "Trip sheet folder";
         setOnedriveMessage({ type: "success", text: `${label} set: ${folderPath}` });
         setTimeout(() => setOnedriveMessage(null), 4000);
       } else {
@@ -746,6 +836,34 @@ export default function SettingsPage() {
                     {onedrive.invoiceFolderPath ? "Change" : "Choose Folder"}
                   </button>
                 </div>
+              </div>
+
+              {/* Collections Folder selection — a SIBLING of the invoice
+                  folder. Nesting one inside the other makes each listing pick
+                  up the other's PDFs, so the server refuses that pairing. */}
+              <div className="space-y-3">
+                <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
+                  Collections Folder
+                </p>
+                <div className="flex items-center gap-3 p-3 bg-ink-surface border border-ink-border rounded">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={onedrive.collectionsFolderPath ? "#00C07F" : "#888580"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                  <span className="flex-1 text-sm font-mono text-ink-black truncate">
+                    {onedrive.collectionsFolderPath || "No folder selected"}
+                  </span>
+                  <button
+                    onClick={() => openOnedriveBrowser("collections")}
+                    className="text-xs font-mono text-[#0078D4] hover:text-[#005a9e] transition-colors px-3 py-1.5 border border-[#0078D4]/30 rounded hover:bg-[#0078D4]/5"
+                  >
+                    {onedrive.collectionsFolderPath ? "Change" : "Choose Folder"}
+                  </button>
+                </div>
+                <p className="text-[11px] text-ink-muted">
+                  Must sit <strong>alongside</strong> the invoice folder, not inside it. Signex
+                  reads pending documents from its <code>Pending</code> subfolder and writes
+                  signed ones to <code>Signed</code>.
+                </p>
               </div>
 
               {/* Trip Sheet Folder selection */}
@@ -1589,6 +1707,147 @@ export default function SettingsPage() {
               ) : (
                 "Save Changes"
               )}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ─── Collections Folder ─────────────────────────────────── */}
+      <div className="mt-6 bg-ink-card border border-ink-border rounded overflow-hidden">
+        <div className="px-6 py-4 border-b border-ink-border">
+          <div className="flex items-center gap-2">
+            <h2 className="font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
+              Collections Folder
+            </h2>
+            {colSelectedPath && getProviderBadge(settings.collectionsFolderType) && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono font-medium rounded-full"
+                style={{
+                  backgroundColor: getProviderBadge(settings.collectionsFolderType)!.color + '15',
+                  color: getProviderBadge(settings.collectionsFolderType)!.color,
+                  border: `1px solid ${getProviderBadge(settings.collectionsFolderType)!.color}30`,
+                }}
+              >
+                {getProviderBadge(settings.collectionsFolderType)!.icon} {getProviderBadge(settings.collectionsFolderType)!.label}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-ink-muted mt-1">
+            Credit returns and uplifts. Put it <strong>alongside</strong> the invoice folder —
+            not inside it — with <code>Pending</code> and <code>Signed</code> subfolders.
+          </p>
+        </div>
+
+        <div className="p-6 space-y-5">
+          <div className="flex items-center gap-3 p-4 bg-ink-surface border border-ink-border rounded">
+            <div className="w-10 h-10 rounded bg-ink-card border border-ink-border flex items-center justify-center shrink-0">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={colSelectedPath ? "#8B5CF6" : "#888580"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 7h18l-1.5 12a2 2 0 0 1-2 1.8H6.5a2 2 0 0 1-2-1.8Z" />
+                <path d="M8 7V5a4 4 0 0 1 8 0v2" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-mono text-ink-muted uppercase tracking-wide mb-0.5">
+                {colSelectedPath ? "Selected folder" : "No folder configured"}
+              </p>
+              <p className="text-sm font-mono text-ink-black truncate">
+                {colSelectedPath || "Collections are unavailable until this is set"}
+              </p>
+            </div>
+            <button
+              onClick={() => openBrowser("collections")}
+              className="px-3 py-1.5 text-xs font-mono border border-ink-border rounded hover:bg-ink-card transition-colors shrink-0"
+            >
+              Browse
+            </button>
+          </div>
+
+          {/* Manual path — the machine running Signex is often not the machine
+              the admin is sitting at, so a typed UNC path has to work too. */}
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={colManualPath}
+              onChange={(e) => setColManualPath(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleColTest();
+              }}
+              placeholder={"C:\\Signex\\Collections  or  \\\\server\\share\\Collections"}
+              className="flex-1 px-3 py-2.5 bg-ink-card border border-ink-border rounded font-mono text-sm focus:border-ink-green outline-none"
+            />
+            <button
+              onClick={() => handleColTest()}
+              disabled={!colManualPath.trim() && !colSelectedPath}
+              className="px-4 py-2.5 text-sm font-mono border border-ink-border rounded hover:bg-ink-surface transition-colors disabled:opacity-40"
+            >
+              Test
+            </button>
+          </div>
+
+          {colValidation && (
+            <div
+              className={`p-4 rounded border ${
+                colValidation.valid
+                  ? "bg-ink-green-dim border-ink-green/20"
+                  : "bg-ink-red-dim border-ink-red/20"
+              }`}
+            >
+              {colValidation.valid ? (
+                <>
+                  <p className="text-sm font-mono text-ink-green">
+                    ✓ Folder is readable{colValidation.writable ? " and writable" : ""}
+                  </p>
+                  <p className="text-xs text-ink-muted mt-1">
+                    {colValidation.matchedFileCount} pending collection document
+                    {colValidation.matchedFileCount === 1 ? "" : "s"} in <code>Pending</code>
+                  </p>
+                  {!colValidation.writable && (
+                    <p className="text-xs text-ink-amber mt-1">
+                      Signed receipts cannot be written here — they need write access.
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm font-mono text-ink-red">✕ {colValidation.error}</p>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between px-6 py-4 border-t border-ink-border bg-ink-surface/50">
+          <div className="flex-1">
+            {colSaveResult && (
+              <div
+                className={`flex items-center gap-2 text-sm font-mono animate-fade-in ${
+                  colSaveResult.success ? "text-ink-green" : "text-ink-red"
+                }`}
+              >
+                {colSaveResult.success ? "✓" : "✕"} {colSaveResult.message}
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {colHasChanges && (
+              <button
+                onClick={() => {
+                  setColSelectedPath(settings.collectionsFolderPath || "");
+                  setColValidation(null);
+                }}
+                className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
+              >
+                Cancel
+              </button>
+            )}
+            <button
+              onClick={handleColSave}
+              disabled={!colCanSave || colSaving}
+              className={`px-5 py-2.5 text-sm font-mono font-medium rounded transition-all ${
+                colCanSave && !colSaving
+                  ? "bg-ink-green text-white hover:bg-ink-green-hover active:scale-[0.98]"
+                  : "bg-ink-border text-ink-muted cursor-not-allowed"
+              }`}
+            >
+              {colSaving ? "Saving…" : "Save Changes"}
             </button>
           </div>
         </div>
