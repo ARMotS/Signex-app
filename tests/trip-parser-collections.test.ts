@@ -198,7 +198,9 @@ describe("fixture: a row carrying both an invoice and a collection", () => {
     expect(stops[0].collections).toHaveLength(1);
   });
 
-  it("credits the collection against that row's own invoice by default", async () => {
+  it("does not assume the row's invoice is the one being credited", async () => {
+    // The credited invoice is printed on the collection document. A collection
+    // that merely shares a row with a delivery is not credited against it.
     const result = await parse([
       HEADERS,
       ["2026-08-24", "John Smith", "CA 123-456", "Beta Supplies", "INV-2042", "COL-118", "", "1"],
@@ -206,10 +208,10 @@ describe("fixture: a row carrying both an invoice and a collection", () => {
 
     const collection = result.driverResults[0].stops[0].collections![0];
     expect(collection.type).toBe("CREDIT_RETURN");
-    expect(collection.originalInvoiceNo).toBe("INV-2042");
+    expect(collection.originalInvoiceNo).toBeNull();
   });
 
-  it("lets an explicit column override which invoice is credited", async () => {
+  it("takes the credited invoice from an explicit column when the sheet has one", async () => {
     const result = await parseTripSheet(
       TENANT,
       csv([

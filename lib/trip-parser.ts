@@ -571,11 +571,12 @@ export async function parseTripSheet(
           type: typing.type,
           upliftSubtype: typing.upliftSubtype,
           notes: null,
-          // A credit return sharing a row with an invoice credits that invoice,
-          // unless the sheet names a different one outright.
-          originalInvoiceNo:
-            row.originalInvoiceNo ||
-            (typing.type === "CREDIT_RETURN" ? stop.invoiceNumber || null : null),
+          // Only what the sheet states outright. Sharing a row with an invoice
+          // does NOT mean the collection is credited against it — the invoice a
+          // credit goes back against is printed on the collection document,
+          // and inferring it from the row put the wrong number in front of
+          // accounts.
+          originalInvoiceNo: row.originalInvoiceNo || null,
           status: "PENDING",
           exceptionReason: null,
           expectedQty: row.collectQty,
