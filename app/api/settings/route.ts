@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readConfig, writeConfig, validateFolderPath } from "@/lib/config";
+import { assertCollectionsFolderIsSibling } from "@/lib/collections";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
@@ -41,6 +42,36 @@ export const PUT = withAuth(async (request: NextRequest) => {
         },
         { status: 400 }
       );
+    }
+  }
+
+  if (body.collectionsFolderPath !== undefined && body.collectionsFolderPath !== "") {
+    const validation = validateFolderPath(body.collectionsFolderPath, "collections");
+    if (!validation.valid) {
+      return NextResponse.json(
+        {
+          error: `Invalid collections folder path: ${validation.error}`,
+          validation,
+        },
+        { status: 400 }
+      );
+    }
+  }
+
+  // Invoices and collections are siblings, never nested. Checked against the
+  // values this request would leave behind rather than the ones already stored,
+  // so moving either folder is validated against the other's new position too.
+  if (
+    body.invoiceFolderPath !== undefined ||
+    body.collectionsFolderPath !== undefined
+  ) {
+    const current = await readConfig(ctx.tenantId);
+    const sibling = assertCollectionsFolderIsSibling(
+      body.invoiceFolderPath ?? current.invoiceFolderPath,
+      body.collectionsFolderPath ?? current.collectionsFolderPath
+    );
+    if (!sibling.ok) {
+      return NextResponse.json({ error: sibling.error }, { status: 400 });
     }
   }
 

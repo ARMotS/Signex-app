@@ -50,6 +50,7 @@ model Tenant {
   cloudAccounts CloudAccount[]
   importedFiles ImportedFile[]
   auditLogs     AuditLog[]
+  collections   Collection[]
 }
 
 model User {
@@ -108,6 +109,7 @@ model Driver {
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   tripSheets   TripSheet[]
+  collections  Collection[]
 
   // Driver names are unique WITHIN a scope only. A global unique constraint
   // would leak another ADMIN's driver names through the duplicate-name error.
@@ -137,6 +139,7 @@ model TripSheet {
   tenantId       String          @default("")
   tenant         Tenant          @relation(fields: [tenantId], references: [id])
   stops          Stop[]
+  collections    Collection[]
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
@@ -203,6 +206,7 @@ model Stop {
   contactId     String?
   tenantId      String     @default("")
   tenant        Tenant     @relation(fields: [tenantId], references: [id])
+  collections   Collection[]
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
 
@@ -212,6 +216,8 @@ model Stop {
   // (deletedAt) anyway — a hard delete of a referenced contact should fail loudly.
   contact   Contact?  @relation(fields: [tenantId, contactId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
 
+  // Composite-FK target so a Collection cannot hang off another scope's stop.
+  @@unique([tenantId, id])
   @@index([tenantId])
   @@index([tripSheetId])
   @@index([invoiceNumber])
@@ -221,6 +227,113 @@ model Stop {
   @@index([tenantId, emailStatus])
   // Drives "signed today" reporting without scanning a scope's whole history.
   @@index([tenantId, signedAt])
+}
+
+// ─── Collections (credit returns & non-credit uplifts) ────────────────────
+//
+// A collection is the mirror image of a delivery: the driver takes something
+// AWAY from the customer and captures a signature for it exactly as they do for
+// an invoice. Collections arrive on the same trip sheet (the COLLECTNO column)
+// and hang off the same customer Stop, so the driver sees one visit with two
+// lists rather than two unrelated jobs at the same address.
+//
+// Isolation is Stop's, unchanged: composite foreign keys to [tenantId, id] on
+// TripSheet, Stop and Driver make a collection that points into another scope
+// unrepresentable rather than merely discouraged.
+//
+// Cascade from TripSheet is deliberate and mirrors Stop. Completing a trip
+// deletes it, and completeTripSheet() freezes the collections into the
+// CompletedTripSheet snapshot first — the signed PDFs themselves stay in the
+// collections folder's Signed/ subfolder permanently and are never moved.
+
+enum CollectionType {
+  /// Creditable goods going back against an invoice already delivered.
+  /// originalInvoiceNo is what accounts reconciles the credit against.
+  CREDIT_RETURN
+  /// Not creditable — company property, crates, paperwork, one-off requests.
+  /// Requires an upliftSubtype.
+  NON_CREDIT_UPLIFT
+}
+
+/// Required for NON_CREDIT_UPLIFT and meaningless for CREDIT_RETURN. Enforced
+/// in lib/collections.ts, not by the database — a check constraint here would
+/// have to be hand-written into the migration and is easy to drift.
+enum UpliftSubtype {
+  COMPANY_PARCEL
+  EQUIPMENT_OR_CRATES
+  DOCUMENTS
+  /// Free text in Collection.notes is required alongside this one.
+  SPECIAL_REQUEST
+}
+
+/// The outcome of one collection.
+///
+/// Four terminal states rather than a boolean, because accounts treats them
+/// differently: COLLECTED and PARTIAL produce a credit (for different amounts),
+/// NOT_AVAILABLE means try again another day, and REFUSED means the customer
+/// declined and the credit must not be raised at all. Everything except
+/// COLLECTED carries an exceptionReason.
+enum CollectionStatus {
+  PENDING
+  COLLECTED
+  PARTIAL
+  NOT_AVAILABLE
+  REFUSED
+}
+
+model Collection {
+  id                String           @id @default(cuid())
+  /// The number on the trip sheet's COLLECTNO column. Unique per trip within a
+  /// scope — the same number may legitimately recur on a later trip.
+  collectionNo      String
+  type              CollectionType
+  upliftSubtype     UpliftSubtype?
+  notes             String?          @db.Text
+  /// The invoice this credit goes back against. Read off the collection
+  /// document when one is matched; null when the paperwork does not carry it.
+  originalInvoiceNo String?
+  status            CollectionStatus @default(PENDING)
+  /// Required whenever status is PARTIAL, NOT_AVAILABLE or REFUSED.
+  exceptionReason   String?          @db.Text
+  expectedQty       Int?
+  collectedQty      Int?
+  /// The pending collection document, matched to collectionNo by filename the
+  /// same way invoices are. Both *FilePath columns hold the FILENAME within the
+  /// relevant subfolder, not an absolute path: that is the key both the OneDrive
+  /// and the local reader address a file by, and an absolute path recorded on a
+  /// server that has since moved would resolve to nothing.
+  sourceFileId      String?
+  sourceFilePath    String?
+  /// The stamped output in the collections folder's Signed/ subfolder.
+  signedFileId      String?
+  signedFilePath    String?
+  /// PNG data URL, as Stop.signatureData. Same capture component, same storage.
+  signature         String?          @db.Text
+  signedByName      String?
+  collectedAt       DateTime?
+  /// Who completed it. Null until the collection reaches a terminal status.
+  driverId          String?
+  tripSheetId       String
+  stopId            String
+  tenantId          String           @default("")
+  tenant            Tenant           @relation(fields: [tenantId], references: [id])
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  tripSheet TripSheet @relation(fields: [tenantId, tripSheetId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  stop      Stop      @relation(fields: [tenantId, stopId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  // Restrict, not SetNull: the composite FK includes the required tenantId, so
+  // SetNull would try to null a NOT NULL column. Same reasoning as Stop.contact.
+  driver    Driver?   @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([tenantId, tripSheetId, collectionNo])
+  @@index([tenantId])
+  @@index([tripSheetId])
+  @@index([stopId])
+  @@index([tenantId, status])
+  // Drives the credit-return report: type + date range, without scanning a
+  // scope's whole collection history.
+  @@index([tenantId, type, collectedAt])
 }
 
 // ─── Completed Trip Sheets (archive) ──────────────────────────────────────
@@ -251,9 +364,19 @@ model CompletedTripSheet {
   completedBy    String?
   totalStops     Int
   signedStops    Int
+  totalCollections Int    @default(0)
+  collectedCollections Int @default(0)
   /// Frozen array of { stopNumber, invoiceNumber, customerName, address, nop,
   /// signedAt, emailStatus }.
   stops          Json
+  /// Frozen array of the trip's collections — see ArchivedCollection in
+  /// lib/trip-data.ts. Nullable because rows archived before collections
+  /// existed have none; readers treat null as [].
+  ///
+  /// This is the whole record once the trip is closed: the Collection rows
+  /// cascade away with the trip sheet, so signedFilePath here is what the
+  /// archive view and the credit-return report read.
+  collections    Json?
   tenantId       String   @default("")
   tenant         Tenant   @relation(fields: [tenantId], references: [id])
   createdAt      DateTime @default(now())
@@ -300,6 +423,11 @@ model CloudAccount {
   folderItemId        String? // trip sheet folder item ID
   invoiceFolderPath   String?
   invoiceFolderItemId String?
+  // Collections live in a SIBLING folder of the invoices folder, never inside
+  // it: the invoice listing and the collections listing must not see each
+  // other's documents. lib/collections.ts rejects a nested configuration.
+  collectionsFolderPath   String?
+  collectionsFolderItemId String?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 

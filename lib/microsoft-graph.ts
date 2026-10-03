@@ -33,6 +33,19 @@ const PROVIDER = "onedrive";
 /** Subfolder of the invoice folder holding countersigned copies. */
 const SIGNED_SUBFOLDER = "signed";
 
+/**
+ * Subfolders of the COLLECTIONS folder.
+ *
+ * The collections folder is a sibling of the invoice folder, not a subfolder of
+ * it: the invoice listing must never pick up a collection document, and the
+ * collections listing must never pick up an invoice. Keeping them in separate
+ * configured folders is what makes that true by construction — see
+ * assertCollectionsFolderIsSibling in lib/collections.ts, which refuses a
+ * nested configuration.
+ */
+const COLLECTIONS_PENDING_SUBFOLDER = "Pending";
+const COLLECTIONS_SIGNED_SUBFOLDER = "Signed";
+
 function getClientId(): string {
   const id = process.env.MICROSOFT_CLIENT_ID;
   if (!id) throw new Error("MICROSOFT_CLIENT_ID is not configured");
@@ -336,6 +349,8 @@ export async function getCloudAccountStatus(tenantId: string) {
     folderItemId: account.folderItemId,
     invoiceFolderPath: account.invoiceFolderPath,
     invoiceFolderItemId: account.invoiceFolderItemId,
+    collectionsFolderPath: account.collectionsFolderPath,
+    collectionsFolderItemId: account.collectionsFolderItemId,
   };
 }
 
@@ -569,6 +584,79 @@ export async function setOneDriveInvoiceFolder(
 }
 
 /**
+ * Set the configured OneDrive folder for collections, for this scope.
+ *
+ * A sibling of the invoice folder, never inside it. The caller checks that;
+ * this only stores what it was given.
+ */
+export async function setOneDriveCollectionsFolder(
+  tenantId: string,
+  folderPath: string,
+  folderItemId: string
+): Promise<void> {
+  await scopedPrisma(tenantId).cloudAccount.updateMany({
+    where: { provider: PROVIDER },
+    data: { collectionsFolderPath: folderPath, collectionsFolderItemId: folderItemId },
+  });
+}
+
+/**
+ * List pending collection documents in this scope's Collections/Pending folder.
+ *
+ * Deliberately reads only the Pending subfolder: a document that has been
+ * signed has moved on to Signed/ and must not come back as outstanding work.
+ */
+export async function listOneDriveCollectionDocuments(
+  tenantId: string
+): Promise<OneDriveItem[]> {
+  const account = await getAccount(tenantId);
+
+  if (!account?.collectionsFolderItemId) return [];
+
+  const children = await listFolderById(tenantId, account.collectionsFolderItemId);
+  const pendingFolder = children.find(
+    (item) =>
+      item.folder &&
+      item.name.toLowerCase() === COLLECTIONS_PENDING_SUBFOLDER.toLowerCase()
+  );
+  if (!pendingFolder) return [];
+
+  const items = await listFolderById(tenantId, pendingFolder.id);
+  return items.filter((item) => {
+    if (item.folder) return false;
+    return item.name.toLowerCase().endsWith(".pdf");
+  });
+}
+
+/**
+ * List signed collection documents in this scope's Collections/Signed folder.
+ *
+ * Nothing is ever deleted or moved out of Signed/ — it is the permanent record
+ * a completed trip's archive view links back to.
+ */
+export async function listOneDriveSignedCollections(
+  tenantId: string
+): Promise<OneDriveItem[]> {
+  const account = await getAccount(tenantId);
+
+  if (!account?.collectionsFolderItemId) return [];
+
+  const children = await listFolderById(tenantId, account.collectionsFolderItemId);
+  const signedFolder = children.find(
+    (item) =>
+      item.folder &&
+      item.name.toLowerCase() === COLLECTIONS_SIGNED_SUBFOLDER.toLowerCase()
+  );
+  if (!signedFolder) return [];
+
+  const items = await listFolderById(tenantId, signedFolder.id);
+  return items.filter((item) => {
+    if (item.folder) return false;
+    return item.name.toLowerCase().endsWith(".pdf");
+  });
+}
+
+/**
  * List trip sheet files in this scope's configured OneDrive folder.
  * Filters for CSV/Excel files only.
  */
@@ -743,6 +831,135 @@ export async function downloadSignedInvoiceByName(
 }
 
 /**
+ * Find a pending collection document by filename. One Graph request, no listing.
+ */
+export async function getCollectionItemByName(
+  tenantId: string,
+  filename: string
+): Promise<OneDriveItem | null> {
+  const safe = assertSafeItemName(filename);
+  const account = await getAccount(tenantId);
+  if (!account?.collectionsFolderItemId) return null;
+
+  return getItemInFolderByName(tenantId, account.collectionsFolderItemId, [
+    COLLECTIONS_PENDING_SUBFOLDER,
+    safe,
+  ]);
+}
+
+/**
+ * Find a signed collection document by filename, inside Signed/.
+ */
+export async function getSignedCollectionItemByName(
+  tenantId: string,
+  filename: string
+): Promise<OneDriveItem | null> {
+  const safe = assertSafeItemName(filename);
+  const account = await getAccount(tenantId);
+  if (!account?.collectionsFolderItemId) return null;
+
+  return getItemInFolderByName(tenantId, account.collectionsFolderItemId, [
+    COLLECTIONS_SIGNED_SUBFOLDER,
+    safe,
+  ]);
+}
+
+/**
+ * Download a pending collection document by filename, in one request.
+ */
+export async function downloadCollectionByName(
+  tenantId: string,
+  filename: string
+): Promise<Buffer | null> {
+  const safe = assertSafeItemName(filename);
+  const account = await getAccount(tenantId);
+  if (!account?.collectionsFolderItemId) return null;
+
+  return graphGetBufferOrNull(
+    tenantId,
+    `/me/drive/items/${account.collectionsFolderItemId}:/${encodeRelativePath([
+      COLLECTIONS_PENDING_SUBFOLDER,
+      safe,
+    ])}:/content`
+  );
+}
+
+/**
+ * Download a signed collection document by filename, in one request.
+ */
+export async function downloadSignedCollectionByName(
+  tenantId: string,
+  filename: string
+): Promise<Buffer | null> {
+  const safe = assertSafeItemName(filename);
+  const account = await getAccount(tenantId);
+  if (!account?.collectionsFolderItemId) return null;
+
+  return graphGetBufferOrNull(
+    tenantId,
+    `/me/drive/items/${account.collectionsFolderItemId}:/${encodeRelativePath([
+      COLLECTIONS_SIGNED_SUBFOLDER,
+      safe,
+    ])}:/content`
+  );
+}
+
+/**
+ * Check if this scope's OneDrive collections folder is configured.
+ */
+export async function getOneDriveCollectionsSource(tenantId: string): Promise<{
+  connected: boolean;
+  folderPath?: string;
+  folderItemId?: string;
+} | null> {
+  try {
+    const status = await getCloudAccountStatus(tenantId);
+    if (status?.connected && status.collectionsFolderItemId) {
+      return {
+        connected: true,
+        folderPath: status.collectionsFolderPath ?? undefined,
+        folderItemId: status.collectionsFolderItemId,
+      };
+    }
+  } catch {
+    // not configured
+  }
+  return null;
+}
+
+/**
+ * Upload a signed collection document into Collections/Signed.
+ *
+ * Returns the created item so the caller can record its id — the archive view
+ * resolves a signed collection by id first and falls back to the path.
+ */
+export async function uploadSignedCollectionToOneDrive(
+  tenantId: string,
+  filename: string,
+  buffer: Buffer
+): Promise<OneDriveItem> {
+  const account = await getAccount(tenantId);
+
+  if (!account?.collectionsFolderItemId) {
+    throw new Error("OneDrive collections folder not configured");
+  }
+
+  const signedFolderId = await ensureSubfolder(
+    tenantId,
+    account.collectionsFolderItemId,
+    COLLECTIONS_SIGNED_SUBFOLDER
+  );
+
+  return uploadFileToFolder(
+    tenantId,
+    signedFolderId,
+    assertSafeItemName(filename),
+    buffer,
+    "application/pdf"
+  );
+}
+
+/**
  * Check if this scope's OneDrive invoice folder is configured.
  */
 export async function getOneDriveInvoiceSource(tenantId: string): Promise<{
@@ -779,9 +996,11 @@ export async function assertItemInConfiguredFolder(
   const account = await getAccount(tenantId);
   if (!account) throw new Error("No OneDrive connection for this account");
 
-  const allowedParents = [account.folderItemId, account.invoiceFolderItemId].filter(
-    (id): id is string => !!id
-  );
+  const allowedParents = [
+    account.folderItemId,
+    account.invoiceFolderItemId,
+    account.collectionsFolderItemId,
+  ].filter((id): id is string => !!id);
   if (allowedParents.length === 0) {
     throw new Error("No OneDrive folder configured for this account");
   }

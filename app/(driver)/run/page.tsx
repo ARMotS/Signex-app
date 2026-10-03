@@ -10,9 +10,24 @@ interface DriverInfo {
   stops: number;
 }
 
+interface TripCollection {
+  id: string;
+  collectionNo: string;
+  type: "CREDIT_RETURN" | "NON_CREDIT_UPLIFT";
+  upliftSubtype?: string | null;
+  notes?: string | null;
+  originalInvoiceNo?: string | null;
+  status: "PENDING" | "COLLECTED" | "PARTIAL" | "NOT_AVAILABLE" | "REFUSED";
+  expectedQty?: number | null;
+  collectedQty?: number | null;
+  exceptionReason?: string | null;
+  sourceFilePath?: string | null;
+}
+
 interface TripStop {
   id: string;
   stopNumber: number;
+  /** Empty on a collection-only stop — nothing is being delivered there. */
   invoiceNumber: string;
   customerName: string;
   address: string;
@@ -21,7 +36,37 @@ interface TripStop {
   status: "PENDING" | "IN_PROGRESS" | "SIGNED";
   signedAt?: string;
   tripSheetDate?: string;
+  collections?: TripCollection[];
 }
+
+const COLLECTION_STATUS_LABEL: Record<TripCollection["status"], string> = {
+  PENDING: "To collect",
+  COLLECTED: "Collected",
+  PARTIAL: "Partial",
+  NOT_AVAILABLE: "Not available",
+  REFUSED: "Refused",
+};
+
+const SUBTYPE_LABEL: Record<string, string> = {
+  COMPANY_PARCEL: "Company parcel",
+  EQUIPMENT_OR_CRATES: "Equipment / crates",
+  DOCUMENTS: "Documents",
+  SPECIAL_REQUEST: "Special request",
+};
+
+/** A collection is finished once it has any outcome other than PENDING. */
+const isCollectionDone = (c: TripCollection) => c.status !== "PENDING";
+
+/**
+ * A stop is finished when everything at that address is: the invoice signed (if
+ * there is one) AND every collection given an outcome. A driver who has signed
+ * for the delivery but not yet recorded the crates going back has not finished
+ * the stop, and the progress bar should not pretend otherwise.
+ */
+const isStopDone = (stop: TripStop) => {
+  const deliveryDone = !stop.invoiceNumber || stop.status === "SIGNED";
+  return deliveryDone && (stop.collections ?? []).every(isCollectionDone);
+};
 
 interface DriverTripSheet {
   id: string;
@@ -104,9 +149,12 @@ export default function RunPage() {
     }
   };
 
-  const signed = stops.filter((s) => s.status === "SIGNED").length;
+  const signed = stops.filter(isStopDone).length;
   const total = stops.length;
   const pct = total > 0 ? Math.round((signed / total) * 100) : 0;
+  const outstandingCollections = stops
+    .flatMap((s) => s.collections ?? [])
+    .filter((c) => !isCollectionDone(c)).length;
 
   return (
     <div className="flex-1 flex flex-col px-4 py-4">
@@ -130,6 +178,11 @@ export default function RunPage() {
         </div>
         <p className="text-xs text-ink-muted mt-2 font-mono">
           {total > 0 ? `${pct}% complete` : "No deliveries assigned"}
+          {outstandingCollections > 0 && (
+            <span className="ml-2 text-ink-violet">
+              · {outstandingCollections} to collect
+            </span>
+          )}
         </p>
       </div>
 
@@ -175,104 +228,177 @@ export default function RunPage() {
       {/* Stop list */}
       {!loading && stops.length > 0 && (
         <div className="space-y-2 stagger-children">
-          {stops.map((stop) => (
-            <div
-              key={stop.id}
-              className={`flex items-start gap-3 p-4 bg-ink-card border rounded transition-all touch-target ${
-                stop.status === "IN_PROGRESS"
-                  ? "border-ink-amber bg-ink-amber-dim"
-                  : stop.status === "SIGNED"
-                  ? "border-ink-border opacity-60"
-                  : "border-ink-border hover:border-ink-muted-light"
-              }`}
-            >
-              {/* Stop number */}
+          {stops.map((stop) => {
+            const collections = stop.collections ?? [];
+            const done = isStopDone(stop);
+            const hasDelivery = !!stop.invoiceNumber;
+
+            return (
               <div
-                className={`w-8 h-8 rounded flex items-center justify-center shrink-0 font-mono text-sm font-medium ${
-                  stop.status === "SIGNED"
-                    ? "bg-ink-green-dim text-ink-green"
+                key={stop.id}
+                className={`p-4 bg-ink-card border rounded transition-all ${
+                  done
+                    ? "border-ink-border opacity-60"
                     : stop.status === "IN_PROGRESS"
-                    ? "bg-ink-amber-dim text-ink-amber"
-                    : "bg-ink-surface text-ink-muted"
+                    ? "border-ink-amber bg-ink-amber-dim"
+                    : "border-ink-border hover:border-ink-muted-light"
                 }`}
               >
-                {stop.status === "SIGNED" ? "✓" : stop.stopNumber}
-              </div>
+                {/* ── The visit ───────────────────────────────────── */}
+                <div className="flex items-start gap-3">
+                  <div
+                    className={`w-8 h-8 rounded flex items-center justify-center shrink-0 font-mono text-sm font-medium ${
+                      done
+                        ? "bg-ink-green-dim text-ink-green"
+                        : stop.status === "IN_PROGRESS"
+                        ? "bg-ink-amber-dim text-ink-amber"
+                        : "bg-ink-surface text-ink-muted"
+                    }`}
+                  >
+                    {done ? "✓" : stop.stopNumber}
+                  </div>
 
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <p className="font-mono text-sm font-medium text-ink-black truncate">
-                    {stop.customerName}
-                  </p>
-                </div>
-                <p className="text-xs text-ink-muted mt-0.5">
-                    {stop.invoiceNumber}
-                    {stop.nop > 0 && (
-                      <span className="ml-2 inline-flex items-center gap-1 px-1.5 py-0.5 bg-ink-surface rounded text-[10px] font-mono">
-                        📦 {stop.nop} {stop.nop === 1 ? "parcel" : "parcels"}
-                      </span>
-                    )}
+                  <div className="flex-1 min-w-0">
+                    <p className="font-mono text-sm font-medium text-ink-black truncate">
+                      {stop.customerName}
+                    </p>
                     {stop.tripSheetDate && (
-                      <span className="ml-2 text-[10px] font-mono text-ink-muted">
+                      <p className="text-[10px] font-mono text-ink-muted mt-0.5">
                         {new Date(stop.tripSheetDate).toLocaleDateString("en-ZA", { day: "2-digit", month: "short" })}
-                      </span>
+                      </p>
                     )}
-                  </p>
+                  </div>
 
-                {/* Action buttons for non-signed stops */}
-                {stop.status !== "SIGNED" && (
-                  <div className="flex items-center gap-2 mt-2">
-                    {stop.status === "PENDING" && (
-                      <button
-                        onClick={() => updateStopStatus(stop.id, "IN_PROGRESS")}
-                        className="px-3 py-1.5 text-xs font-mono bg-ink-amber-dim text-ink-amber rounded hover:bg-ink-amber hover:text-white transition-all"
-                      >
-                        Start Delivery
-                      </button>
-                    )}
-                    {stop.status === "IN_PROGRESS" && (
-                      <>
-                        {stop.invoiceFile ? (
-                          <Link
-                            href={`/api/invoices/${encodeURIComponent(stop.invoiceFile)}`}
-                            target="_blank"
-                            className="px-3 py-1.5 text-xs font-mono bg-ink-green-dim text-ink-green rounded hover:bg-ink-green hover:text-white transition-all"
+                  <span
+                    className={
+                      done
+                        ? "badge-signed"
+                        : stop.status === "IN_PROGRESS"
+                        ? "badge-progress"
+                        : "badge-pending"
+                    }
+                  >
+                    {done ? "Done" : stop.status === "IN_PROGRESS" ? "Current" : "Pending"}
+                  </span>
+                </div>
+
+                {/* ── Deliveries ──────────────────────────────────── */}
+                {hasDelivery && (
+                  <div className="mt-3 pl-11">
+                    <p className="text-[10px] font-mono uppercase tracking-wide text-ink-muted-light mb-1.5">
+                      Deliveries
+                    </p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono text-xs text-ink-black">
+                        {stop.invoiceNumber}
+                      </span>
+                      {stop.nop > 0 && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-ink-surface rounded text-[10px] font-mono">
+                          📦 {stop.nop} {stop.nop === 1 ? "parcel" : "parcels"}
+                        </span>
+                      )}
+                      {stop.status === "SIGNED" && (
+                        <span className="text-[10px] font-mono text-ink-green">Signed</span>
+                      )}
+                    </div>
+
+                    {stop.status !== "SIGNED" && (
+                      <div className="flex items-center gap-2 mt-2 flex-wrap">
+                        {stop.status === "PENDING" && (
+                          <button
+                            onClick={() => updateStopStatus(stop.id, "IN_PROGRESS")}
+                            className="px-3 py-1.5 text-xs font-mono bg-ink-amber-dim text-ink-amber rounded hover:bg-ink-amber hover:text-white transition-all touch-target"
                           >
-                            View Invoice
-                          </Link>
-                        ) : null}
-                        <Link
-                          href={`/sign/${stop.id}`}
-                          className="px-3 py-1.5 text-xs font-mono bg-ink-green text-white rounded hover:bg-ink-green-hover transition-all inline-flex items-center gap-1.5"
-                        >
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                          </svg>
-                          Get Signature
-                        </Link>
-                      </>
+                            Start Delivery
+                          </button>
+                        )}
+                        {stop.status === "IN_PROGRESS" && (
+                          <>
+                            {stop.invoiceFile ? (
+                              <Link
+                                href={`/api/invoices/${encodeURIComponent(stop.invoiceFile)}`}
+                                target="_blank"
+                                className="px-3 py-1.5 text-xs font-mono bg-ink-green-dim text-ink-green rounded hover:bg-ink-green hover:text-white transition-all touch-target"
+                              >
+                                View Invoice
+                              </Link>
+                            ) : null}
+                            <Link
+                              href={`/sign/${stop.id}`}
+                              className="px-3 py-1.5 text-xs font-mono bg-ink-green text-white rounded hover:bg-ink-green-hover transition-all inline-flex items-center gap-1.5 touch-target"
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                              </svg>
+                              Get Signature
+                            </Link>
+                          </>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
-              </div>
 
-              <span
-                className={
-                  stop.status === "SIGNED"
-                    ? "badge-signed"
-                    : stop.status === "IN_PROGRESS"
-                    ? "badge-progress"
-                    : "badge-pending"
-                }
-              >
-                {stop.status === "SIGNED"
-                  ? "Signed"
-                  : stop.status === "IN_PROGRESS"
-                  ? "Current"
-                  : "Pending"}
-              </span>
-            </div>
-          ))}
+                {/* ── Collections ─────────────────────────────────── */}
+                {collections.length > 0 && (
+                  <div className={`pl-11 ${hasDelivery ? "mt-3 pt-3 border-t border-ink-border" : "mt-3"}`}>
+                    <p className="text-[10px] font-mono uppercase tracking-wide text-ink-muted-light mb-1.5">
+                      Collections
+                    </p>
+                    <div className="space-y-2">
+                      {collections.map((c) => (
+                        <div key={c.id} className="flex items-start gap-2 flex-wrap">
+                          <span
+                            className={c.type === "CREDIT_RETURN" ? "badge-credit" : "badge-uplift"}
+                          >
+                            {c.type === "CREDIT_RETURN" ? "Credit Return" : "Uplift"}
+                          </span>
+
+                          <div className="flex-1 min-w-0">
+                            <p className="font-mono text-xs text-ink-black">
+                              {c.collectionNo}
+                              {c.expectedQty != null && (
+                                <span className="ml-2 text-ink-muted">
+                                  ×{c.expectedQty}
+                                </span>
+                              )}
+                            </p>
+                            <p className="text-[10px] text-ink-muted mt-0.5">
+                              {c.upliftSubtype
+                                ? SUBTYPE_LABEL[c.upliftSubtype] ?? c.upliftSubtype
+                                : c.originalInvoiceNo
+                                ? `Against ${c.originalInvoiceNo}`
+                                : null}
+                            </p>
+                            {isCollectionDone(c) && (
+                              <p className="text-[10px] font-mono mt-0.5 text-ink-muted">
+                                {COLLECTION_STATUS_LABEL[c.status]}
+                                {c.collectedQty != null ? ` · ${c.collectedQty}` : ""}
+                                {c.exceptionReason ? ` · ${c.exceptionReason}` : ""}
+                              </p>
+                            )}
+                          </div>
+
+                          {isCollectionDone(c) ? (
+                            <span className="text-[10px] font-mono text-ink-green shrink-0 mt-1">
+                              ✓
+                            </span>
+                          ) : (
+                            <Link
+                              href={`/collect/${c.id}`}
+                              className="px-3 py-1.5 text-xs font-mono bg-ink-violet text-white rounded hover:opacity-90 transition-all shrink-0 touch-target"
+                            >
+                              Collect
+                            </Link>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 

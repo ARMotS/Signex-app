@@ -11,6 +11,12 @@
   --ink-amber-dim: #F5A62322;
   --ink-red: #E84040;
   --ink-red-dim: #E8404022;
+  /* Credit return — money going back */
+  --ink-violet: #8B5CF6;
+  --ink-violet-dim: #8B5CF622;
+  /* Non-credit uplift — goods going back, no credit */
+  --ink-blue: #3D7DF6;
+  --ink-blue-dim: #3D7DF622;
   --ink-surface: #F7F6F3;
   --ink-card: #FFFFFF;
   --ink-border: #E2E0DA;
@@ -45,6 +51,10 @@
   --color-ink-amber-dim: var(--ink-amber-dim);
   --color-ink-red: var(--ink-red);
   --color-ink-red-dim: var(--ink-red-dim);
+  --color-ink-violet: var(--ink-violet);
+  --color-ink-violet-dim: var(--ink-violet-dim);
+  --color-ink-blue: var(--ink-blue);
+  --color-ink-blue-dim: var(--ink-blue-dim);
   --color-ink-surface: var(--ink-surface);
   --color-ink-card: var(--ink-card);
   --color-ink-border: var(--ink-border);
@@ -122,6 +132,36 @@ body {
   border-radius: 4px;
   background: var(--ink-amber-dim);
   color: var(--ink-amber);
+}
+
+.badge-credit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  background: var(--ink-violet-dim);
+  color: var(--ink-violet);
+}
+
+.badge-uplift {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  background: var(--ink-blue-dim);
+  color: var(--ink-blue);
 }
 
 /* ─── Scrollbar Styling ────────────────────────────────────────────────── */

@@ -36,6 +36,8 @@ export const TRIP_SHEET_TEMPLATE_HEADERS = [
   "REGNO",
   "Customer",
   "INVOICENO",
+  "COLLECTNO",
+  "COLLECTTYPE",
   "NOP",
 ] as const;
 
@@ -72,10 +74,13 @@ function instructionSheet(title: string, intro: string[], table: Row[]): XLSX.Wo
 
 // ─── Trip sheet template ──────────────────────────────────────────────────
 
+// One of each shape the parser handles, so an admin can see that a collection
+// may ride with a delivery, stand on its own, or be absent entirely.
 const TRIP_SHEET_EXAMPLE_ROWS: Row[] = [
-  ["2026-08-24", "John Smith", "CA 123-456", "Acme Hardware", "INV-2041", 3],
-  ["2026-08-24", "John Smith", "CA 123-456", "Beta Supplies", "INV-2042", 1],
-  ["2026-08-24", "Thandi Nkosi", "CJ 998-221", "Cape Fittings", "INV-2043", 12],
+  ["2026-08-24", "John Smith", "CA 123-456", "Acme Hardware", "INV-2041", "", "", 3],
+  ["2026-08-24", "John Smith", "CA 123-456", "Beta Supplies", "INV-2042", "COL-118", "Credit Return", 1],
+  ["2026-08-24", "John Smith", "CA 123-456", "Delta Trading", "", "COL-119", "Crates", 0],
+  ["2026-08-24", "Thandi Nkosi", "CJ 998-221", "Cape Fittings", "INV-2043", "", "", 12],
 ];
 
 const TRIP_SHEET_COLUMN_GUIDE: Row[] = [
@@ -106,9 +111,21 @@ const TRIP_SHEET_COLUMN_GUIDE: Row[] = [
   ],
   [
     "INVOICENO",
-    "Required",
-    "Matched to the invoice PDF in your invoice folder. A row with no invoice number is skipped entirely.",
+    "Required for a delivery",
+    "Matched to the invoice PDF in your invoice folder. Leave it blank only when the row is a collection and nothing is being delivered.",
     "INV-2041 — Invoice # 2041 and 2041 match the same PDF",
+  ],
+  [
+    "COLLECTNO",
+    "Optional",
+    "Something the driver is picking UP. Matched to a document in the Pending folder of your collections folder, the same way invoices are matched. Fill in both INVOICENO and COLLECTNO to deliver and collect at one stop; fill in only COLLECTNO for a collection-only visit. Collections for a customer you are also delivering to are shown under that same stop.",
+    "COL-118",
+  ],
+  [
+    "COLLECTTYPE",
+    "Optional",
+    "What kind of collection. Blank means a credit return, which is the usual case. Write Crates, Equipment, Parcel, Documents or Special for an uplift that earns no credit. The office can change it afterwards.",
+    "Credit Return / Crates / Documents",
   ],
   [
     "NOP",
@@ -121,7 +138,7 @@ const TRIP_SHEET_COLUMN_GUIDE: Row[] = [
 const TRIP_SHEET_INTRO = [
   "Fill in the Trip Sheet tab — it is the only tab that gets imported. The other tabs are reference only and are ignored on upload.",
   "Keep the header row exactly as it is, and keep it as the first row. Do not add a title or a blank row above it.",
-  "One row per delivery stop. A row needs at least an invoice number to be imported.",
+  "One row per job at a customer. A row needs an invoice number, a collection number, or both — a row with neither is skipped.",
   "Save as .xlsx (or .csv) and upload it on the Trip Sheet page. You get a preview before anything reaches a driver.",
 ];
 
@@ -132,7 +149,7 @@ const TRIP_SHEET_INTRO = [
  */
 export function buildTripSheetTemplate(driverNames: string[] = []): Buffer {
   const wb = XLSX.utils.book_new();
-  const widths = [14, 22, 16, 30, 18, 8];
+  const widths = [14, 22, 16, 30, 18, 16, 18, 8];
 
   // Sheet 0 — the only sheet the parser reads.
   XLSX.utils.book_append_sheet(

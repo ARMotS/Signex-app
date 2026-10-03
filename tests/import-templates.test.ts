@@ -53,8 +53,19 @@ describe("trip sheet template", () => {
       "regNo",
       "customerName",
       "invoiceNumber",
+      "collectionNo",
+      "collectionType",
       "nop",
     ]);
+  });
+
+  it("puts COLLECTNO between INVOICENO and NOP", () => {
+    // Where the column sits is part of what an office is told to produce, and
+    // a sheet built to the old layout must still be readable — which it is,
+    // because detection is by header name, not by position.
+    const headers = [...TRIP_SHEET_TEMPLATE_HEADERS];
+    expect(headers.indexOf("COLLECTNO")).toBe(headers.indexOf("INVOICENO") + 1);
+    expect(headers.indexOf("NOP")).toBeGreaterThan(headers.indexOf("COLLECTNO"));
   });
 
   it("keeps the worked example on its own sheet, out of the parser's reach", () => {
@@ -79,7 +90,7 @@ describe("trip sheet template", () => {
   it("round-trips a filled-in sheet through the parser's own read path", () => {
     // The exact call sequence lib/trip-parser.ts uses on an uploaded file.
     const filled = fillFirstSheet(buildTripSheetTemplate(["John Smith"]), [
-      ["2026-08-24", "John Smith", "CA 123-456", "Acme Hardware", "INV-2041", 3],
+      ["2026-08-24", "John Smith", "CA 123-456", "Acme Hardware", "INV-2041", "COL-118", "Credit Return", 3],
     ]);
     const wb = XLSX.read(filled, { type: "buffer" });
     const rows = XLSX.utils.sheet_to_json<Row>(wb.Sheets[wb.SheetNames[0]], { header: 1 });
@@ -94,6 +105,8 @@ describe("trip sheet template", () => {
 
     expect(rows[1][columnMap.driverName]).toBe("John Smith");
     expect(rows[1][columnMap.invoiceNumber]).toBe("INV-2041");
+    expect(rows[1][columnMap.collectionNo]).toBe("COL-118");
+    expect(rows[1][columnMap.collectionType]).toBe("Credit Return");
     expect(parseInt(String(rows[1][columnMap.nop]))).toBe(3);
   });
 });

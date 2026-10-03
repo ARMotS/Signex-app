@@ -17,13 +17,45 @@ export const GET = withAuth(async (request: NextRequest) => {
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
   const searchParams = request.nextUrl.searchParams;
   let targetPath = searchParams.get("path") || "";
-  const folderType = searchParams.get("type") === "tripsheets" ? "tripsheets" : "invoices";
+  const typeParam = searchParams.get("type");
+  const folderType =
+    typeParam === "tripsheets" || typeParam === "collections" ? typeParam : "invoices";
 
   // File extensions to count based on folder type
   const countExtensions = folderType === "tripsheets"
     ? [".csv", ".xlsx", ".xls"]
     : [".pdf"];
-  const fileLabel = folderType === "tripsheets" ? "files" : "PDFs";
+  const fileLabel =
+    folderType === "tripsheets"
+      ? "files"
+      : folderType === "collections"
+      ? "collection documents"
+      : "PDFs";
+
+  /**
+   * Count the documents a folder holds FOR THIS PURPOSE.
+   *
+   * A collections folder keeps its documents in a Pending subfolder, so counting
+   * only the PDFs sitting at its own level would report 0 for a correctly
+   * populated folder — and the browser sorts by this number, so the right folder
+   * would sink to the bottom of the list.
+   */
+  const countDocuments = (folder: string): number => {
+    const tally = (dir: string): number => {
+      try {
+        return fs.readdirSync(dir).filter((c) => {
+          const ext = c.toLowerCase().slice(c.lastIndexOf("."));
+          return countExtensions.includes(ext);
+        }).length;
+      } catch {
+        return 0;
+      }
+    };
+
+    const here = tally(folder);
+    if (folderType !== "collections") return here;
+    return here + tally(path.join(folder, "Pending"));
+  };
 
   try {
     // If no path, return root locations (drives on Windows, / on Unix)
@@ -77,16 +109,7 @@ export const GET = withAuth(async (request: NextRequest) => {
         const itemStat = fs.statSync(fullPath);
         if (itemStat.isDirectory()) {
           // Count matching files in this folder (non-recursive, quick peek)
-          let pdfCount = 0;
-          try {
-            const children = fs.readdirSync(fullPath);
-            pdfCount = children.filter((c) => {
-              const ext = c.toLowerCase().slice(c.lastIndexOf("."));
-              return countExtensions.includes(ext);
-            }).length;
-          } catch {
-            // Can't read — that's okay
-          }
+          const pdfCount = countDocuments(fullPath);
 
           entries.push({
             name: item,
@@ -108,15 +131,7 @@ export const GET = withAuth(async (request: NextRequest) => {
     });
 
     // Count matching files in current folder
-    let currentPdfCount = 0;
-    try {
-      currentPdfCount = items.filter((i) => {
-        const ext = i.toLowerCase().slice(i.lastIndexOf("."));
-        return countExtensions.includes(ext);
-      }).length;
-    } catch {
-      // ignore
-    }
+    const currentPdfCount = countDocuments(targetPath);
 
     // Build breadcrumbs
     const breadcrumbs = buildBreadcrumbs(targetPath);
