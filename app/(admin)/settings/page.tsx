@@ -190,6 +190,8 @@ export default function SettingsPage() {
             folderItemId: data.account.folderItemId,
             invoiceFolderPath: data.account.invoiceFolderPath,
             invoiceFolderItemId: data.account.invoiceFolderItemId,
+            collectionsFolderPath: data.account.collectionsFolderPath,
+            collectionsFolderItemId: data.account.collectionsFolderItemId,
           });
         } else {
           setOnedrive(null);
@@ -217,6 +219,8 @@ export default function SettingsPage() {
               folderItemId: data.account.folderItemId,
               invoiceFolderPath: data.account.invoiceFolderPath,
               invoiceFolderItemId: data.account.invoiceFolderItemId,
+              collectionsFolderPath: data.account.collectionsFolderPath,
+              collectionsFolderItemId: data.account.collectionsFolderItemId,
             });
           }
         })
