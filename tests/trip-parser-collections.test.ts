@@ -19,6 +19,7 @@ import * as XLSX from "xlsx";
 let invoiceFiles: { filename: string; invoiceNumber: string; isSigned: boolean }[] = [];
 let collectionDocs: { filename: string; name: string; collectionNo: string; sizeBytes: number; lastModified: string; itemId?: string }[] = [];
 let drivers: { id: string; name: string }[] = [];
+let collectionFolderError: string | undefined;
 
 vi.mock("@/lib/invoices", () => ({
   listInvoiceFiles: vi.fn(async () => invoiceFiles),
@@ -33,7 +34,15 @@ vi.mock("@/lib/accounts", () => ({
 // finds its document.
 vi.mock("@/lib/collections", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/collections")>();
-  return { ...actual, listCollectionDocuments: vi.fn(async () => collectionDocs) };
+  return {
+    ...actual,
+    listCollectionFolder: vi.fn(async () => ({
+      source: "onedrive" as const,
+      folderPath: "/Signex/Collections",
+      documents: collectionDocs,
+      ...(collectionFolderError ? { error: collectionFolderError } : {}),
+    })),
+  };
 });
 
 // The already-signed check is the only database read on this path.
@@ -73,6 +82,7 @@ beforeEach(() => {
   invoiceFiles = [invoice("INV-2041"), invoice("INV-2042")];
   collectionDocs = [doc("COL-118"), doc("COL-119")];
   drivers = [{ id: "driver-1", name: "John Smith" }];
+  collectionFolderError = undefined;
 });
 
 // ─── The four sheet shapes ────────────────────────────────────────────────
@@ -344,6 +354,33 @@ describe("matching a COLLECTNO to a document", () => {
 
     expect(result.matchedCollections).toBe(1);
     expect(result.driverResults[0].stops[0].collections![0].sourceFilePath).toBe("118.pdf");
+  });
+});
+
+describe("an unreadable collections folder", () => {
+  it("says so, instead of reporting every collection as merely unpapered", async () => {
+    collectionDocs = [];
+    collectionFolderError = "Could not read the OneDrive collections folder: 401";
+
+    const result = await parse([
+      HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Acme Hardware", "INV-2041", "COL-118", "", "3"],
+    ]);
+
+    expect(result.success).toBe(true);
+    expect(result.unmatchedCollections).toBe(1);
+    expect(result.collectionsFolderError).toBe(collectionFolderError);
+  });
+
+  it("stays quiet on a sheet with no collections", async () => {
+    collectionFolderError = "Could not read the OneDrive collections folder: 401";
+
+    const result = await parse([
+      LEGACY_HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Acme Hardware", "INV-2041", "3"],
+    ]);
+
+    expect(result.collectionsFolderError).toBeUndefined();
   });
 });
 

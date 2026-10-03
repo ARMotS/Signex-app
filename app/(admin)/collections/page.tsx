@@ -65,6 +65,145 @@ const SUBTYPE_LABEL: Record<string, string> = {
 
 const EXCEPTIONS = new Set(["PARTIAL", "NOT_AVAILABLE", "REFUSED"]);
 
+interface FolderDocument {
+  filename: string;
+  sizeBytes: number;
+  lastModified: string;
+}
+
+interface FolderListing {
+  source: "onedrive" | "local";
+  folderPath: string | null;
+  error: string | null;
+  pending: FolderDocument[];
+  signed: FolderDocument[];
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * What is actually in the collections folder.
+ *
+ * The table below only shows collections that have arrived on a trip sheet, so
+ * without this an admin could not tell an empty folder from an unreadable one —
+ * and both made every COLLECTNO on an import read as "no document".
+ */
+function FolderPanel() {
+  const [listing, setListing] = useState<FolderListing | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [showSigned, setShowSigned] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setFailed(null);
+    try {
+      const res = await fetch("/api/collections/folder");
+      const data = await res.json();
+      if (!res.ok) {
+        setFailed(data.error || "Failed to read the collections folder");
+        return;
+      }
+      setListing(data);
+    } catch {
+      setFailed("Failed to connect to server");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const error = failed ?? listing?.error ?? null;
+  const docs = showSigned ? listing?.signed ?? [] : listing?.pending ?? [];
+
+  return (
+    <div className="bg-ink-card border border-ink-border rounded mb-6">
+      <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-ink-border">
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">
+            Collections folder
+            {listing && (
+              <span className="ml-2 normal-case tracking-normal">
+                · {listing.source === "onedrive" ? "OneDrive" : "Local folder"}
+              </span>
+            )}
+          </p>
+          <p className="font-mono text-[13px] text-ink-black truncate" title={listing?.folderPath ?? ""}>
+            {listing?.folderPath || "No folder chosen"}
+          </p>
+        </div>
+        <div className="flex items-center gap-1 text-xs font-mono">
+          <button
+            onClick={() => setShowSigned(false)}
+            className={`px-2.5 py-1 rounded ${!showSigned ? "bg-ink-surface text-ink-black" : "text-ink-muted hover:text-ink-black"}`}
+          >
+            Pending ({listing?.pending.length ?? 0})
+          </button>
+          <button
+            onClick={() => setShowSigned(true)}
+            className={`px-2.5 py-1 rounded ${showSigned ? "bg-ink-surface text-ink-black" : "text-ink-muted hover:text-ink-black"}`}
+          >
+            Signed ({listing?.signed.length ?? 0})
+          </button>
+          <button
+            onClick={load}
+            disabled={loading}
+            className="ml-2 px-3 py-1.5 border border-ink-border rounded hover:bg-ink-surface transition-colors disabled:opacity-40"
+          >
+            {loading ? "Reading…" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {error ? (
+        <div className="px-4 py-3 bg-ink-red-dim">
+          <p className="text-[13px] font-mono text-ink-red">{error}</p>
+          <a href="/settings" className="text-xs font-mono text-ink-muted hover:text-ink-black underline">
+            Open Settings
+          </a>
+        </div>
+      ) : loading && !listing ? (
+        <p className="px-4 py-4 text-sm font-mono text-ink-muted">Reading folder…</p>
+      ) : docs.length === 0 ? (
+        <p className="px-4 py-4 text-xs text-ink-muted">
+          {showSigned
+            ? "Nothing signed yet. Signed receipts are filed in the Signed subfolder."
+            : "No PDFs found. Put collection documents in this folder or its Pending subfolder, named by collection number (e.g. COL-118.pdf)."}
+        </p>
+      ) : (
+        <div className="divide-y divide-ink-border max-h-72 overflow-y-auto">
+          {docs.map((d) => (
+            <div key={d.filename} className="flex items-center gap-3 px-4 py-2">
+              <span className="font-mono text-[13px] text-ink-black truncate flex-1 min-w-0">
+                {d.filename}
+              </span>
+              <span className="text-[11px] font-mono text-ink-muted shrink-0">
+                {formatSize(d.sizeBytes)} ·{" "}
+                {new Date(d.lastModified).toLocaleDateString("en-ZA", { day: "2-digit", month: "short" })}
+              </span>
+              <a
+                href={`/api/collections/document/${encodeURIComponent(d.filename)}${showSigned ? "?signed=true" : ""}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-[11px] font-mono text-ink-violet hover:underline shrink-0"
+              >
+                Open
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type TypeFilter = "" | "CREDIT_RETURN" | "NON_CREDIT_UPLIFT";
 type StatusFilter = "" | CollectionRecord["status"];
 
@@ -193,6 +332,8 @@ export default function CollectionsPage() {
           Credit returns and uplifts, across live trips and closed-out ones.
         </p>
       </div>
+
+      <FolderPanel />
 
       {/* ── Summary ─────────────────────────────────────────── */}
       {counts && (

@@ -115,6 +115,7 @@ interface PreviewData {
     totalCollections?: number;
     matchedCollections?: number;
     unmatchedCollections?: number;
+    collectionsFolderError?: string;
     driverResults: MatchResult[];
     alreadySigned: AlreadySignedInvoice[];
     missingInvoices: MissingInvoice[];
@@ -1675,8 +1676,16 @@ export default function TripSheetPage() {
                   <p className="text-xs font-mono text-ink-violet">
                     {preview.preview.unmatchedCollections} collection
                     {preview.preview.unmatchedCollections === 1 ? " has" : "s have"} no document
-                    in the collections Pending folder
+                    in the collections folder
                   </p>
+                  {/* An unreadable folder is a settings problem, not a papering
+                      gap — say which, or the dispatcher goes looking for PDFs
+                      that are sitting right there. */}
+                  {preview.preview.collectionsFolderError && (
+                    <p className="text-[11px] font-mono text-ink-red mt-1">
+                      {preview.preview.collectionsFolderError}
+                    </p>
+                  )}
                   <p className="text-[11px] text-ink-muted mt-0.5">
                     This does not block the deploy. The driver captures the signature on a
                     receipt Signex generates, which is filed in the Signed folder either way.

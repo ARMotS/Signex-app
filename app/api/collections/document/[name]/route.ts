@@ -24,7 +24,7 @@ import { withAuth } from "@/lib/api-handler";
  * resolveWithinFolder on the local one).
  *
  *   ?signed=true  → the stamped receipt in Signed/
- *   otherwise     → the original in Pending/
+ *   otherwise     → the original in Pending/, or directly in the folder
  */
 export const GET = withAuth(async (
   request: NextRequest,

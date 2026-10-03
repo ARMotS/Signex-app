@@ -22,7 +22,7 @@ import crypto from "crypto";
 import { listInvoiceFiles } from "./invoices";
 import {
   buildCollectionLookup,
-  listCollectionDocuments,
+  listCollectionFolder,
   matchCollectionDocument,
 } from "./collections";
 import { listDrivers } from "./accounts";
@@ -103,6 +103,12 @@ export interface ParseResult {
    * sign for them on a generated receipt.
    */
   unmatchedCollections: number;
+  /**
+   * Set when the collections folder could not be read. Without it, an
+   * unreadable folder made every collection read as "no document yet" — the
+   * dispatcher saw a papering gap where there was really a configuration one.
+   */
+  collectionsFolderError?: string;
   alreadySigned: AlreadySignedInvoice[];
   /** Every row with no matching PDF, across all drivers */
   missingInvoices: MissingInvoice[];
@@ -441,13 +447,13 @@ export async function parseTripSheet(
     // 4. Get this scope's existing invoices, collection documents and drivers.
     //    All three are scoped, and the two folder listings go over Graph, so
     //    they are fetched together rather than one after the other.
-    const [invoiceFiles, collectionDocs, drivers] = await Promise.all([
+    const [invoiceFiles, collectionFolder, drivers] = await Promise.all([
       listInvoiceFiles(tenantId),
-      listCollectionDocuments(tenantId),
+      listCollectionFolder(tenantId),
       listDrivers(tenantId),
     ]);
 
-    const collectionLookup = buildCollectionLookup(collectionDocs);
+    const collectionLookup = buildCollectionLookup(collectionFolder.documents);
 
     // Build invoice lookup: normalized number → filename
     const invoiceLookup = new Map<string, string>();
@@ -706,6 +712,10 @@ export async function parseTripSheet(
       totalCollections,
       matchedCollections,
       unmatchedCollections: unmatchedCollectionCount,
+      // Only worth saying when the sheet actually carries collections.
+      ...(collectionFolder.error && totalCollections > 0
+        ? { collectionsFolderError: collectionFolder.error }
+        : {}),
       alreadySigned,
       missingInvoices,
     };
