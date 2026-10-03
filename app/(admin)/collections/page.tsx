@@ -31,6 +31,8 @@ interface CollectionRecord {
   signedFilePath: string | null;
   driverId: string | null;
   driverName: string | null;
+  emailStatus: "NOT_SENT" | "SENDING" | "SENT" | "FAILED" | "NO_EMAIL" | null;
+  emailError: string | null;
   tripSheetId: string;
   archived: boolean;
   completedTripSheetId: string | null;
@@ -64,6 +66,17 @@ const SUBTYPE_LABEL: Record<string, string> = {
 };
 
 const EXCEPTIONS = new Set(["PARTIAL", "NOT_AVAILABLE", "REFUSED"]);
+
+/** Outcomes the customer signed for — the only ones a receipt is emailed for. */
+const RECEIPT_STATUSES = new Set(["COLLECTED", "PARTIAL"]);
+
+const EMAIL_LABEL: Record<string, { text: string; tone: string }> = {
+  SENT: { text: "Emailed", tone: "text-ink-green" },
+  SENDING: { text: "Sending…", tone: "text-ink-muted" },
+  FAILED: { text: "Email failed", tone: "text-ink-red" },
+  NO_EMAIL: { text: "No email on file", tone: "text-ink-amber" },
+  NOT_SENT: { text: "Not emailed", tone: "text-ink-muted" },
+};
 
 interface FolderDocument {
   filename: string;
@@ -226,6 +239,8 @@ export default function CollectionsPage() {
   const [exceptionsOnly, setExceptionsOnly] = useState(false);
   const [outstandingOnly, setOutstandingOnly] = useState(false);
   const [query, setQuery] = useState("");
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [sendNote, setSendNote] = useState<{ id: string; text: string; ok: boolean } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -274,6 +289,29 @@ export default function CollectionsPage() {
     );
   }, [records, query, outstandingOnly]);
 
+  // The manual send — for a receipt that did not go out on its own, or another
+  // copy. The automatic send on recording the outcome is the normal path.
+  const sendReceipt = async (id: string) => {
+    setSendingId(id);
+    setSendNote(null);
+    try {
+      const res = await fetch(`/api/collections/${id}/notify`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (data.success) {
+        setSendNote({ id, text: `Sent to ${data.recipient}`, ok: true });
+      } else if (data.skipped) {
+        setSendNote({ id, text: data.reason, ok: false });
+      } else {
+        setSendNote({ id, text: data.error || "Send failed", ok: false });
+      }
+      await load();
+    } catch {
+      setSendNote({ id, text: "Failed to connect to server", ok: false });
+    } finally {
+      setSendingId(null);
+    }
+  };
+
   const exportCsv = () => {
     // A credit clerk reconciles in a spreadsheet, so the report has to leave as
     // one. Built in the browser from what is already on screen — no second
@@ -292,6 +330,7 @@ export default function CollectionsPage() {
       "Signed By",
       "Collected At",
       "Signed Document",
+      "Receipt Email",
     ];
     const rows = visible.map((r) => [
       r.collectionNo,
@@ -307,6 +346,7 @@ export default function CollectionsPage() {
       r.signedByName ?? "",
       r.collectedAt ? new Date(r.collectedAt).toISOString() : "",
       r.signedFilePath ?? "",
+      r.emailStatus ? EMAIL_LABEL[r.emailStatus]?.text ?? r.emailStatus : "",
     ]);
 
     const escape = (v: unknown) => {
@@ -475,7 +515,7 @@ export default function CollectionsPage() {
         </div>
       ) : (
         <div className="bg-ink-card border border-ink-border rounded overflow-hidden">
-          <div className="hidden md:grid grid-cols-[10rem_1fr_1fr_8rem_9rem] gap-3 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50 border-b border-ink-border">
+          <div className="hidden md:grid grid-cols-[10rem_1fr_1fr_9rem_12rem] gap-3 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50 border-b border-ink-border">
             <div>Collection</div>
             <div>Customer</div>
             <div>Detail</div>
@@ -487,7 +527,7 @@ export default function CollectionsPage() {
             {visible.map((r) => (
               <div
                 key={`${r.tripSheetId}-${r.collectionNo}-${r.id ?? "archived"}`}
-                className="px-4 py-3 hover:bg-ink-surface/30 transition-colors md:grid md:grid-cols-[10rem_1fr_1fr_8rem_9rem] md:gap-3 md:items-center"
+                className="px-4 py-3 hover:bg-ink-surface/30 transition-colors md:grid md:grid-cols-[10rem_1fr_1fr_9rem_12rem] md:gap-3 md:items-center"
               >
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
@@ -546,6 +586,19 @@ export default function CollectionsPage() {
                   <span className={statusBadgeClass(r.status)}>
                     {STATUS_LABEL[r.status] ?? r.status}
                   </span>
+                  {RECEIPT_STATUSES.has(r.status) && r.emailStatus && (
+                    <p
+                      className={`text-[11px] font-mono mt-1 ${EMAIL_LABEL[r.emailStatus]?.tone ?? "text-ink-muted"}`}
+                      title={r.emailError ?? undefined}
+                    >
+                      {EMAIL_LABEL[r.emailStatus]?.text ?? r.emailStatus}
+                    </p>
+                  )}
+                  {sendNote?.id === r.id && (
+                    <p className={`text-[11px] font-mono mt-0.5 ${sendNote.ok ? "text-ink-green" : "text-ink-amber"}`}>
+                      {sendNote.text}
+                    </p>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-3 mt-2 md:mt-0 md:justify-end">
@@ -560,6 +613,16 @@ export default function CollectionsPage() {
                     </a>
                   ) : (
                     <span className="text-[11px] font-mono text-ink-muted-light">No receipt</span>
+                  )}
+                  {r.id && RECEIPT_STATUSES.has(r.status) && (
+                    <button
+                      onClick={() => sendReceipt(r.id!)}
+                      disabled={sendingId === r.id || r.emailStatus === "SENDING"}
+                      className="text-[11px] font-mono text-ink-muted hover:text-ink-black hover:underline disabled:opacity-40"
+                      title="Email the signed receipt to the customer"
+                    >
+                      {sendingId === r.id ? "Sending…" : r.emailStatus === "SENT" ? "Resend" : "Email"}
+                    </button>
                   )}
                   {r.sourceFilePath && (
                     <a

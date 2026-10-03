@@ -7,6 +7,7 @@
 import nodemailer from "nodemailer";
 import { render } from "@react-email/render";
 import { DeliveryConfirmation } from "@/emails/DeliveryConfirmation";
+import { CollectionReceipt } from "@/emails/CollectionReceipt";
 import { format } from "date-fns";
 
 const transporter = nodemailer.createTransport({
@@ -78,6 +79,65 @@ export async function sendDeliveryConfirmation(
     return { success: true, emailId: info.messageId };
   } catch (err) {
     console.error("[email] Error sending delivery confirmation:", err);
+    return { success: false, error: describeMailError(err) };
+  }
+}
+
+export interface CollectionReceiptParams {
+  customerEmail: string;
+  customerName: string;
+  contactPerson?: string;
+  collectionNo: string;
+  typeLabel: string;
+  outcomeLabel: string;
+  quantityLine?: string;
+  signedByName?: string;
+  driverName: string;
+  collectedAt: Date;
+  companyName: string;
+  pdfAttachment?: {
+    filename: string;
+    content: Buffer;
+  };
+}
+
+/**
+ * The customer's copy of a signed collection. Same transport, sender and error
+ * reporting as the delivery confirmation — see sendDeliveryConfirmation.
+ */
+export async function sendCollectionReceipt(
+  params: CollectionReceiptParams
+): Promise<{ success: boolean; emailId?: string; error?: string }> {
+  try {
+    const html = await render(
+      CollectionReceipt({
+        ...params,
+        collectedAt: format(params.collectedAt, "dd MMM yyyy, HH:mm"),
+      })
+    );
+
+    const fromName = process.env.EMAIL_FROM_NAME || "Signex Deliveries";
+    const fromEmail = process.env.EMAIL_FROM || "signexapp@gmail.com";
+
+    const info = await transporter.sendMail({
+      from: `${fromName} <${fromEmail}>`,
+      to: params.customerEmail,
+      subject: `Collection receipt — ${params.collectionNo}`,
+      html,
+      ...(params.pdfAttachment && {
+        attachments: [
+          {
+            filename: params.pdfAttachment.filename,
+            content: params.pdfAttachment.content,
+            contentType: "application/pdf",
+          },
+        ],
+      }),
+    });
+
+    return { success: true, emailId: info.messageId };
+  } catch (err) {
+    console.error("[email] Error sending collection receipt:", err);
     return { success: false, error: describeMailError(err) };
   }
 }

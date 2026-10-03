@@ -10,6 +10,7 @@ import {
   isTerminalStatus,
 } from "@/lib/collections";
 import { logAudit } from "@/lib/audit";
+import { RECEIPT_STATUSES, scheduleCollectionReceipt } from "@/lib/collection-notify";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
@@ -227,6 +228,13 @@ export const PUT = withAuth(async (
     }${documentError ? " — document NOT written" : ""}`,
     tenantId: ctx.tenantId,
   });
+
+  // 3. The customer's copy, after the response — never in the driver's way, and
+  //    never able to fail what is already recorded. Scheduled after the document
+  //    step so the signed sheet exists to attach.
+  if (RECEIPT_STATUSES.includes(status)) {
+    await scheduleCollectionReceipt(ctx.tenantId, id);
+  }
 
   return NextResponse.json({
     success: true,

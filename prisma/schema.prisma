@@ -311,6 +311,14 @@ model Collection {
   signature         String?          @db.Text
   signedByName      String?
   collectedAt       DateTime?
+  /// The signed collection receipt emailed to the customer — same states and
+  /// lease semantics as Stop.emailStatus (see lib/collection-notify.ts). Only
+  /// COLLECTED and PARTIAL are sent: nothing changed hands on the others.
+  emailStatus        EmailStatus @default(NOT_SENT)
+  emailSentAt        DateTime?
+  emailAttempts      Int         @default(0)
+  emailLastAttemptAt DateTime?
+  emailError         String?     @db.Text
   /// Who completed it. Null until the collection reaches a terminal status.
   driverId          String?
   tripSheetId       String
