@@ -118,11 +118,18 @@ function stateSecret(): string {
  * The bare random `state` this replaced was returned to the client and never
  * checked on the way back, which left the callback open to having someone
  * else's authorization code planted on it.
+ *
+ * `returnOrigin` is the origin of the deployment that started the flow.
+ * Microsoft only redirects to the one registered callback (production), so a
+ * flow begun on a preview deployment lands on production; the callback reads
+ * this — signed, so it cannot be pointed elsewhere — to hand the round-trip
+ * back. See lib/oauth-relay.ts.
  */
-export function signOAuthState(tenantId: string): string {
+export function signOAuthState(tenantId: string, returnOrigin?: string): string {
   const payload = Buffer.from(
     JSON.stringify({
       tenantId,
+      ...(returnOrigin ? { ret: returnOrigin } : {}),
       nonce: crypto.randomBytes(16).toString("hex"),
       exp: Date.now() + STATE_TTL_MS,
     })
@@ -140,7 +147,9 @@ export function signOAuthState(tenantId: string): string {
  * Verify a returned `state` and recover the scope it was issued for.
  * Returns null when the signature, format or expiry doesn't check out.
  */
-export function verifyOAuthState(state: string | null): { tenantId: string } | null {
+export function verifyOAuthState(
+  state: string | null
+): { tenantId: string; returnOrigin?: string } | null {
   if (!state) return null;
 
   const [payload, sig] = state.split(".");
@@ -159,7 +168,9 @@ export function verifyOAuthState(state: string | null): { tenantId: string } | n
     const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
     if (typeof data.tenantId !== "string" || !data.tenantId) return null;
     if (typeof data.exp !== "number" || data.exp < Date.now()) return null;
-    return { tenantId: data.tenantId };
+    return typeof data.ret === "string" && data.ret
+      ? { tenantId: data.tenantId, returnOrigin: data.ret }
+      : { tenantId: data.tenantId };
   } catch {
     return null;
   }
