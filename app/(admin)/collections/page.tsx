@@ -624,9 +624,16 @@ export default function CollectionsPage() {
                       {sendingId === r.id ? "Sending…" : r.emailStatus === "SENT" ? "Resend" : "Email"}
                     </button>
                   )}
-                  {r.sourceFilePath && (
+                  {/* A live collection always gets the link: the route finds a
+                      document added after import. An archived one has no row
+                      left, so it needs the filename frozen with it. */}
+                  {(r.id || r.sourceFilePath) && (
                     <a
-                      href={`/api/collections/document/${encodeURIComponent(r.sourceFilePath)}`}
+                      href={
+                        r.id
+                          ? `/api/collections/${r.id}/source`
+                          : `/api/collections/document/${encodeURIComponent(r.sourceFilePath!)}`
+                      }
                       target="_blank"
                       rel="noreferrer"
                       className="text-[11px] font-mono text-ink-muted hover:text-ink-black hover:underline"

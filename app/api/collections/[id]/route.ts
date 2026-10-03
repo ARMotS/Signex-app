@@ -3,6 +3,7 @@ import type { CollectionStatus, CollectionType, UpliftSubtype } from "@prisma/cl
 import {
   buildSignedCollectionPdf,
   readCollectionDocument,
+  resolveCollectionSource,
   saveSignedCollection,
   signedCollectionFilename,
   validateCollectionOutcome,
@@ -68,6 +69,13 @@ export const GET = withAuth(async (
   const collection = await loadCollection(ctx, id);
   if (!collection) {
     return NextResponse.json({ error: "Collection not found" }, { status: 404 });
+  }
+
+  // A document the office added after the sheet was imported is picked up
+  // here, so the driver at the door sees it. Outstanding work only — a closed
+  // collection's paperwork is already on its signed copy.
+  if (collection.status === "PENDING" && !collection.sourceFilePath) {
+    collection.sourceFilePath = await resolveCollectionSource(ctx.tenantId, collection);
   }
 
   // The signature is a full-size PNG data URL. It is not sent to a list screen
@@ -164,15 +172,19 @@ export const PUT = withAuth(async (
   let documentError: string | null = null;
 
   try {
+    // Re-checked rather than trusted from import: the office may have added
+    // the document since, and the receipt belongs on it when it exists.
+    const sourceName = await resolveCollectionSource(ctx.tenantId, collection);
+
     const outputName = signedCollectionFilename(
-      collection.sourceFilePath,
+      sourceName,
       collection.collectionNo,
       status
     );
     if (!outputName) throw new Error("Could not derive a filename for the receipt");
 
-    const sourcePdf = collection.sourceFilePath
-      ? await readCollectionDocument(ctx.tenantId, collection.sourceFilePath)
+    const sourcePdf = sourceName
+      ? await readCollectionDocument(ctx.tenantId, sourceName)
       : null;
 
     const signatureBytes = signatureImage

@@ -29,6 +29,7 @@ import path from "path";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import type { CollectionStatus, CollectionType, UpliftSubtype } from "@prisma/client";
 import { readConfig } from "./config";
+import { scopedPrisma } from "./db-scoped";
 import {
   getOneDriveCollectionsSource,
   listOneDriveCollectionDocuments,
@@ -371,6 +372,39 @@ export function buildCollectionLookup(
     if (numericOnly && !lookup.has(numericOnly)) lookup.set(numericOnly, doc);
   }
   return lookup;
+}
+
+/**
+ * The source document for a live collection: the one matched at import, or —
+ * when nothing matched then — whatever now matches its number in the folder.
+ *
+ * A collection's document is matched once, when the trip sheet is imported.
+ * One with no document at that moment (the office had not papered it yet, or
+ * the folder could not be read) stayed unmatched for good: no Original link
+ * for the office, no document for the driver, and a receipt with nothing
+ * behind it — even after the PDF arrived. This re-checks, and records a match
+ * so the folder is listed once per collection, not on every view.
+ *
+ * Returns the filename, or null if there is still nothing to show.
+ */
+export async function resolveCollectionSource(
+  tenantId: string,
+  collection: { id: string; collectionNo: string; sourceFilePath: string | null }
+): Promise<string | null> {
+  if (collection.sourceFilePath) return collection.sourceFilePath;
+
+  const listing = await listCollectionFolder(tenantId);
+  if (listing.error) return null;
+
+  const doc = matchCollectionDocument(buildCollectionLookup(listing.documents), collection.collectionNo);
+  if (!doc) return null;
+
+  // Conditional on still being unmatched, so a concurrent office edit wins.
+  await scopedPrisma(tenantId).collection.updateMany({
+    where: { id: collection.id, sourceFilePath: null },
+    data: { sourceFilePath: doc.filename, sourceFileId: doc.itemId ?? null },
+  });
+  return doc.filename;
 }
 
 /** Look one collection number up in a lookup built above. */

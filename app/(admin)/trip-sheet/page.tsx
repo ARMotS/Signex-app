@@ -2606,9 +2606,10 @@ export default function TripSheetPage() {
                                       Receipt
                                     </a>
                                   )}
-                                  {c.sourceFilePath && (
-                                    <a
-                                      href={`/api/collections/document/${encodeURIComponent(c.sourceFilePath)}`}
+                                  {/* By id, not filename: finds a document the office
+                                      added after this sheet was imported. */}
+                                  <a
+                                      href={`/api/collections/${c.id}/source`}
                                       target="_blank"
                                       rel="noreferrer"
                                       onClick={(e) => e.stopPropagation()}
@@ -2616,7 +2617,6 @@ export default function TripSheetPage() {
                                     >
                                       Document
                                     </a>
-                                  )}
                                 </div>
                               ))}
                             </div>

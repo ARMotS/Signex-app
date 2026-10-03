@@ -23,7 +23,16 @@ vi.mock("@/lib/microsoft-graph", () => ({
   getOneDriveCollectionsSource: vi.fn(async () => null),
 }));
 
-import { listCollectionFolder, readCollectionDocument } from "@/lib/collections";
+const updateMany = vi.fn(async (_args: unknown) => ({ count: 1 }));
+vi.mock("@/lib/db-scoped", () => ({
+  scopedPrisma: () => ({ collection: { updateMany } }),
+}));
+
+import {
+  listCollectionFolder,
+  readCollectionDocument,
+  resolveCollectionSource,
+} from "@/lib/collections";
 
 const TENANT = "tenant-1";
 
@@ -79,5 +88,49 @@ describe("listCollectionFolder (local)", () => {
 
     expect(listing.documents).toEqual([]);
     expect(listing.error).toMatch(/does not exist on the server/);
+  });
+});
+
+describe("resolveCollectionSource", () => {
+  beforeEach(() => updateMany.mockClear());
+
+  it("finds a document added after the sheet was imported, and records it", async () => {
+    write("COL-118.pdf");
+
+    const name = await resolveCollectionSource(TENANT, {
+      id: "col-1",
+      collectionNo: "COL-118",
+      sourceFilePath: null,
+    });
+
+    expect(name).toBe("COL-118.pdf");
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: "col-1", sourceFilePath: null },
+      data: { sourceFilePath: "COL-118.pdf", sourceFileId: null },
+    });
+  });
+
+  it("matches loosely, as the import does", async () => {
+    write("Pending/118.pdf");
+    expect(
+      await resolveCollectionSource(TENANT, { id: "col-1", collectionNo: "CR-118", sourceFilePath: null })
+    ).toBe("118.pdf");
+  });
+
+  it("keeps the import-time match without listing the folder", async () => {
+    const name = await resolveCollectionSource(TENANT, {
+      id: "col-1",
+      collectionNo: "COL-118",
+      sourceFilePath: "already.pdf",
+    });
+    expect(name).toBe("already.pdf");
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("returns null, and records nothing, when there is still no document", async () => {
+    expect(
+      await resolveCollectionSource(TENANT, { id: "col-1", collectionNo: "COL-999", sourceFilePath: null })
+    ).toBeNull();
+    expect(updateMany).not.toHaveBeenCalled();
   });
 });
