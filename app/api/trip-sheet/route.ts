@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseTripSheet } from "@/lib/trip-parser";
+import { parseTripSheet, collectMissingInvoices } from "@/lib/trip-parser";
 import {
   saveTripSheet,
   getAllTripSheets,
@@ -56,8 +56,6 @@ export const POST = withAuth(async (request: NextRequest) => {
   const action = formData.get("action") as string | null;
 
   if (action === "deploy") {
-    await saveUploadedFile(ctx.tenantId, file.name, buffer);
-
     const assignToRaw = formData.get("assignTo") as string | null;
     let assignTo: { driverId: string; driverName: string } | null = null;
     if (assignToRaw) {
@@ -93,6 +91,36 @@ export const POST = withAuth(async (request: NextRequest) => {
         // ignore
       }
     }
+
+    // A stop is never deployed without its invoice PDF. The PDF is the physical
+    // record the signature is embedded on — sign a stop that has none and the
+    // delivery exists only as a database row, with nothing to hand back to the
+    // customer or file against the invoice. There is no override: the two ways
+    // past this are to upload the invoice or to drop the stop.
+    //
+    // Re-checked here rather than trusted from the preview, because this parse
+    // listed the invoice folder again — a PDF uploaded since the preview now
+    // counts, and one deleted since does not.
+    const missingInvoices = collectMissingInvoices(
+      parseResult.driverResults,
+      skipInvoices,
+      { includeUnassigned: !!assignTo }
+    );
+
+    if (missingInvoices.length > 0) {
+      return NextResponse.json(
+        {
+          error: `${missingInvoices.length} invoice${missingInvoices.length !== 1 ? "s have" : " has"} no PDF in the invoice folder`,
+          code: "MISSING_INVOICES",
+          missingInvoices,
+        },
+        { status: 409 }
+      );
+    }
+
+    // Archived only once the deploy is going ahead — a sheet bounced back for
+    // missing invoices should not leave a copy in the trip sheet folder.
+    await saveUploadedFile(ctx.tenantId, file.name, buffer);
 
     const savedTrips = [];
     for (const result of parseResult.driverResults) {

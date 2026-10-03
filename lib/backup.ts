@@ -5,12 +5,18 @@
  *   - Signed invoices: PDFs in the invoices/signed/ subfolder
  *   - Completed trip sheets: source files moved to the trip-sheet processed/
  *     subfolder when a trip sheet is completed/archived
+ *   - Signed collections: stamped receipts in the collections Signed/ subfolder
  *
  * The ZIP archive layout:
  *   backup-YYYY-MM-DD/
  *     signed-invoices/     ← signed PDF files
  *     trip-sheets/         ← completed trip sheet source files (csv/xlsx)
+ *     Collections/         ← stamped collection receipts
  *     manifest.json        ← summary + timestamps
+ *
+ * Collections get their own top-level folder rather than being mixed in with
+ * the invoices: they are a different kind of document going to a different
+ * department, and a credit clerk should not have to tell them apart by filename.
  *
  * Scoped throughout: `tenantId` is required and is the first argument to every
  * function. Nothing here touches the database — the archive is assembled from
@@ -23,10 +29,17 @@ import fs from "fs";
 import path from "path";
 import JSZip from "jszip";
 import { getInvoiceFolderPath } from "./invoices";
+import {
+  getCollectionsFolderPath,
+  listSignedCollectionDocuments,
+  SIGNED_SUBFOLDER as COLLECTIONS_SIGNED_SUBFOLDER,
+} from "./collections";
 import { getOneDriveSource, getTripSheetFolderPath } from "./trip-sheet-folder";
 import {
   getOneDriveInvoiceSource,
+  getOneDriveCollectionsSource,
   listOneDriveSignedInvoices,
+  listOneDriveSignedCollections,
   listOneDriveProcessedTripSheets,
   downloadFileById,
   deleteFileById,
@@ -49,11 +62,21 @@ export interface BackupableTripSheet {
   processedAt: string;
 }
 
+export interface BackupableCollection {
+  /** The stamped receipt's filename in the collections Signed/ folder */
+  filename: string;
+  sizeBytes: number;
+  /** When the receipt was written (last-modified time) */
+  signedAt: string;
+}
+
 export interface BackupSummary {
   invoices: BackupableInvoice[];
   tripSheets: BackupableTripSheet[];
+  collections: BackupableCollection[];
   totalInvoices: number;
   totalTripSheets: number;
+  totalCollections: number;
 }
 
 // ─── Query backupable items ───────────────────────────────────────────────
@@ -215,22 +238,58 @@ async function getBackupableTripSheetsFromOneDrive(
 }
 
 /**
+ * List stamped collection receipts eligible for backup.
+ *
+ * Reads the collections Signed/ folder, which is the permanent record —
+ * nothing is moved or deleted out of it when a trip is closed, so a receipt
+ * stays backupable for as long as it exists.
+ */
+export async function getBackupableCollections(
+  tenantId: string,
+  beforeDate?: Date
+): Promise<BackupableCollection[]> {
+  const documents = await listSignedCollectionDocuments(tenantId);
+
+  const results: BackupableCollection[] = [];
+  for (const doc of documents) {
+    const signedAt = new Date(doc.lastModified);
+    if (beforeDate && signedAt >= beforeDate) continue;
+
+    results.push({
+      filename: doc.filename,
+      sizeBytes: doc.sizeBytes,
+      signedAt: signedAt.toISOString(),
+    });
+  }
+
+  // Oldest first, as the other two listings are.
+  results.sort(
+    (a, b) => new Date(a.signedAt).getTime() - new Date(b.signedAt).getTime()
+  );
+
+  return results;
+}
+
+/**
  * Get a combined summary of all backupable items.
  */
 export async function getBackupSummary(
   tenantId: string,
   beforeDate?: Date
 ): Promise<BackupSummary> {
-  const [invoices, tripSheets] = await Promise.all([
+  const [invoices, tripSheets, collections] = await Promise.all([
     getBackupableInvoices(tenantId, beforeDate),
     getBackupableTripSheets(tenantId, beforeDate),
+    getBackupableCollections(tenantId, beforeDate),
   ]);
 
   return {
     invoices,
     tripSheets,
+    collections,
     totalInvoices: invoices.length,
     totalTripSheets: tripSheets.length,
+    totalCollections: collections.length,
   };
 }
 
@@ -243,7 +302,8 @@ export async function getBackupSummary(
 export async function createBackupZip(
   tenantId: string,
   invoiceFilenames: string[],
-  tripSheetFilenames: string[]
+  tripSheetFilenames: string[],
+  collectionFilenames: string[] = []
 ): Promise<Buffer> {
   const zip = new JSZip();
   const datestamp = new Date().toISOString().slice(0, 10);
@@ -318,16 +378,54 @@ export async function createBackupZip(
     }
   }
 
+  // ── Stamped collection receipts ──────────────────────────────────
+  if (collectionFilenames.length > 0) {
+    const onedrive = await getOneDriveCollectionsSource(tenantId);
+    if (onedrive) {
+      const items = await listOneDriveSignedCollections(tenantId);
+      for (const filename of collectionFilenames) {
+        const item = items.find((i) => i.name === filename);
+        if (!item) continue;
+        try {
+          const fileData = await downloadFileById(tenantId, item.id);
+          zip.file(`${prefix}/Collections/${filename}`, fileData);
+        } catch {
+          // skip files we can't download
+        }
+      }
+    } else {
+      const folderPath = await getCollectionsFolderPath(tenantId);
+      const signedFolder = path.join(folderPath, COLLECTIONS_SIGNED_SUBFOLDER);
+
+      for (const filename of collectionFilenames) {
+        const filePath = path.join(signedFolder, filename);
+        // Security: prevent directory traversal
+        const resolved = path.resolve(filePath);
+        const resolvedFolder = path.resolve(signedFolder);
+        if (!resolved.startsWith(resolvedFolder)) continue;
+
+        if (fs.existsSync(resolved)) {
+          const fileData = fs.readFileSync(resolved);
+          zip.file(`${prefix}/Collections/${filename}`, fileData);
+        }
+      }
+    }
+  }
+
   // ── Manifest ─────────────────────────────────────────────────────
   const manifest = {
     createdAt: new Date().toISOString(),
-    version: "1.0",
+    // Bumped because the shape gained a section. A reader of an old archive
+    // must not conclude "no Collections folder" means "no collections".
+    version: "1.1",
     contents: {
       signedInvoices: invoiceFilenames.length,
       tripSheets: tripSheetFilenames.length,
+      collections: collectionFilenames.length,
     },
     invoiceFilenames,
     tripSheetFilenames,
+    collectionFilenames,
   };
 
   zip.file(`${prefix}/manifest.json`, JSON.stringify(manifest, null, 2));

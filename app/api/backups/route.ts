@@ -25,9 +25,17 @@ export const POST = withAuth(async (request: NextRequest) => {
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const body = await request.json();
-  const { invoiceFilenames = [], tripSheetFilenames = [] } = body;
+  const {
+    invoiceFilenames = [],
+    tripSheetFilenames = [],
+    collectionFilenames = [],
+  } = body;
 
-  if (invoiceFilenames.length === 0 && tripSheetFilenames.length === 0) {
+  if (
+    invoiceFilenames.length === 0 &&
+    tripSheetFilenames.length === 0 &&
+    collectionFilenames.length === 0
+  ) {
     return NextResponse.json(
       { error: "No items selected for backup" },
       { status: 400 }
@@ -37,7 +45,8 @@ export const POST = withAuth(async (request: NextRequest) => {
   const buffer = await createBackupZip(
     ctx.tenantId,
     invoiceFilenames,
-    tripSheetFilenames
+    tripSheetFilenames,
+    collectionFilenames
   );
 
   const datestamp = new Date().toISOString().slice(0, 10);

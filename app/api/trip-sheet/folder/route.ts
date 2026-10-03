@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseTripSheet } from "@/lib/trip-parser";
+import { parseTripSheet, collectMissingInvoices } from "@/lib/trip-parser";
 import {
   listTripSheetFiles,
   readTripSheetFile,
@@ -91,6 +91,25 @@ export const POST = withAuth(async (request: NextRequest) => {
         return NextResponse.json({ error: "Driver not found" }, { status: 404 });
       }
       resolvedAssignTo = { driverId: target.id, driverName: target.name };
+    }
+
+    // Same gate as the direct upload path, and equally unconditional — see the
+    // note in ../route.ts.
+    const missingInvoices = collectMissingInvoices(
+      parseResult.driverResults,
+      skipInvoices,
+      { includeUnassigned: !!resolvedAssignTo }
+    );
+
+    if (missingInvoices.length > 0) {
+      return NextResponse.json(
+        {
+          error: `${missingInvoices.length} invoice${missingInvoices.length !== 1 ? "s have" : " has"} no PDF in the invoice folder`,
+          code: "MISSING_INVOICES",
+          missingInvoices,
+        },
+        { status: 409 }
+      );
     }
 
     const savedTrips = [];

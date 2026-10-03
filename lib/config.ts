@@ -33,6 +33,15 @@ export interface SignexConfig {
   invoiceFolderType: CloudProvider;
   tripSheetFolderPath: string;
   tripSheetFolderType: CloudProvider;
+  /**
+   * Where collection documents live. A SIBLING of the invoice folder, never
+   * inside it — both listings are extension-based, so nesting one in the other
+   * turns every collection document into a phantom invoice and vice versa. The
+   * settings route rejects an overlapping pair; see
+   * assertCollectionsFolderIsSibling in lib/collections.ts.
+   */
+  collectionsFolderPath: string;
+  collectionsFolderType: CloudProvider;
   signaturePosition: SignaturePosition;
 }
 
@@ -41,6 +50,8 @@ const DEFAULT_CONFIG: SignexConfig = {
   invoiceFolderType: "local",
   tripSheetFolderPath: "",
   tripSheetFolderType: "local",
+  collectionsFolderPath: "",
+  collectionsFolderType: "local",
   signaturePosition: DEFAULT_SIGNATURE_POSITION,
 };
 
@@ -61,6 +72,9 @@ export async function readConfig(tenantId: string): Promise<SignexConfig> {
       } else if (row.key === "tripSheetFolderPath") {
         config.tripSheetFolderPath = row.value;
         config.tripSheetFolderType = detectCloudProvider(row.value);
+      } else if (row.key === "collectionsFolderPath") {
+        config.collectionsFolderPath = row.value;
+        config.collectionsFolderType = detectCloudProvider(row.value);
       } else if (row.key === "signaturePosition") {
         try {
           config.signaturePosition = JSON.parse(row.value);
@@ -115,9 +129,10 @@ export async function writeConfig(
 
 /**
  * Validate that a folder path exists and is accessible.
- * @param folderType - "invoices" counts PDFs, "tripsheets" counts CSV/Excel files
+ * @param folderType - "invoices" and "collections" count PDFs, "tripsheets"
+ *                     counts CSV/Excel files
  */
-export function validateFolderPath(folderPath: string, folderType: "invoices" | "tripsheets" = "invoices"): {
+export function validateFolderPath(folderPath: string, folderType: "invoices" | "tripsheets" | "collections" = "invoices"): {
   valid: boolean;
   exists: boolean;
   readable: boolean;
@@ -136,7 +151,12 @@ export function validateFolderPath(folderPath: string, folderType: "invoices" | 
     fileCount: 0,
     pdfCount: 0,
     matchedFileCount: 0,
-    matchedFileLabel: folderType === "tripsheets" ? "Trip Sheets" : "PDFs",
+    matchedFileLabel:
+      folderType === "tripsheets"
+        ? "Trip Sheets"
+        : folderType === "collections"
+        ? "Collection Documents"
+        : "PDFs",
     error: undefined as string | undefined,
   };
 
@@ -170,6 +190,16 @@ export function validateFolderPath(folderPath: string, folderType: "invoices" | 
         result.matchedFileCount = files.filter((f) =>
           tripSheetExts.includes(f.toLowerCase().slice(f.lastIndexOf(".")))
         ).length;
+      } else if (folderType === "collections") {
+        // Collection documents sit in the Pending subfolder, not at the root —
+        // counting the root would report 0 for a correctly populated folder and
+        // make the admin think the path was wrong.
+        const pendingFolder = path.join(folderPath, "Pending");
+        result.matchedFileCount = fs.existsSync(pendingFolder)
+          ? fs
+              .readdirSync(pendingFolder)
+              .filter((f) => f.toLowerCase().endsWith(".pdf")).length
+          : 0;
       } else {
         // Count PDFs for invoice folders
         result.matchedFileCount = files.filter((f) =>

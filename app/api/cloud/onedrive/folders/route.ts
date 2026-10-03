@@ -4,7 +4,10 @@ import {
   listFolderById,
   setOneDriveFolder,
   setOneDriveInvoiceFolder,
+  setOneDriveCollectionsFolder,
+  getCloudAccountStatus,
 } from "@/lib/microsoft-graph";
+import { assertCollectionsFolderIsSibling } from "@/lib/collections";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
@@ -33,8 +36,10 @@ export const GET = withAuth(async (request: NextRequest) => {
 
 /**
  * POST /api/cloud/onedrive/folders
- * Set the selected OneDrive folder as the trip sheet or invoice source.
- * Body: { folderPath: string, folderItemId: string, target?: "tripsheets" | "invoices" }
+ * Set the selected OneDrive folder as the trip sheet, invoice or collections
+ * source.
+ * Body: { folderPath: string, folderItemId: string,
+ *         target?: "tripsheets" | "invoices" | "collections" }
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
@@ -49,8 +54,40 @@ export const POST = withAuth(async (request: NextRequest) => {
     );
   }
 
+  // Invoices and collections must not overlap, in either direction: both
+  // listings are extension-based, so a nested pair turns every collection
+  // document into a phantom invoice. Checked against whichever of the two is
+  // already configured, so it does not matter which one the admin picks first.
+  if (target === "invoices" || target === "collections") {
+    const status = await getCloudAccountStatus(ctx.tenantId);
+    const check =
+      target === "collections"
+        ? assertCollectionsFolderIsSibling(status?.invoiceFolderPath, folderPath)
+        : assertCollectionsFolderIsSibling(folderPath, status?.collectionsFolderPath);
+
+    if (!check.ok) {
+      return NextResponse.json({ error: check.error }, { status: 400 });
+    }
+
+    // Belt and braces for the case the two paths read as siblings but are the
+    // same folder under different names — one item id cannot be two sources.
+    const otherItemId =
+      target === "collections" ? status?.invoiceFolderItemId : status?.collectionsFolderItemId;
+    if (otherItemId && otherItemId === folderItemId) {
+      return NextResponse.json(
+        {
+          error:
+            "That is already the other folder. Invoices and collections need separate folders.",
+        },
+        { status: 400 }
+      );
+    }
+  }
+
   if (target === "invoices") {
     await setOneDriveInvoiceFolder(ctx.tenantId, folderPath, folderItemId);
+  } else if (target === "collections") {
+    await setOneDriveCollectionsFolder(ctx.tenantId, folderPath, folderItemId);
   } else {
     await setOneDriveFolder(ctx.tenantId, folderPath, folderItemId);
   }

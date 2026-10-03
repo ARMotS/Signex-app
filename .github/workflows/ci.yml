@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch makes the in-flight run irrelevant. Cancel it
+# rather than paying for two runs and waiting on the stale one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      # `next build` imports lib/session.ts, which THROWS at import when
+      # SESSION_SECRET is absent — so the build needs one even though nothing
+      # is signed here. These are throwaway CI values, never real secrets.
+      SESSION_SECRET: ci-not-a-real-secret-0000000000000000000000000000
+      TOKEN_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      # Deliberately NO DATABASE_URL. lib/db.ts is written not to throw at
+      # import, and this job is the thing that keeps it that way.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Runs postinstall -> `prisma generate`, which needs no database.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # No database needed: tests/isolation.test.ts skips itself unless
+      # TEST_DATABASE_URL is set. Point that at a throwaway Neon branch to
+      # turn the cross-tenant suite on here.
+      - name: Unit tests
+        run: npm test
+
+      # NOT `npm run build` — that script starts with `prisma migrate deploy`,
+      # which wants a live database. CI compiles only; migrations belong to the
+      # Vercel deployment.
+      - name: Build
+        run: npx next build --webpack
+
+      # Non-blocking for now: 18 pre-existing errors (12 of them
+      # react-hooks/set-state-in-effect). Drop continue-on-error once they are
+      # cleared and this becomes a real gate.
+      - name: Lint
+        run: npm run lint
+        continue-on-error: true
