@@ -13,6 +13,8 @@ type Row = Record<string, unknown>;
 let row: Row | null;
 let claimCount: number;
 const updates: Row[] = [];
+let contactsByName: Record<string, Row>;
+const stopLinks: Row[] = [];
 
 vi.mock("@/lib/db-scoped", () => ({
   scopedPrisma: () => ({
@@ -22,6 +24,17 @@ vi.mock("@/lib/db-scoped", () => ({
         updates.push(args.data);
         // The claim is the only update whose data moves the row into SENDING.
         if (args.data.emailStatus === "SENDING") return { count: claimCount };
+        return { count: 1 };
+      }),
+    },
+    contact: {
+      findFirst: vi.fn(async (args: { where: { companyName: { equals: string } } }) =>
+        contactsByName[args.where.companyName.equals.toLowerCase()] ?? null
+      ),
+    },
+    stop: {
+      updateMany: vi.fn(async (args: { where: Row; data: Row }) => {
+        stopLinks.push(args);
         return { count: 1 };
       }),
     },
@@ -56,6 +69,8 @@ function collection(overrides: Row = {}): Row {
     emailStatus: "NOT_SENT",
     driver: { name: "John Smith" },
     stop: {
+      id: "stop-1",
+      customerName: "Acme",
       contact: { email: "accounts@acme.example", companyName: "Acme", contactPerson: null },
     },
     ...overrides,
@@ -66,6 +81,8 @@ beforeEach(() => {
   row = collection();
   claimCount = 1;
   updates.length = 0;
+  stopLinks.length = 0;
+  contactsByName = {};
   sendCollectionReceipt.mockReset();
   sendCollectionReceipt.mockResolvedValue({ success: true });
 });
@@ -100,11 +117,31 @@ describe("sendCollectionReceiptEmail", () => {
   });
 
   it("records NO_EMAIL instead of retrying when the customer has no address", async () => {
-    row = collection({ stop: { contact: null } });
+    row = collection({ stop: { id: "stop-1", customerName: "Acme", contact: null } });
     const result = await sendCollectionReceiptEmail(TENANT, "col-1");
     expect(result.outcome).toBe("no_email");
     expect(updates.at(-1)).toMatchObject({ emailStatus: "NO_EMAIL" });
     expect(sendCollectionReceipt).not.toHaveBeenCalled();
+  });
+
+  it("finds the contact by exact name when the stop was deployed unlinked", async () => {
+    // The cloud-folder deploy used to skip contact linking, and a customer can
+    // be added to Contacts after import. Either way the stop has no contact.
+    row = collection({ stop: { id: "stop-1", customerName: "Vaal Triangle Networks", contact: null } });
+    contactsByName["vaal triangle networks"] = {
+      id: "contact-9",
+      email: "ops@vaal.example",
+      companyName: "Vaal Triangle Networks",
+      contactPerson: null,
+    };
+
+    const result = await sendCollectionReceiptEmail(TENANT, "col-1");
+
+    expect(result).toMatchObject({ outcome: "sent", recipient: "ops@vaal.example" });
+    expect(stopLinks[0]).toEqual({
+      where: { id: "stop-1", contactId: null },
+      data: { contactId: "contact-9" },
+    });
   });
 
   it("does not mail twice when another sender holds the claim", async () => {

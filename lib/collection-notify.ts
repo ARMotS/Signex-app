@@ -70,7 +70,27 @@ export async function sendCollectionReceiptEmail(
       return { outcome: "not_signed", sent: false };
     }
 
-    const contact = collection.stop.contact;
+    // A stop deployed without its contact linked — the customer was added to
+    // Contacts afterwards, or the sheet came in by a path that did not link —
+    // is resolved here by exact company name, the same rule invoice signing
+    // uses. Exact, not fuzzy: the receipt carries signed paperwork, and a near
+    // miss would mail it to the wrong company.
+    let contact = collection.stop.contact;
+    if (!contact) {
+      const name = collection.stop.customerName.trim();
+      contact = name
+        ? await db.contact.findFirst({
+            where: { deletedAt: null, companyName: { equals: name, mode: "insensitive" } },
+          })
+        : null;
+      if (contact) {
+        await db.stop.updateMany({
+          where: { id: collection.stop.id, contactId: null },
+          data: { contactId: contact.id },
+        });
+      }
+    }
+
     if (!contact?.email) {
       await db.collection.updateMany({
         where: { id: collectionId },

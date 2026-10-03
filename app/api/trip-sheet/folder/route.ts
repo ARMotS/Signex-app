@@ -13,6 +13,7 @@ import {
 import { describeCloudProvider } from "@/lib/cloud-detect";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { matchStopsToContacts, applyContactMatches } from "@/lib/contact-matcher";
 
 /** Cloud imports list a remote folder and parse a spreadsheet — see the note
  *  on maxDuration in ../route.ts. */
@@ -147,6 +148,21 @@ export const POST = withAuth(async (request: NextRequest) => {
         stops: renumberedStops,
       });
       savedTrips.push(trip);
+    }
+
+    // Link stops to contacts exactly as the upload deploy does. This path used
+    // to skip it, so every stop imported from the cloud folder started with no
+    // contact: no delivery confirmation and no collection receipt could find an
+    // address, and a manual Send failed the same way.
+    const savedStops = savedTrips.flatMap((t) =>
+      t.stops.map((s) => ({ id: s.id, customerName: s.customerName }))
+    );
+    if (savedStops.length > 0) {
+      const matchResults = await matchStopsToContacts(ctx.tenantId, savedStops);
+      const autoMatches = matchResults
+        .filter((m) => m.status === "auto" && m.contactId)
+        .map((m) => ({ stopId: m.stopId, contactId: m.contactId! }));
+      if (autoMatches.length) await applyContactMatches(ctx.tenantId, autoMatches);
     }
 
     const tripSheetId = savedTrips.length > 0 ? savedTrips[0].id : null;
