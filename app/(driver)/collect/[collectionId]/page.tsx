@@ -3,6 +3,7 @@
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import SignaturePad, { type SignaturePadHandle } from "@/components/SignaturePad";
+import PdfViewer from "@/components/PdfViewer";
 
 type Outcome = "COLLECTED" | "PARTIAL" | "NOT_AVAILABLE" | "REFUSED";
 
@@ -282,11 +283,10 @@ export default function CollectPage() {
               <span>{showDocument ? "▲" : "▼"}</span>
             </button>
             {showDocument && (
-              <iframe
+              <PdfViewer
                 src={`/api/collections/document/${encodeURIComponent(collection.sourceFilePath)}`}
-                className="w-full border-0 bg-ink-surface"
                 title={`Collection ${collection.collectionNo}`}
-                style={{ height: "45vh" }}
+                className="h-[45vh]"
               />
             )}
           </div>

@@ -3,6 +3,7 @@
 import { useParams, useRouter } from "next/navigation";
 import { useRef, useState, useEffect, useCallback } from "react";
 import SignaturePad, { type SignaturePadHandle } from "@/components/SignaturePad";
+import PdfViewer from "@/components/PdfViewer";
 
 interface StopData {
   id: string;
@@ -248,11 +249,10 @@ export default function SignInvoicePage() {
       {/* PDF preview area */}
       <div className="flex-1 bg-ink-surface border-b border-ink-border min-h-[200px] relative">
         {stop?.invoiceFile ? (
-          <iframe
+          <PdfViewer
             src={`/api/invoices/${encodeURIComponent(stop.invoiceFile)}`}
-            className="w-full h-full min-h-[300px] border-0"
             title={`Invoice ${stop.invoiceNumber}`}
-            style={{ minHeight: "40vh" }}
+            className="h-[50vh]"
           />
         ) : (
           <div className="flex items-center justify-center h-full p-8">
