@@ -614,14 +614,16 @@ export default function CollectionsPage() {
                   ) : (
                     <span className="text-[11px] font-mono text-ink-muted-light">No receipt</span>
                   )}
-                  {r.id && RECEIPT_STATUSES.has(r.status) && (
+                  {/* Only for a receipt that did not go out: the email is sent
+                      when the driver confirms, and this is the fallback. */}
+                  {r.id && RECEIPT_STATUSES.has(r.status) && r.emailStatus !== "SENT" && (
                     <button
                       onClick={() => sendReceipt(r.id!)}
                       disabled={sendingId === r.id || r.emailStatus === "SENDING"}
                       className="text-[11px] font-mono text-ink-muted hover:text-ink-black hover:underline disabled:opacity-40"
                       title="Email the signed receipt to the customer"
                     >
-                      {sendingId === r.id ? "Sending…" : r.emailStatus === "SENT" ? "Resend" : "Email"}
+                      {sendingId === r.id ? "Sending…" : r.emailStatus === "FAILED" ? "Resend" : "Send"}
                     </button>
                   )}
                   {/* A live collection always gets the link: the route finds a

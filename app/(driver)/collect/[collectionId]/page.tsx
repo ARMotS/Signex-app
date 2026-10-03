@@ -59,6 +59,10 @@ export default function CollectPage() {
   );
   const [errorMessage, setErrorMessage] = useState("");
   const [documentWarning, setDocumentWarning] = useState<string | null>(null);
+  const [emailResult, setEmailResult] = useState<{
+    outcome: string;
+    recipient: string | null;
+  } | null>(null);
 
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [collectedQty, setCollectedQty] = useState("");
@@ -149,6 +153,7 @@ export default function CollectPage() {
       // written is the office's problem to finish, not a reason to tell the
       // driver their work did not save.
       setDocumentWarning(data.documentError ?? null);
+      setEmailResult(data.email ?? null);
       setStatus("done");
     } catch {
       setErrorMessage("Failed to connect to server. Please try again.");
@@ -204,6 +209,25 @@ export default function CollectPage() {
         <p className="text-sm text-ink-muted text-center mb-4">
           {collection?.collectionNo} · {OUTCOMES.find((o) => o.value === outcome)?.label}
         </p>
+
+        {/* The receipt email went as part of Confirm. A failure is the office's
+            to resend — the driver is told, not asked to do anything. */}
+        {emailResult &&
+          (emailResult.outcome === "sent" || emailResult.outcome === "already_sent" ? (
+            <p className="text-xs font-mono text-ink-green text-center mb-3">
+              Receipt emailed{emailResult.recipient ? ` to ${emailResult.recipient}` : ""}
+            </p>
+          ) : emailResult.outcome === "no_email" ? (
+            <p className="text-xs font-mono text-ink-muted text-center mb-3">
+              No email address on file for this customer — the office will send the receipt.
+            </p>
+          ) : emailResult.outcome === "in_flight" ? null : (
+            <div className="px-4 py-2.5 rounded bg-ink-amber-dim border border-ink-amber/20 max-w-xs mb-3">
+              <p className="text-xs font-mono text-ink-amber text-center">
+                The receipt could not be emailed. The collection is saved — the office will resend it.
+              </p>
+            </div>
+          ))}
 
         {documentWarning && (
           <div className="px-4 py-2.5 rounded bg-ink-amber-dim border border-ink-amber/20 max-w-xs">

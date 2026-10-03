@@ -11,7 +11,7 @@ import {
   isTerminalStatus,
 } from "@/lib/collections";
 import { logAudit } from "@/lib/audit";
-import { RECEIPT_STATUSES, scheduleCollectionReceipt } from "@/lib/collection-notify";
+import { RECEIPT_STATUSES, sendCollectionReceiptEmail } from "@/lib/collection-notify";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
@@ -241,12 +241,16 @@ export const PUT = withAuth(async (
     tenantId: ctx.tenantId,
   });
 
-  // 3. The customer's copy, after the response — never in the driver's way, and
-  //    never able to fail what is already recorded. Scheduled after the document
-  //    step so the signed sheet exists to attach.
-  if (RECEIPT_STATUSES.includes(status)) {
-    await scheduleCollectionReceipt(ctx.tenantId, id);
-  }
+  // 3. The customer's copy, sent as part of Confirm so the driver sees whether
+  //    it went. Inside this request, not deferred: the office wanted the email
+  //    tied to the driver's confirmation, with the dispatcher's Send as the
+  //    fallback only when it fails. It still cannot fail what is recorded —
+  //    sendCollectionReceiptEmail never throws, the record and document are
+  //    already written, and the transport's timeouts are bounded in lib/email.ts
+  //    so a dead network costs the driver seconds, not minutes.
+  const email = RECEIPT_STATUSES.includes(status)
+    ? await sendCollectionReceiptEmail(ctx.tenantId, id)
+    : null;
 
   return NextResponse.json({
     success: true,
@@ -255,6 +259,11 @@ export const PUT = withAuth(async (
     // Surfaced rather than swallowed: the driver has finished, but the office
     // has a document to produce by hand.
     documentError,
+    email: email && {
+      outcome: email.outcome,
+      recipient: email.recipient ?? null,
+      error: email.error ?? null,
+    },
   });
 });
 

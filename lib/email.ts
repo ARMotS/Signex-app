@@ -18,6 +18,13 @@ const transporter = nodemailer.createTransport({
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+  // Bounded, because a collection receipt is sent while a driver waits on
+  // Confirm. Nodemailer's defaults allow 2 minutes to connect and 10 to idle,
+  // which a dead network would spend in full. These fail fast instead, and the
+  // failure lands in the office's queue for a resend.
+  connectionTimeout: 10_000,
+  greetingTimeout: 10_000,
+  socketTimeout: 20_000,
 });
 
 export interface DeliveryConfirmationParams {

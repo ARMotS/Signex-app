@@ -5,8 +5,11 @@
  * The collection counterpart of lib/delivery-notify.ts, and deliberately the
  * same shape — read that file's header for the reasoning. In short:
  *
- *   - Sent AUTOMATICALLY once the outcome is recorded, deferred past the
- *     response so a driver on a phone is never held on SMTP.
+ *   - Sent when the driver presses Confirm, inside that request, so the driver
+ *     sees whether it went. Unlike delivery confirmations it is NOT deferred
+ *     with after(): the office wants the email tied to the confirmation, with
+ *     their Send button as the fallback only when it fails. The transport's
+ *     timeouts are bounded (lib/email.ts) so a dead network costs seconds.
  *   - Never throws. A collection is recorded whether or not a relay is
  *     reachable; every failure is written to the row instead.
  *   - Begins by CLAIMING the row with a conditional updateMany into SENDING, so
@@ -23,7 +26,6 @@
  * can never be emailed from here.
  */
 
-import { after } from "next/server";
 import type { CollectionStatus } from "@prisma/client";
 import { scopedPrisma } from "./db-scoped";
 import { sendCollectionReceipt } from "./email";
@@ -201,33 +203,5 @@ export async function sendCollectionReceiptEmail(
       // The database is what just failed; the lease keeps it retryable.
     }
     return { outcome: "failed", sent: false, error };
-  }
-}
-
-async function autoSendCollectionReceipt(tenantId: string, collectionId: string): Promise<void> {
-  const result = await sendCollectionReceiptEmail(tenantId, collectionId);
-  if (result.outcome === "failed") {
-    console.warn(
-      `[collection-notify] Automatic receipt for collection ${collectionId} failed (${result.error})`
-    );
-  }
-}
-
-/**
- * Schedule the automatic receipt for after the response is sent.
- *
- * Guarded exactly as scheduleDeliveryConfirmation is: `after()` throws with no
- * request scope, and an unguarded throw here would escape a handler that has
- * already recorded the collection — a 500 for a collection that is in fact
- * signed. Without a request scope the send runs inline instead.
- */
-export async function scheduleCollectionReceipt(
-  tenantId: string,
-  collectionId: string
-): Promise<void> {
-  try {
-    after(() => autoSendCollectionReceipt(tenantId, collectionId));
-  } catch {
-    await autoSendCollectionReceipt(tenantId, collectionId);
   }
 }
