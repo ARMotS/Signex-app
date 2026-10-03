@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { exchangeCodeForTokens, saveCloudAccount } from "@/lib/microsoft-graph";
 import { verifyOAuthState } from "@/lib/crypto";
 import { getSessionContext } from "@/lib/tenant";
+import { oauthRelayOrigin } from "@/lib/oauth-relay";
 
 /**
  * GET /api/auth/microsoft/callback
@@ -21,6 +22,17 @@ export async function GET(request: NextRequest) {
   const state = searchParams.get("state");
   const error = searchParams.get("error");
   const errorDescription = searchParams.get("error_description");
+
+  // Microsoft only returns to the registered (production) callback. A flow
+  // started on another deployment goes back there, query intact, and is
+  // verified and completed by that deployment. Done before anything else so a
+  // cancelled consent also lands on the page it started from.
+  const relayOrigin = oauthRelayOrigin(request.nextUrl.origin, state);
+  if (relayOrigin) {
+    const target = new URL("/api/auth/microsoft/callback", relayOrigin);
+    target.search = request.nextUrl.search;
+    return NextResponse.redirect(target);
+  }
 
   const settingsUrl = new URL("/settings", request.url);
 

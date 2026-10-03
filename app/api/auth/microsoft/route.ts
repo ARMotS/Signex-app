@@ -13,14 +13,16 @@ import { withAuth } from "@/lib/api-handler";
  * verified in the callback. Previously it was a bare random value returned to the
  * client and never checked on the way back.
  */
-export const GET = withAuth(async () => {
+export const GET = withAuth(async (req) => {
   const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
   // Connecting a drive is an act of ownership — a SUPER_ADMIN must not attach
   // their own Microsoft account while viewing someone else's scope.
   requireHomeScope(ctx);
 
-  const state = signOAuthState(ctx.tenantId);
+  // Our own origin rides in the signed state so production's callback can hand
+  // a preview deployment's round-trip back to it (lib/oauth-relay.ts).
+  const state = signOAuthState(ctx.tenantId, req.nextUrl.origin);
   const url = getAuthorizationUrl(state);
 
   return NextResponse.json({ url, state });
