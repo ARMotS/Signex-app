@@ -31,6 +31,8 @@ interface CollectionRecord {
   signedFilePath: string | null;
   driverId: string | null;
   driverName: string | null;
+  emailStatus: "NOT_SENT" | "SENDING" | "SENT" | "FAILED" | "NO_EMAIL" | null;
+  emailError: string | null;
   tripSheetId: string;
   archived: boolean;
   completedTripSheetId: string | null;
@@ -65,6 +67,156 @@ const SUBTYPE_LABEL: Record<string, string> = {
 
 const EXCEPTIONS = new Set(["PARTIAL", "NOT_AVAILABLE", "REFUSED"]);
 
+/** Outcomes the customer signed for — the only ones a receipt is emailed for. */
+const RECEIPT_STATUSES = new Set(["COLLECTED", "PARTIAL"]);
+
+const EMAIL_LABEL: Record<string, { text: string; tone: string }> = {
+  SENT: { text: "Emailed", tone: "text-ink-green" },
+  SENDING: { text: "Sending…", tone: "text-ink-muted" },
+  FAILED: { text: "Email failed", tone: "text-ink-red" },
+  NO_EMAIL: { text: "No email on file", tone: "text-ink-amber" },
+  NOT_SENT: { text: "Not emailed", tone: "text-ink-muted" },
+};
+
+interface FolderDocument {
+  filename: string;
+  sizeBytes: number;
+  lastModified: string;
+}
+
+interface FolderListing {
+  source: "onedrive" | "local";
+  folderPath: string | null;
+  error: string | null;
+  pending: FolderDocument[];
+  signed: FolderDocument[];
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * What is actually in the collections folder.
+ *
+ * The table below only shows collections that have arrived on a trip sheet, so
+ * without this an admin could not tell an empty folder from an unreadable one —
+ * and both made every COLLECTNO on an import read as "no document".
+ */
+function FolderPanel() {
+  const [listing, setListing] = useState<FolderListing | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [showSigned, setShowSigned] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setFailed(null);
+    try {
+      const res = await fetch("/api/collections/folder");
+      const data = await res.json();
+      if (!res.ok) {
+        setFailed(data.error || "Failed to read the collections folder");
+        return;
+      }
+      setListing(data);
+    } catch {
+      setFailed("Failed to connect to server");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const error = failed ?? listing?.error ?? null;
+  const docs = showSigned ? listing?.signed ?? [] : listing?.pending ?? [];
+
+  return (
+    <div className="bg-ink-card border border-ink-border rounded mb-6">
+      <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-ink-border">
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">
+            Collections folder
+            {listing && (
+              <span className="ml-2 normal-case tracking-normal">
+                · {listing.source === "onedrive" ? "OneDrive" : "Local folder"}
+              </span>
+            )}
+          </p>
+          <p className="font-mono text-[13px] text-ink-black truncate" title={listing?.folderPath ?? ""}>
+            {listing?.folderPath || "No folder chosen"}
+          </p>
+        </div>
+        <div className="flex items-center gap-1 text-xs font-mono">
+          <button
+            onClick={() => setShowSigned(false)}
+            className={`px-2.5 py-1 rounded ${!showSigned ? "bg-ink-surface text-ink-black" : "text-ink-muted hover:text-ink-black"}`}
+          >
+            Pending ({listing?.pending.length ?? 0})
+          </button>
+          <button
+            onClick={() => setShowSigned(true)}
+            className={`px-2.5 py-1 rounded ${showSigned ? "bg-ink-surface text-ink-black" : "text-ink-muted hover:text-ink-black"}`}
+          >
+            Signed ({listing?.signed.length ?? 0})
+          </button>
+          <button
+            onClick={load}
+            disabled={loading}
+            className="ml-2 px-3 py-1.5 border border-ink-border rounded hover:bg-ink-surface transition-colors disabled:opacity-40"
+          >
+            {loading ? "Reading…" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {error ? (
+        <div className="px-4 py-3 bg-ink-red-dim">
+          <p className="text-[13px] font-mono text-ink-red">{error}</p>
+          <a href="/settings" className="text-xs font-mono text-ink-muted hover:text-ink-black underline">
+            Open Settings
+          </a>
+        </div>
+      ) : loading && !listing ? (
+        <p className="px-4 py-4 text-sm font-mono text-ink-muted">Reading folder…</p>
+      ) : docs.length === 0 ? (
+        <p className="px-4 py-4 text-xs text-ink-muted">
+          {showSigned
+            ? "Nothing signed yet. Signed receipts are filed in the Signed subfolder."
+            : "No PDFs found. Put collection documents in this folder or its Pending subfolder, named by collection number (e.g. COL-118.pdf)."}
+        </p>
+      ) : (
+        <div className="divide-y divide-ink-border max-h-72 overflow-y-auto">
+          {docs.map((d) => (
+            <div key={d.filename} className="flex items-center gap-3 px-4 py-2">
+              <span className="font-mono text-[13px] text-ink-black truncate flex-1 min-w-0">
+                {d.filename}
+              </span>
+              <span className="text-[11px] font-mono text-ink-muted shrink-0">
+                {formatSize(d.sizeBytes)} ·{" "}
+                {new Date(d.lastModified).toLocaleDateString("en-ZA", { day: "2-digit", month: "short" })}
+              </span>
+              <a
+                href={`/api/collections/document/${encodeURIComponent(d.filename)}${showSigned ? "?signed=true" : ""}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-[11px] font-mono text-ink-violet hover:underline shrink-0"
+              >
+                Open
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type TypeFilter = "" | "CREDIT_RETURN" | "NON_CREDIT_UPLIFT";
 type StatusFilter = "" | CollectionRecord["status"];
 
@@ -87,6 +239,8 @@ export default function CollectionsPage() {
   const [exceptionsOnly, setExceptionsOnly] = useState(false);
   const [outstandingOnly, setOutstandingOnly] = useState(false);
   const [query, setQuery] = useState("");
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [sendNote, setSendNote] = useState<{ id: string; text: string; ok: boolean } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -135,6 +289,29 @@ export default function CollectionsPage() {
     );
   }, [records, query, outstandingOnly]);
 
+  // The manual send — for a receipt that did not go out on its own, or another
+  // copy. The automatic send on recording the outcome is the normal path.
+  const sendReceipt = async (id: string) => {
+    setSendingId(id);
+    setSendNote(null);
+    try {
+      const res = await fetch(`/api/collections/${id}/notify`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (data.success) {
+        setSendNote({ id, text: `Sent to ${data.recipient}`, ok: true });
+      } else if (data.skipped) {
+        setSendNote({ id, text: data.reason, ok: false });
+      } else {
+        setSendNote({ id, text: data.error || "Send failed", ok: false });
+      }
+      await load();
+    } catch {
+      setSendNote({ id, text: "Failed to connect to server", ok: false });
+    } finally {
+      setSendingId(null);
+    }
+  };
+
   const exportCsv = () => {
     // A credit clerk reconciles in a spreadsheet, so the report has to leave as
     // one. Built in the browser from what is already on screen — no second
@@ -153,6 +330,7 @@ export default function CollectionsPage() {
       "Signed By",
       "Collected At",
       "Signed Document",
+      "Receipt Email",
     ];
     const rows = visible.map((r) => [
       r.collectionNo,
@@ -168,6 +346,7 @@ export default function CollectionsPage() {
       r.signedByName ?? "",
       r.collectedAt ? new Date(r.collectedAt).toISOString() : "",
       r.signedFilePath ?? "",
+      r.emailStatus ? EMAIL_LABEL[r.emailStatus]?.text ?? r.emailStatus : "",
     ]);
 
     const escape = (v: unknown) => {
@@ -193,6 +372,8 @@ export default function CollectionsPage() {
           Credit returns and uplifts, across live trips and closed-out ones.
         </p>
       </div>
+
+      <FolderPanel />
 
       {/* ── Summary ─────────────────────────────────────────── */}
       {counts && (
@@ -334,7 +515,7 @@ export default function CollectionsPage() {
         </div>
       ) : (
         <div className="bg-ink-card border border-ink-border rounded overflow-hidden">
-          <div className="hidden md:grid grid-cols-[10rem_1fr_1fr_8rem_9rem] gap-3 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50 border-b border-ink-border">
+          <div className="hidden md:grid grid-cols-[10rem_1fr_1fr_9rem_12rem] gap-3 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50 border-b border-ink-border">
             <div>Collection</div>
             <div>Customer</div>
             <div>Detail</div>
@@ -346,7 +527,7 @@ export default function CollectionsPage() {
             {visible.map((r) => (
               <div
                 key={`${r.tripSheetId}-${r.collectionNo}-${r.id ?? "archived"}`}
-                className="px-4 py-3 hover:bg-ink-surface/30 transition-colors md:grid md:grid-cols-[10rem_1fr_1fr_8rem_9rem] md:gap-3 md:items-center"
+                className="px-4 py-3 hover:bg-ink-surface/30 transition-colors md:grid md:grid-cols-[10rem_1fr_1fr_9rem_12rem] md:gap-3 md:items-center"
               >
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
@@ -405,6 +586,19 @@ export default function CollectionsPage() {
                   <span className={statusBadgeClass(r.status)}>
                     {STATUS_LABEL[r.status] ?? r.status}
                   </span>
+                  {RECEIPT_STATUSES.has(r.status) && r.emailStatus && (
+                    <p
+                      className={`text-[11px] font-mono mt-1 ${EMAIL_LABEL[r.emailStatus]?.tone ?? "text-ink-muted"}`}
+                      title={r.emailError ?? undefined}
+                    >
+                      {EMAIL_LABEL[r.emailStatus]?.text ?? r.emailStatus}
+                    </p>
+                  )}
+                  {sendNote?.id === r.id && (
+                    <p className={`text-[11px] font-mono mt-0.5 ${sendNote.ok ? "text-ink-green" : "text-ink-amber"}`}>
+                      {sendNote.text}
+                    </p>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-3 mt-2 md:mt-0 md:justify-end">
@@ -420,9 +614,28 @@ export default function CollectionsPage() {
                   ) : (
                     <span className="text-[11px] font-mono text-ink-muted-light">No receipt</span>
                   )}
-                  {r.sourceFilePath && (
+                  {/* Only for a receipt that did not go out: the email is sent
+                      when the driver confirms, and this is the fallback. */}
+                  {r.id && RECEIPT_STATUSES.has(r.status) && r.emailStatus !== "SENT" && (
+                    <button
+                      onClick={() => sendReceipt(r.id!)}
+                      disabled={sendingId === r.id || r.emailStatus === "SENDING"}
+                      className="text-[11px] font-mono text-ink-muted hover:text-ink-black hover:underline disabled:opacity-40"
+                      title="Email the signed receipt to the customer"
+                    >
+                      {sendingId === r.id ? "Sending…" : r.emailStatus === "FAILED" ? "Resend" : "Send"}
+                    </button>
+                  )}
+                  {/* A live collection always gets the link: the route finds a
+                      document added after import. An archived one has no row
+                      left, so it needs the filename frozen with it. */}
+                  {(r.id || r.sourceFilePath) && (
                     <a
-                      href={`/api/collections/document/${encodeURIComponent(r.sourceFilePath)}`}
+                      href={
+                        r.id
+                          ? `/api/collections/${r.id}/source`
+                          : `/api/collections/document/${encodeURIComponent(r.sourceFilePath!)}`
+                      }
                       target="_blank"
                       rel="noreferrer"
                       className="text-[11px] font-mono text-ink-muted hover:text-ink-black hover:underline"

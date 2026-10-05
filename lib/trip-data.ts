@@ -120,6 +120,8 @@ export interface ArchivedCollection {
   sourceFilePath: string | null;
   signedFileId: string | null;
   signedFilePath: string | null;
+  /** Absent on snapshots taken before receipts were emailed. */
+  emailStatus?: string | null;
 }
 
 export interface CompletedTripSheet {
@@ -661,6 +663,7 @@ export async function completeTripSheet(
             sourceFilePath: c.sourceFilePath,
             signedFileId: c.signedFileId,
             signedFilePath: c.signedFilePath,
+            emailStatus: c.emailStatus,
           };
         }),
       },
@@ -959,6 +962,10 @@ export interface CollectionRecord {
   signedFilePath: string | null;
   driverId: string | null;
   driverName: string | null;
+  /** Whether the customer's receipt went out. Null on old archive snapshots. */
+  emailStatus: string | null;
+  /** Live rows only — the archive keeps the outcome, not the transport error. */
+  emailError: string | null;
   /** The live trip sheet, or the archived trip's original id. */
   tripSheetId: string;
   /** True when this came out of a CompletedTripSheet snapshot. */
@@ -1062,6 +1069,8 @@ export async function listCollections(
     signedFilePath: c.signedFilePath,
     driverId: c.tripSheet.driverId,
     driverName: c.tripSheet.driver?.name ?? null,
+    emailStatus: c.emailStatus,
+    emailError: c.emailError,
     tripSheetId: c.tripSheetId,
     archived: false,
     completedTripSheetId: null,
@@ -1118,6 +1127,8 @@ export async function listCollections(
         signedFilePath: c.signedFilePath,
         driverId: archive.driverId,
         driverName: archive.driverName,
+        emailStatus: c.emailStatus ?? null,
+        emailError: null,
         tripSheetId: archive.tripSheetId,
         archived: true,
         completedTripSheetId: archive.id,

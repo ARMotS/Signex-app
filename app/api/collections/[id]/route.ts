@@ -3,6 +3,7 @@ import type { CollectionStatus, CollectionType, UpliftSubtype } from "@prisma/cl
 import {
   buildSignedCollectionPdf,
   readCollectionDocument,
+  resolveCollectionSource,
   saveSignedCollection,
   signedCollectionFilename,
   validateCollectionOutcome,
@@ -10,6 +11,7 @@ import {
   isTerminalStatus,
 } from "@/lib/collections";
 import { logAudit } from "@/lib/audit";
+import { RECEIPT_STATUSES, sendCollectionReceiptEmail } from "@/lib/collection-notify";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
@@ -67,6 +69,13 @@ export const GET = withAuth(async (
   const collection = await loadCollection(ctx, id);
   if (!collection) {
     return NextResponse.json({ error: "Collection not found" }, { status: 404 });
+  }
+
+  // A document the office added after the sheet was imported is picked up
+  // here, so the driver at the door sees it. Outstanding work only — a closed
+  // collection's paperwork is already on its signed copy.
+  if (collection.status === "PENDING" && !collection.sourceFilePath) {
+    collection.sourceFilePath = await resolveCollectionSource(ctx.tenantId, collection);
   }
 
   // The signature is a full-size PNG data URL. It is not sent to a list screen
@@ -163,15 +172,19 @@ export const PUT = withAuth(async (
   let documentError: string | null = null;
 
   try {
+    // Re-checked rather than trusted from import: the office may have added
+    // the document since, and the receipt belongs on it when it exists.
+    const sourceName = await resolveCollectionSource(ctx.tenantId, collection);
+
     const outputName = signedCollectionFilename(
-      collection.sourceFilePath,
+      sourceName,
       collection.collectionNo,
       status
     );
     if (!outputName) throw new Error("Could not derive a filename for the receipt");
 
-    const sourcePdf = collection.sourceFilePath
-      ? await readCollectionDocument(ctx.tenantId, collection.sourceFilePath)
+    const sourcePdf = sourceName
+      ? await readCollectionDocument(ctx.tenantId, sourceName)
       : null;
 
     const signatureBytes = signatureImage
@@ -228,6 +241,17 @@ export const PUT = withAuth(async (
     tenantId: ctx.tenantId,
   });
 
+  // 3. The customer's copy, sent as part of Confirm so the driver sees whether
+  //    it went. Inside this request, not deferred: the office wanted the email
+  //    tied to the driver's confirmation, with the dispatcher's Send as the
+  //    fallback only when it fails. It still cannot fail what is recorded —
+  //    sendCollectionReceiptEmail never throws, the record and document are
+  //    already written, and the transport's timeouts are bounded in lib/email.ts
+  //    so a dead network costs the driver seconds, not minutes.
+  const email = RECEIPT_STATUSES.includes(status)
+    ? await sendCollectionReceiptEmail(ctx.tenantId, id)
+    : null;
+
   return NextResponse.json({
     success: true,
     status: updated.status,
@@ -235,6 +259,11 @@ export const PUT = withAuth(async (
     // Surfaced rather than swallowed: the driver has finished, but the office
     // has a document to produce by hand.
     documentError,
+    email: email && {
+      outcome: email.outcome,
+      recipient: email.recipient ?? null,
+      error: email.error ?? null,
+    },
   });
 });
 

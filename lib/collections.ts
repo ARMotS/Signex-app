@@ -29,6 +29,7 @@ import path from "path";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import type { CollectionStatus, CollectionType, UpliftSubtype } from "@prisma/client";
 import { readConfig } from "./config";
+import { scopedPrisma } from "./db-scoped";
 import {
   getOneDriveCollectionsSource,
   listOneDriveCollectionDocuments,
@@ -213,22 +214,39 @@ export interface CollectionDocument {
   itemId?: string;
 }
 
+/** Where a scope's collection documents were read from, and what was found. */
+export interface CollectionsFolderListing {
+  /** "onedrive" when a OneDrive collections folder is chosen, else "local" */
+  source: "onedrive" | "local";
+  /** The configured folder, as the admin chose it */
+  folderPath: string | null;
+  documents: CollectionDocument[];
+  /**
+   * Why the listing could not be trusted, if it could not. Reported rather than
+   * swallowed: an unreadable folder used to come back as an empty one, so every
+   * collection on a sheet read as "no document" with nothing to say why.
+   */
+  error?: string;
+}
+
 /**
- * List the pending collection documents for this scope.
+ * List the pending collection documents for this scope, saying where it looked.
  *
- * Reads Collections/Pending only — a document already stamped has moved to
- * Signed/ and is no longer outstanding work. Uses OneDrive when a collections
- * folder is connected there, otherwise the configured local folder, exactly as
- * listInvoiceFiles resolves.
+ * Reads Collections/Pending and PDFs directly in the collections folder — see
+ * listOneDriveCollectionDocuments for why both. Signed/ is never included: a
+ * stamped document is no longer outstanding work. Uses OneDrive when a
+ * collections folder is chosen there, otherwise the configured local folder,
+ * exactly as listInvoiceFiles resolves.
  */
-export async function listCollectionDocuments(
+export async function listCollectionFolder(
   tenantId: string
-): Promise<CollectionDocument[]> {
+): Promise<CollectionsFolderListing> {
   const onedrive = await getOneDriveCollectionsSource(tenantId);
   if (onedrive) {
+    const folderPath = onedrive.folderPath ?? null;
     try {
       const items = await listOneDriveCollectionDocuments(tenantId);
-      return items.map((item) => {
+      const documents = items.map((item) => {
         const name = item.name.replace(/\.pdf$/i, "");
         return {
           name,
@@ -239,24 +257,50 @@ export async function listCollectionDocuments(
           itemId: item.id,
         };
       });
+      return { source: "onedrive", folderPath, documents };
     } catch (err) {
       console.error("Failed to list OneDrive collection documents:", err);
-      return [];
+      return {
+        source: "onedrive",
+        folderPath,
+        documents: [],
+        error: `Could not read the OneDrive collections folder: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      };
     }
   }
 
-  return listCollectionDocumentsFromLocal(tenantId);
+  const folderPath = await getCollectionsFolderPath(tenantId);
+  if (!fs.existsSync(folderPath)) {
+    // The usual cause on the hosted app: a local path was chosen in Settings,
+    // and the server has no such disk. Only a OneDrive folder is reachable there.
+    return {
+      source: "local",
+      folderPath,
+      documents: [],
+      error: `The collections folder "${folderPath}" does not exist on the server. Choose a OneDrive collections folder in Settings.`,
+    };
+  }
+  return { source: "local", folderPath, documents: listCollectionDocumentsFromLocal(folderPath) };
+}
+
+/** The pending documents alone, for callers that only match against them. */
+export async function listCollectionDocuments(
+  tenantId: string
+): Promise<CollectionDocument[]> {
+  return (await listCollectionFolder(tenantId)).documents;
 }
 
 function readPdfDir(folder: string): CollectionDocument[] {
   if (!fs.existsSync(folder)) return [];
 
-  const files = fs.readdirSync(folder).filter((f) => f.toLowerCase().endsWith(".pdf"));
-
   const results: CollectionDocument[] = [];
-  for (const filename of files) {
+  for (const filename of fs.readdirSync(folder)) {
+    if (!filename.toLowerCase().endsWith(".pdf")) continue;
     try {
       const stats = fs.statSync(path.join(folder, filename));
+      if (!stats.isFile()) continue;
       const name = path.parse(filename).name;
       results.push({
         name,
@@ -272,11 +316,12 @@ function readPdfDir(folder: string): CollectionDocument[] {
   return results;
 }
 
-async function listCollectionDocumentsFromLocal(
-  tenantId: string
-): Promise<CollectionDocument[]> {
-  const folderPath = await getCollectionsFolderPath(tenantId);
-  return readPdfDir(path.join(folderPath, PENDING_SUBFOLDER));
+/** Pending/ first, then the folder root; on a name clash Pending/ wins. */
+function listCollectionDocumentsFromLocal(folderPath: string): CollectionDocument[] {
+  const pending = readPdfDir(path.join(folderPath, PENDING_SUBFOLDER));
+  const seen = new Set(pending.map((d) => d.filename.toLowerCase()));
+  const root = readPdfDir(folderPath).filter((d) => !seen.has(d.filename.toLowerCase()));
+  return [...pending, ...root];
 }
 
 /** List the stamped documents in Collections/Signed for this scope. */
@@ -329,6 +374,39 @@ export function buildCollectionLookup(
   return lookup;
 }
 
+/**
+ * The source document for a live collection: the one matched at import, or —
+ * when nothing matched then — whatever now matches its number in the folder.
+ *
+ * A collection's document is matched once, when the trip sheet is imported.
+ * One with no document at that moment (the office had not papered it yet, or
+ * the folder could not be read) stayed unmatched for good: no Original link
+ * for the office, no document for the driver, and a receipt with nothing
+ * behind it — even after the PDF arrived. This re-checks, and records a match
+ * so the folder is listed once per collection, not on every view.
+ *
+ * Returns the filename, or null if there is still nothing to show.
+ */
+export async function resolveCollectionSource(
+  tenantId: string,
+  collection: { id: string; collectionNo: string; sourceFilePath: string | null }
+): Promise<string | null> {
+  if (collection.sourceFilePath) return collection.sourceFilePath;
+
+  const listing = await listCollectionFolder(tenantId);
+  if (listing.error) return null;
+
+  const doc = matchCollectionDocument(buildCollectionLookup(listing.documents), collection.collectionNo);
+  if (!doc) return null;
+
+  // Conditional on still being unmatched, so a concurrent office edit wins.
+  await scopedPrisma(tenantId).collection.updateMany({
+    where: { id: collection.id, sourceFilePath: null },
+    data: { sourceFilePath: doc.filename, sourceFileId: doc.itemId ?? null },
+  });
+  return doc.filename;
+}
+
 /** Look one collection number up in a lookup built above. */
 export function matchCollectionDocument(
   lookup: Map<string, CollectionDocument>,
@@ -365,10 +443,17 @@ export async function readCollectionDocument(
     }
   }
 
+  // Pending/ first, then the folder root, as listCollectionFolder lists them.
   const folderPath = await getCollectionsFolderPath(tenantId);
-  const resolved = resolveWithinFolder(folderPath, PENDING_SUBFOLDER, filename);
-  if (!fs.existsSync(resolved)) return null;
-  return fs.readFileSync(resolved);
+  for (const resolved of [
+    resolveWithinFolder(folderPath, PENDING_SUBFOLDER, filename),
+    resolveWithinFolder(folderPath, filename),
+  ]) {
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+      return fs.readFileSync(resolved);
+    }
+  }
+  return null;
 }
 
 /** Read a stamped collection document from Signed/. */

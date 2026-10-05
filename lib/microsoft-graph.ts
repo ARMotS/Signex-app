@@ -601,10 +601,15 @@ export async function setOneDriveCollectionsFolder(
 }
 
 /**
- * List pending collection documents in this scope's Collections/Pending folder.
+ * List pending collection documents: Collections/Pending, then PDFs sitting
+ * directly in the collections folder itself.
  *
- * Deliberately reads only the Pending subfolder: a document that has been
- * signed has moved on to Signed/ and must not come back as outstanding work.
+ * The root is read too because offices drop paperwork straight into the folder
+ * they chose, and an admin who picks the Pending folder itself as "the
+ * collections folder" has no Pending/ beneath it. Reading only Pending/ made
+ * both arrangements look like an empty folder. Signed/ is never read here: a
+ * signed document is no longer outstanding work. On a name clash the Pending/
+ * copy wins, matching getCollectionItemByName.
  */
 export async function listOneDriveCollectionDocuments(
   tenantId: string
@@ -613,19 +618,22 @@ export async function listOneDriveCollectionDocuments(
 
   if (!account?.collectionsFolderItemId) return [];
 
+  const isPdf = (item: OneDriveItem) => !item.folder && item.name.toLowerCase().endsWith(".pdf");
+
   const children = await listFolderById(tenantId, account.collectionsFolderItemId);
   const pendingFolder = children.find(
     (item) =>
       item.folder &&
       item.name.toLowerCase() === COLLECTIONS_PENDING_SUBFOLDER.toLowerCase()
   );
-  if (!pendingFolder) return [];
+  const pending = pendingFolder
+    ? (await listFolderById(tenantId, pendingFolder.id)).filter(isPdf)
+    : [];
 
-  const items = await listFolderById(tenantId, pendingFolder.id);
-  return items.filter((item) => {
-    if (item.folder) return false;
-    return item.name.toLowerCase().endsWith(".pdf");
-  });
+  const seen = new Set(pending.map((item) => item.name.toLowerCase()));
+  const root = children.filter((item) => isPdf(item) && !seen.has(item.name.toLowerCase()));
+
+  return [...pending, ...root];
 }
 
 /**
@@ -831,7 +839,9 @@ export async function downloadSignedInvoiceByName(
 }
 
 /**
- * Find a pending collection document by filename. One Graph request, no listing.
+ * Find a pending collection document by filename: Pending/ first, then the
+ * collections folder itself (see listOneDriveCollectionDocuments). One Graph
+ * request when it is in Pending/, two otherwise — still no listing.
  */
 export async function getCollectionItemByName(
   tenantId: string,
@@ -841,10 +851,12 @@ export async function getCollectionItemByName(
   const account = await getAccount(tenantId);
   if (!account?.collectionsFolderItemId) return null;
 
-  return getItemInFolderByName(tenantId, account.collectionsFolderItemId, [
-    COLLECTIONS_PENDING_SUBFOLDER,
-    safe,
-  ]);
+  return (
+    (await getItemInFolderByName(tenantId, account.collectionsFolderItemId, [
+      COLLECTIONS_PENDING_SUBFOLDER,
+      safe,
+    ])) ?? (await getItemInFolderByName(tenantId, account.collectionsFolderItemId, [safe]))
+  );
 }
 
 /**
@@ -865,7 +877,8 @@ export async function getSignedCollectionItemByName(
 }
 
 /**
- * Download a pending collection document by filename, in one request.
+ * Download a pending collection document by filename: Pending/ first, then the
+ * collections folder itself, as getCollectionItemByName resolves it.
  */
 export async function downloadCollectionByName(
   tenantId: string,
@@ -875,12 +888,19 @@ export async function downloadCollectionByName(
   const account = await getAccount(tenantId);
   if (!account?.collectionsFolderItemId) return null;
 
-  return graphGetBufferOrNull(
-    tenantId,
-    `/me/drive/items/${account.collectionsFolderItemId}:/${encodeRelativePath([
-      COLLECTIONS_PENDING_SUBFOLDER,
-      safe,
-    ])}:/content`
+  const folderId = account.collectionsFolderItemId;
+  return (
+    (await graphGetBufferOrNull(
+      tenantId,
+      `/me/drive/items/${folderId}:/${encodeRelativePath([
+        COLLECTIONS_PENDING_SUBFOLDER,
+        safe,
+      ])}:/content`
+    )) ??
+    (await graphGetBufferOrNull(
+      tenantId,
+      `/me/drive/items/${folderId}:/${encodeRelativePath([safe])}:/content`
+    ))
   );
 }
 

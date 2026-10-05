@@ -118,7 +118,7 @@ const TRIP_SHEET_COLUMN_GUIDE: Row[] = [
   [
     "COLLECTNO",
     "Optional",
-    "Something the driver is picking UP. Matched to a document in the Pending folder of your collections folder, the same way invoices are matched. Fill in both INVOICENO and COLLECTNO to deliver and collect at one stop; fill in only COLLECTNO for a collection-only visit. Collections for a customer you are also delivering to are shown under that same stop.",
+    "Something the driver is picking UP. Matched to a PDF in your collections folder (or its Pending subfolder) by filename, the same way invoices are matched. Fill in both INVOICENO and COLLECTNO to deliver and collect at one stop; fill in only COLLECTNO for a collection-only visit. Collections for a customer you are also delivering to are shown under that same stop.",
     "COL-118",
   ],
   [

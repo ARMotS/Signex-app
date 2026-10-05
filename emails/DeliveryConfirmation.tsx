@@ -264,3 +264,6 @@ const styles = {
     color: "#a1a1aa",
   },
 };
+
+/** Shared with CollectionReceipt so the two customer emails look like one family. */
+export { styles as emailStyles };
