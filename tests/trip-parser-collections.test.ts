@@ -185,22 +185,7 @@ describe("fixture: a collection-only row", () => {
 });
 
 describe("fixture: a row carrying both an invoice and a collection", () => {
-  it("produces one stop with the collection attached", async () => {
-    const result = await parse([
-      HEADERS,
-      ["2026-08-24", "John Smith", "CA 123-456", "Beta Supplies", "INV-2042", "COL-118", "", "1"],
-    ]);
-
-    const stops = result.driverResults[0].stops;
-    expect(stops).toHaveLength(1);
-    expect(stops[0].invoiceNumber).toBe("INV-2042");
-    expect(stops[0].invoiceFile).toBe("INV-2042.pdf");
-    expect(stops[0].collections).toHaveLength(1);
-  });
-
-  it("does not assume the row's invoice is the one being credited", async () => {
-    // The credited invoice is printed on the collection document. A collection
-    // that merely shares a row with a delivery is not credited against it.
+  it("credits the collection against the row's invoice", async () => {
     const result = await parse([
       HEADERS,
       ["2026-08-24", "John Smith", "CA 123-456", "Beta Supplies", "INV-2042", "COL-118", "", "1"],
@@ -208,7 +193,47 @@ describe("fixture: a row carrying both an invoice and a collection", () => {
 
     const collection = result.driverResults[0].stops[0].collections![0];
     expect(collection.type).toBe("CREDIT_RETURN");
-    expect(collection.originalInvoiceNo).toBeNull();
+    expect(collection.originalInvoiceNo).toBe("INV-2042");
+  });
+
+  it("does not deliver the credited invoice", async () => {
+    // The row's invoice is the one goods go back against, not one being
+    // dropped off — so no delivery stop, and no PDF needed to deploy.
+    invoiceFiles = [];
+    const result = await parse([
+      HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Beta Supplies", "INV-1990", "COL-118", "", "1"],
+    ]);
+
+    const stops = result.driverResults[0].stops;
+    expect(stops).toHaveLength(1);
+    expect(stops[0].invoiceNumber).toBe("");
+    expect(stops[0].invoiceFile).toBeUndefined();
+    expect(stops[0].collections).toHaveLength(1);
+    expect(result.missingInvoices).toEqual([]);
+    expect(result.matchedInvoices).toBe(0);
+    expect(result.unmatchedInvoices).toBe(0);
+    expect(collectMissingInvoices(result.driverResults, new Set())).toEqual([]);
+  });
+
+  it("joins the customer's delivery when that is on a separate row", async () => {
+    // A delivery to the same customer comes on its own row; the driver sees
+    // one visit carrying the delivery and the collection.
+    const result = await parse([
+      HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Beta Supplies", "INV-1990", "COL-118", "", ""],
+      ["2026-08-24", "John Smith", "CA 123-456", "Beta Supplies", "INV-2042", "", "", "1"],
+    ]);
+
+    const stops = result.driverResults[0].stops;
+    expect(stops).toHaveLength(1);
+    expect(stops[0].invoiceNumber).toBe("INV-2042");
+    expect(stops[0].invoiceFile).toBe("INV-2042.pdf");
+    expect(stops[0].collections).toHaveLength(1);
+    expect(stops[0].collections![0]).toMatchObject({
+      collectionNo: "COL-118",
+      originalInvoiceNo: "INV-1990",
+    });
   });
 
   it("takes the credited invoice from an explicit column when the sheet has one", async () => {

@@ -442,7 +442,22 @@ export async function parseTripSheet(
       }))
       // A row has to carry something. Before collections, a blank invoice cell
       // could only mean a blank row; now it can mean a collection-only visit.
-      .filter((row) => row.invoiceNumber !== "" || row.collectionNo !== "");
+      .filter((row) => row.invoiceNumber !== "" || row.collectionNo !== "")
+      // On a collection row, INVOICENO is the invoice the collection is
+      // credited against — not a delivery. A delivery to the same customer
+      // arrives on its own row. So the row's invoice moves to
+      // originalInvoiceNo (an explicit ORIGINALINVOICENO column still wins)
+      // and the row is from here on a collection-only row: it needs no
+      // invoice PDF to deploy and is not checked as an already-signed delivery.
+      .map((row) =>
+        row.collectionNo && row.invoiceNumber
+          ? {
+              ...row,
+              originalInvoiceNo: row.originalInvoiceNo || row.invoiceNumber,
+              invoiceNumber: "",
+            }
+          : row
+      );
 
     // 4. Get this scope's existing invoices, collection documents and drivers.
     //    All three are scoped, and the two folder listings go over Graph, so
@@ -517,11 +532,14 @@ export async function parseTripSheet(
      * Invoice rows become stops exactly as they always have — one row, one
      * stop, in sheet order. What is new is where a COLLECTNO goes:
      *
-     *   • invoice + collection on one row → the collection joins that stop;
-     *   • collection only, customer has an invoice row anywhere in this group
+     *   (A row with both INVOICENO and COLLECTNO arrives here as a
+     *   collection-only row: its invoice is the credited one, already moved
+     *   to originalInvoiceNo.)
+     *
+     *   • collection, customer has an invoice row anywhere in this group
      *     → it joins that customer's stop, even if the invoice row is further
      *     down the sheet;
-     *   • collection only, customer has no invoice row → its own stop, with a
+     *   • collection, customer has no invoice row → its own stop, with a
      *     blank invoice number.
      *
      * The driver therefore sees one visit per customer address carrying both
@@ -571,11 +589,8 @@ export async function parseTripSheet(
           type: typing.type,
           upliftSubtype: typing.upliftSubtype,
           notes: null,
-          // Only what the sheet states outright. Sharing a row with an invoice
-          // does NOT mean the collection is credited against it — the invoice a
-          // credit goes back against is printed on the collection document,
-          // and inferring it from the row put the wrong number in front of
-          // accounts.
+          // ORIGINALINVOICENO, else the INVOICENO on the collection's own row
+          // (moved here when the rows were parsed).
           originalInvoiceNo: row.originalInvoiceNo || null,
           status: "PENDING",
           exceptionReason: null,
@@ -638,7 +653,6 @@ export async function parseTripSheet(
             for (const waiting of deferred.get(key) ?? []) attach(waiting, stop);
             deferred.delete(key);
           }
-          if (row.collectionNo) attach(row, stop);
           continue;
         }
 
