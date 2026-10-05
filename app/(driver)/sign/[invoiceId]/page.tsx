@@ -34,7 +34,7 @@ export default function SignInvoicePage() {
     try {
       const stored = localStorage.getItem("signex-driver");
       if (!stored) {
-        setErrorMessage("No driver selected. Please select a driver first.");
+        setErrorMessage("You're signed out. Please sign in again.");
         setStatus("error");
         return;
       }

@@ -81,7 +81,7 @@ model Admin {
   email        String      @unique
   passwordHash String
   // A deactivated ADMIN cannot log in. Their drivers are unaffected and keep
-  // signing in and completing deliveries; see loginAdmin / loginDriver.
+  // signing in and completing deliveries; see login() in lib/accounts.ts.
   active       Boolean     @default(true)
   sessionToken String?
   tenantId     String      @default("")
@@ -89,6 +89,7 @@ model Admin {
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   tripSheets   TripSheet[]
+  login        LoginName?
 
   // Composite-FK target so TripSheet.adminId cannot cross a scope boundary.
   @@unique([tenantId, id])
@@ -98,8 +99,15 @@ model Admin {
 
 model Driver {
   id           String      @id @default(cuid())
+  // The name trip sheets match on. Not a sign-in identifier — see LoginName.
   name         String
-  pinHash      String
+  // Retired: drivers sign in with a username and password. Nullable rather than
+  // dropped so the previous deploy keeps working through the rollout; drop it
+  // in a later migration.
+  pinHash      String?
+  // Null for a driver created before usernames existed. Such a driver cannot
+  // sign in until an ADMIN sets a username and password on the Drivers page.
+  passwordHash String?
   active       Boolean     @default(true)
   sessionToken String?
   userId       String?     @unique
@@ -110,6 +118,7 @@ model Driver {
   updatedAt    DateTime    @updatedAt
   tripSheets   TripSheet[]
   collections  Collection[]
+  login        LoginName?
 
   // Driver names are unique WITHIN a scope only. A global unique constraint
   // would leak another ADMIN's driver names through the duplicate-name error.
@@ -118,6 +127,31 @@ model Driver {
   @@unique([tenantId, id])
   @@index([tenantId])
   @@index([active])
+}
+
+// ─── Sign-in names ────────────────────────────────────────────────────────
+//
+// Every account signs in with a username and password from one form that has
+// no tenant selector, so a username must identify exactly one account across
+// every role and every scope.
+//
+// Accounts live in two tables (Admin holds SUPER_ADMIN and ADMIN, Driver holds
+// DRIVER) and a UNIQUE constraint cannot span two tables. This registry is the
+// one place a username exists: its primary key IS the global uniqueness
+// guarantee, and login is a single lookup here. CHECK constraints in the
+// migration require the stored value to be lowercase and well-formed, and each
+// row to point at exactly one account.
+//
+// A registry like Tenant and User rather than data inside a scope: it carries
+// no tenantId and is read only through UNSAFE_unscopedPrisma, under SCOPE-EXEMPT.
+model LoginName {
+  username  String   @id
+  adminId   String?  @unique
+  admin     Admin?   @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  driverId  String?  @unique
+  driver    Driver?  @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ─── Trip Sheets & Stops ──────────────────────────────────────────────────

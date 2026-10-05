@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { sendStopDeliveryConfirmation } from '@/lib/delivery-notify'
 import { getScope } from '@/lib/tenant'
 import { withAuth } from '@/lib/api-handler'
+import { driverOwnsStop } from '@/lib/driver-access'
 
 export const runtime = 'nodejs'
 
@@ -26,6 +27,12 @@ export const maxDuration = 60
 export const POST = withAuth(async (req: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
   const ctx = await getScope();
   const { id } = await params;
+
+  // A driver may only resend for their own deliveries — not email a
+  // colleague's customer. Same 404 as a stop that does not exist.
+  if (ctx.role === 'DRIVER' && !(await driverOwnsStop(ctx.db, ctx.userId, id))) {
+    return NextResponse.json({ error: 'Stop not found or not signed yet' }, { status: 404 });
+  }
 
   const body = await req.json().catch(() => ({}));
   const { driverName } = body ?? {};

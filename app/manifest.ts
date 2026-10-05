@@ -6,7 +6,8 @@ export default function manifest(): MetadataRoute.Manifest {
     short_name: "Signex",
     description:
       "Capture, sign, and store delivery invoices digitally. Built for logistics teams.",
-    start_url: "/",
+    // The one sign-in; a signed-in user is sent straight on to their own screen.
+    start_url: "/login",
     display: "standalone",
     background_color: "#0F0F0F",
     theme_color: "#0F0F0F",
@@ -34,10 +35,10 @@ export default function manifest(): MetadataRoute.Manifest {
         description: "Open the admin dashboard",
       },
       {
-        name: "Driver Login",
-        short_name: "Driver",
-        url: "/select",
-        description: "Driver login and run selection",
+        name: "My Run",
+        short_name: "Run",
+        url: "/run",
+        description: "Open today's deliveries (drivers)",
       },
     ],
   };

@@ -7,6 +7,7 @@ import { updateStopStatus } from "@/lib/trip-data";
 import { scheduleDeliveryConfirmation } from "@/lib/delivery-notify";
 import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { driverOwnsInvoiceFile } from "@/lib/driver-access";
 
 /**
  * Signing does real work: embedding the signature, writing the signed PDF back
@@ -29,6 +30,17 @@ export const GET = withAuth(async (
   const decodedFilename = decodeURIComponent(id);
   const { searchParams } = new URL(request.url);
   const wantSigned = searchParams.get("signed") === "true";
+
+  // A driver may open only the invoices on their own run. The scope alone
+  // would let them read every invoice the company holds.
+  if (ctx.role === "DRIVER") {
+    if (wantSigned || !(await driverOwnsInvoiceFile(ctx.db, ctx.userId, decodedFilename))) {
+      return NextResponse.json(
+        { error: `Invoice "${decodedFilename}" not found` },
+        { status: 404 }
+      );
+    }
+  }
 
   if (wantSigned) {
     // Try OneDrive first
@@ -123,6 +135,22 @@ export const PUT = withAuth(async (
       { error: "signatureImage (base64 data URL) is required" },
       { status: 400 }
     );
+  }
+
+  // A driver signs a STOP, never a bare file: the stop must be on their own run
+  // and the filename must be that stop's invoice. Without this, a driver could
+  // stamp a signature onto any invoice in the company folder — by leaving
+  // stopId out, or by pairing their own stop with someone else's filename.
+  if (ctx.role === "DRIVER") {
+    const own = stopId
+      ? await ctx.db.stop.findFirst({
+          where: { id: stopId, tripSheet: { driverId: ctx.userId } },
+          select: { invoiceFile: true },
+        })
+      : null;
+    if (!own || own.invoiceFile !== decodedFilename) {
+      return NextResponse.json({ error: "Stop not found" }, { status: 404 });
+    }
   }
 
   // If stopId provided, confirm it is in this scope (scoped read → 404 for a

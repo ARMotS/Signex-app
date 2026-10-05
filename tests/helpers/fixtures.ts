@@ -40,9 +40,26 @@ function hashSecret(secret: string): string {
   return `${salt}:${hash}`;
 }
 
+/**
+ * Sign-in credentials for every seeded account. Usernames are global, so the
+ * two scopes' drivers — who share a NAME on purpose — have distinct usernames.
+ */
+export const CREDENTIALS = {
+  superAdmin: { username: "root.super", password: "root-super-pass1" },
+  admin: (label: string) => ({
+    username: `office.${label.toLowerCase()}`,
+    password: `office-${label.toLowerCase()}-pass1`,
+  }),
+  driver: (label: string) => ({
+    username: `jane.${label.toLowerCase()}`,
+    password: `jane-${label.toLowerCase()}-pass1`,
+  }),
+};
+
 export async function resetDatabase() {
   const p = db();
   // Order matters: children before parents.
+  await p.loginName.deleteMany();
   await p.collection.deleteMany();
   await p.stop.deleteMany();
   await p.tripSheet.deleteMany();
@@ -94,8 +111,9 @@ export async function seedFixtures(): Promise<Fixtures> {
     data: {
       name: "Super Admin",
       email: "super@example.test",
-      passwordHash: hashSecret("supersecret"),
+      passwordHash: hashSecret(CREDENTIALS.superAdmin.password),
       tenantId: rootTenant.id,
+      login: { create: { username: CREDENTIALS.superAdmin.username } },
     },
   });
   await p.tenant.update({
@@ -120,8 +138,9 @@ export async function seedFixtures(): Promise<Fixtures> {
       data: {
         name: `Admin ${label}`,
         email: `admin-${label.toLowerCase()}@example.test`,
-        passwordHash: hashSecret("password123"),
+        passwordHash: hashSecret(CREDENTIALS.admin(label).password),
         tenantId: tenant.id,
+        login: { create: { username: CREDENTIALS.admin(label).username } },
       },
       select: { id: true, name: true, email: true },
     });
@@ -142,9 +161,9 @@ export async function seedFixtures(): Promise<Fixtures> {
     const driver = await p.driver.create({
       data: {
         name: "Jane Delivery",
-        // Different PINs, so driver login stays unambiguous.
-        pinHash: hashSecret(label === "A" ? "1111" : "2222"),
+        passwordHash: hashSecret(CREDENTIALS.driver(label).password),
         tenantId: tenant.id,
+        login: { create: { username: CREDENTIALS.driver(label).username } },
       },
       select: { id: true, name: true },
     });

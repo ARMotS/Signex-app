@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState, useCallback } from "react";
 import { useLiveSync } from "@/hooks/useLiveSync";
 
@@ -78,7 +79,14 @@ interface DriverTripSheet {
 }
 
 export default function RunPage() {
+  const router = useRouter();
   const [driver, setDriver] = useState<DriverInfo | null>(null);
+
+  const signOut = async () => {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    localStorage.removeItem("signex-driver");
+    router.replace("/login");
+  };
   const [stops, setStops] = useState<TripStop[]>([]);
   const [tripSheets, setTripSheets] = useState<DriverTripSheet[]>([]);
   const [loading, setLoading] = useState(true);
@@ -216,12 +224,12 @@ export default function RunPage() {
           <p className="text-xs text-ink-muted max-w-xs">
             Your admin hasn&apos;t uploaded a trip sheet for you yet, or it may be assigned to a different driver.
           </p>
-          <Link
-            href="/select"
+          <button
+            onClick={signOut}
             className="mt-4 px-4 py-2 text-xs font-mono bg-ink-green-dim text-ink-green rounded hover:bg-ink-green hover:text-white transition-all"
           >
-            Switch Driver
-          </Link>
+            Not you? Sign out
+          </button>
         </div>
       )}
 
@@ -403,14 +411,14 @@ export default function RunPage() {
       )}
 
 
-      {/* Change driver */}
+      {/* Change driver — on a shared device, the next driver signs in as themselves */}
       <div className="mt-auto pt-6 text-center">
-        <Link
-          href="/select"
+        <button
+          onClick={signOut}
           className="text-xs font-mono text-ink-muted hover:text-ink-black transition-colors"
         >
-          ← Change driver
-        </Link>
+          ← Sign out to change driver
+        </button>
       </div>
     </div>
   );

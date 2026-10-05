@@ -41,6 +41,7 @@ import {
   tripSheetCsv,
   tripSheetCsvWithCollection,
   params,
+  CREDENTIALS,
   type Fixtures,
 } from "./helpers/fixtures";
 
@@ -1197,123 +1198,426 @@ suite("cross-ADMIN isolation", () => {
     });
   });
 
-  // ── Public driver sign-in surface ─────────────────────────────────────
+  // ── One sign-in for every role ───────────────────────────────────────
   //
-  // Drivers sign in through a link unique to their operator: /select/<slug>.
-  // This is the only endpoint that exposes anything without a session, and
-  // reaching it requires already holding that operator's slug — there is no
-  // public directory of operators. These tests pin the exposure down.
-  describe("the per-operator driver sign-in endpoint", () => {
-    it("requires a company slug — there is no list-everything mode", async () => {
-      const { GET } = await import("@/app/api/auth/drivers/route");
+  // There is no tenant selector on the login form: the username alone picks the
+  // account, and the account's own row supplies the role and the scope. So a
+  // username must be unique across every role and every scope — enforced by the
+  // LoginName primary key — and nothing the client sends may influence scope.
+  describe("username + password sign-in", () => {
+    it("resolves each role to its own account, role and scope", async () => {
+      const { login } = await import("@/lib/accounts");
 
-      const res = await GET(req("/api/auth/drivers"));
-      expect(res.status).toBe(400);
+      const sup = await login(CREDENTIALS.superAdmin.username, CREDENTIALS.superAdmin.password);
+      const adminA = await login(CREDENTIALS.admin("A").username, CREDENTIALS.admin("A").password);
+      const driverB = await login(CREDENTIALS.driver("B").username, CREDENTIALS.driver("B").password);
+
+      expect(sup.success && sup.account).toMatchObject({
+        id: f.superAdmin.id,
+        role: "super_admin",
+        tenantId: f.superAdmin.tenantId,
+      });
+      expect(adminA.success && adminA.account).toMatchObject({
+        id: f.a.admin.id,
+        role: "admin",
+        tenantId: f.a.tenantId,
+      });
+      // Both scopes employ a "Jane Delivery"; the username alone tells them apart.
+      expect(driverB.success && driverB.account).toMatchObject({
+        id: f.b.driver.id,
+        role: "driver",
+        tenantId: f.b.tenantId,
+      });
     });
 
-    it("returns only the drivers of the operator whose link was used", async () => {
-      const { GET } = await import("@/app/api/auth/drivers/route");
+    it("treats usernames case-insensitively and ignores surrounding spaces", async () => {
+      const { login } = await import("@/lib/accounts");
 
-      const bodyA = await (
-        await GET(req("/api/auth/drivers?company=scope-a"))
-      ).json();
-
-      expect(bodyA.drivers.map((d: any) => d.id)).toEqual([f.a.driver.id]);
-      expect(bodyA.drivers.map((d: any) => d.id)).not.toContain(f.b.driver.id);
+      const result = await login("  JANE.A ", CREDENTIALS.driver("A").password);
+      expect(result.success && result.account.id).toBe(f.a.driver.id);
     });
 
-    it("exposes only id and name — no counts, no scope ids, no tokens", async () => {
-      const { GET } = await import("@/app/api/auth/drivers/route");
+    it("gives one generic error for a wrong password and an unknown username", async () => {
+      const { login, LOGIN_FAILED } = await import("@/lib/accounts");
 
-      const body = await (
-        await GET(req("/api/auth/drivers?company=scope-a"))
-      ).json();
+      const wrongPassword = await login(CREDENTIALS.admin("A").username, "not-the-password1");
+      const unknownUser = await login("nobody.here", CREDENTIALS.admin("A").password);
+      // Another scope's password against this scope's username.
+      const crossed = await login(CREDENTIALS.driver("A").username, CREDENTIALS.driver("B").password);
 
-      // The original endpoint returned stopCount/signedCount and tenantId. Gone.
-      for (const d of body.drivers) {
-        expect(Object.keys(d).sort()).toEqual(["id", "name"]);
+      for (const r of [wrongPassword, unknownUser, crossed]) {
+        expect(r.success).toBe(false);
+        expect(!r.success && r.error).toBe(LOGIN_FAILED);
       }
-      const serialized = JSON.stringify(body);
-      expect(serialized).not.toContain(f.a.tenantId);
-      expect(serialized).not.toContain("admin-a@example.test");
-      expect(serialized).not.toContain("access-token");
-      expect(serialized).not.toContain("Acme Trading");
+      expect(LOGIN_FAILED).toBe("Incorrect username or password");
     });
 
-    it("an unknown slug yields an empty list, not an error", async () => {
-      const { GET } = await import("@/app/api/auth/drivers/route");
+    it("a driver created before usernames existed cannot sign in until given credentials", async () => {
+      const { login, listDrivers, updateDriver } = await import("@/lib/accounts");
 
-      const body = await (
-        await GET(req("/api/auth/drivers?company=no-such-operator"))
-      ).json();
-      expect(body.drivers).toEqual([]);
-      expect(body.companyName).toBeNull();
-    });
-
-    it("a deactivated operator is indistinguishable from an unknown slug", async () => {
-      const { GET } = await import("@/app/api/auth/drivers/route");
-
-      await db().admin.update({
-        where: { id: f.b.admin.id },
-        data: { active: false },
+      // As the migration leaves them: a PIN hash, no password, no username.
+      const legacy = await db().driver.create({
+        data: { name: "Legacy Larry", pinHash: "salt:hash", tenantId: f.a.tenantId },
       });
 
-      const deactivated = await (
-        await GET(req("/api/auth/drivers?company=scope-b"))
-      ).json();
-      const unknown = await (
-        await GET(req("/api/auth/drivers?company=no-such-operator"))
-      ).json();
+      const listed = (await listDrivers(f.a.tenantId)).find((d) => d.id === legacy.id);
+      expect(listed).toMatchObject({ username: null, canSignIn: false });
 
-      // Byte-identical, so a slug cannot be confirmed by probing.
-      expect(deactivated).toEqual(unknown);
+      // A password alone would leave a half-set account, so it is refused.
+      const half = await updateDriver(f.a.tenantId, legacy.id, { password: "larry-pass-1" });
+      expect(half.success).toBe(false);
 
-      await db().admin.update({
-        where: { id: f.b.admin.id },
-        data: { active: true },
+      const set = await updateDriver(f.a.tenantId, legacy.id, {
+        username: "larry.legacy",
+        password: "larry-pass-1",
       });
+      expect(set.success).toBe(true);
+
+      const result = await login("larry.legacy", "larry-pass-1");
+      expect(result.success && result.account).toMatchObject({
+        id: legacy.id,
+        role: "driver",
+        tenantId: f.a.tenantId,
+      });
+
+      await db().driver.delete({ where: { id: legacy.id } });
     });
 
-    it("an ADMIN's own sign-in link is scoped to them", async () => {
+    it("the database refuses a username already used by any role in any scope", async () => {
+      // Scope B's driver trying to take scope A's ADMIN username, bypassing the
+      // application entirely. The primary key alone must stop it.
+      await expect(
+        db().loginName.create({
+          data: { username: CREDENTIALS.admin("A").username, driverId: f.b.driver.id },
+        })
+      ).rejects.toMatchObject({ code: "P2002" });
+    });
+
+    it("the database refuses a username that is not lowercase and well-formed", async () => {
+      const legacy = await db().driver.create({
+        data: { name: "Case Carla", tenantId: f.b.tenantId },
+      });
+
+      // "Office.A" would otherwise sit beside "office.a" as a second account.
+      await expect(
+        db().loginName.create({ data: { username: "Office.A", driverId: legacy.id } })
+      ).rejects.toThrow();
+      await expect(
+        db().loginName.create({ data: { username: "has space", driverId: legacy.id } })
+      ).rejects.toThrow();
+
+      await db().driver.delete({ where: { id: legacy.id } });
+    });
+
+    it("an ADMIN cannot create a driver with a username taken in another scope, in any case", async () => {
+      const { POST } = await import("@/app/api/drivers/route");
+      useSession(adminSession(f.b));
+
+      for (const taken of [CREDENTIALS.admin("A").username, "JANE.A", " Jane.A "]) {
+        const res = await POST(
+          req("/api/drivers", {
+            method: "POST",
+            body: { name: `New ${taken}`, username: taken, password: "fresh-pass-1" },
+          })
+        );
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toBe("Username already taken");
+      }
+
+      // ...and the refusal reveals nothing about whose name it is.
+      const created = await db().driver.findMany({
+        where: { tenantId: f.b.tenantId, name: { startsWith: "New " } },
+      });
+      expect(created).toHaveLength(0);
+    });
+
+    it("a driver an ADMIN creates lands in the ADMIN's scope, whatever the body says", async () => {
+      const { POST } = await import("@/app/api/drivers/route");
+      useSession(adminSession(f.a));
+
+      const res = await POST(
+        req("/api/drivers", {
+          method: "POST",
+          body: {
+            name: "Scoped Sam",
+            username: "scoped.sam",
+            password: "scoped-pass-1",
+            tenantId: f.b.tenantId,
+          },
+        })
+      );
+      expect(res.status).toBe(200);
+
+      const row = await db().driver.findFirst({ where: { name: "Scoped Sam" } });
+      expect(row?.tenantId).toBe(f.a.tenantId);
+
+      await db().driver.delete({ where: { id: row!.id } });
+    });
+
+    it("rejects weak passwords and malformed usernames on create", async () => {
+      const { POST } = await import("@/app/api/drivers/route");
+      useSession(adminSession(f.a));
+
+      for (const body of [
+        { name: "Weak One", username: "weak.one", password: "short1" },
+        { name: "Weak Two", username: "weak.two", password: "lettersonly" },
+        { name: "Weak Three", username: "weak.three", password: "12345678" },
+        { name: "Bad Name", username: "no", password: "fine-pass-1" },
+        { name: "Bad Name", username: "has-dash", password: "fine-pass-1" },
+      ]) {
+        const res = await POST(req("/api/drivers", { method: "POST", body }));
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it("an ADMIN cannot reset another scope's driver's password", async () => {
+      const { PUT } = await import("@/app/api/drivers/route");
+      useSession(adminSession(f.a));
+
+      const before = await db().driver.findUnique({ where: { id: f.b.driver.id } });
+
+      const res = await PUT(
+        req("/api/drivers", {
+          method: "PUT",
+          body: { id: f.b.driver.id, password: "hijack-pass-1", username: "hijacked" },
+        })
+      );
+      expect(res.status).toBe(404);
+
+      const after = await db().driver.findUnique({
+        where: { id: f.b.driver.id },
+        include: { login: true },
+      });
+      expect(after?.passwordHash).toBe(before?.passwordHash);
+      expect(after?.login?.username).toBe(CREDENTIALS.driver("B").username);
+    });
+
+    it("resetting a driver's password signs them out and replaces the old one", async () => {
+      const { PUT } = await import("@/app/api/drivers/route");
+      const { login } = await import("@/lib/accounts");
+      useSession(adminSession(f.a));
+
+      await db().driver.update({
+        where: { id: f.a.driver.id },
+        data: { sessionToken: "live-token" },
+      });
+
+      const res = await PUT(
+        req("/api/drivers", {
+          method: "PUT",
+          body: { id: f.a.driver.id, password: "rotated-pass-1" },
+        })
+      );
+      expect(res.status).toBe(200);
+
+      const row = await db().driver.findUnique({ where: { id: f.a.driver.id } });
+      expect(row?.sessionToken).toBeNull();
+      expect((await login(CREDENTIALS.driver("A").username, CREDENTIALS.driver("A").password)).success).toBe(false);
+      expect((await login(CREDENTIALS.driver("A").username, "rotated-pass-1")).success).toBe(true);
+
+      // Restore for the rest of the suite.
+      await PUT(
+        req("/api/drivers", {
+          method: "PUT",
+          body: { id: f.a.driver.id, password: CREDENTIALS.driver("A").password },
+        })
+      );
+    });
+
+    it("the availability check is for account creators only, and reveals only existence", async () => {
+      const { GET } = await import("@/app/api/auth/username-available/route");
+
+      useSession(driverSession(f.a));
+      expect((await GET(req("/api/auth/username-available?username=office.b"))).status).toBe(403);
+
+      useSession(adminSession(f.a));
+      const taken = await (await GET(req("/api/auth/username-available?username=Office.B"))).json();
+      expect(taken).toEqual({ username: "office.b", available: false, error: "Username already taken" });
+
+      const free = await (await GET(req("/api/auth/username-available?username=nobody.here"))).json();
+      expect(free).toEqual({ username: "nobody.here", available: true });
+    });
+
+    it("the Drivers page lists only this scope's drivers, with their usernames", async () => {
       const { GET } = await import("@/app/api/drivers/route");
       useSession(adminSession(f.a));
 
       const body = await (await GET(req("/api/drivers"))).json();
 
-      expect(body.signInLink.slug).toBe("scope-a");
-      expect(body.signInLink.path).toBe("/select/scope-a");
-      expect(JSON.stringify(body)).not.toContain("scope-b");
+      expect(body.drivers.map((d: any) => d.id)).toEqual([f.a.driver.id]);
+      expect(body.drivers[0]).toMatchObject({
+        username: CREDENTIALS.driver("A").username,
+        canSignIn: true,
+      });
+      const serialized = JSON.stringify(body);
+      expect(serialized).not.toContain(CREDENTIALS.driver("B").username);
+      expect(serialized).not.toContain("passwordHash");
+      // The retired per-company sign-in link is gone.
+      expect(body.signInLink).toBeUndefined();
     });
 
-    it("signing in through one operator's link cannot authenticate another's driver", async () => {
-      const { loginDriver } = await import("@/lib/accounts");
-      const { UNSAFE_unscopedPrisma } = await import("@/lib/db-scoped");
+    it("the login route answers with the role's landing page", async () => {
+      const { POST } = await import("@/app/api/auth/login/route");
 
-      const scopeA = await UNSAFE_unscopedPrisma.tenant.findFirst({
-        where: { slug: "scope-a" },
-        select: { id: true },
+      const cases: [{ username: string; password: string }, string, string][] = [
+        [CREDENTIALS.superAdmin, "super_admin", "/users"],
+        [CREDENTIALS.admin("A"), "admin", "/dashboard"],
+        [CREDENTIALS.driver("A"), "driver", "/run"],
+      ];
+      for (const [creds, role, redirectTo] of cases) {
+        const res = await POST(req("/api/auth/login", { method: "POST", body: creds }));
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ role, redirectTo });
+      }
+    });
+
+    it("locks a username out after repeated failures, whether or not it exists", async () => {
+      const { POST } = await import("@/app/api/auth/login/route");
+      const { clearAttempts } = await import("@/lib/rate-limit");
+
+      for (const username of ["office.b", "no.such.user"]) {
+        const statuses: number[] = [];
+        for (let i = 0; i < 6; i++) {
+          const res = await POST(
+            req("/api/auth/login", { method: "POST", body: { username, password: "wrong-pass-1" } })
+          );
+          statuses.push(res.status);
+        }
+        expect(statuses.slice(0, 5)).toEqual([401, 401, 401, 401, 401]);
+        expect(statuses[5]).toBe(429);
+        await clearAttempts(username, "auth:user");
+      }
+      await clearAttempts("127.0.0.1", "auth");
+    });
+  });
+
+  // ── A driver sees only their own run ─────────────────────────────────
+  //
+  // The scoped client keeps a driver inside their company, but a company has
+  // many drivers. Routes that take a filename or a stop id directly must also
+  // check the thing is on THIS driver's trip sheet.
+  describe("a DRIVER is confined to their own run within the scope", () => {
+    let colleague: { driverId: string; tripSheetId: string; stopId: string };
+
+    beforeAll(async () => {
+      const driver = await db().driver.create({
+        data: { name: "Colleague Cole", tenantId: f.a.tenantId },
       });
+      const tripSheet = await db().tripSheet.create({
+        data: {
+          sourceFilename: "colleague.csv",
+          uploadedBy: f.a.admin.id,
+          driverId: driver.id,
+          tenantId: f.a.tenantId,
+        },
+      });
+      const stop = await db().stop.create({
+        data: {
+          stopNumber: 1,
+          invoiceNumber: "INV-7007",
+          invoiceFile: "INV-7007.pdf",
+          customerName: "Colleague Customer",
+          address: "Elsewhere",
+          tripSheetId: tripSheet.id,
+          tenantId: f.a.tenantId,
+        },
+      });
+      await db().collection.create({
+        data: {
+          collectionNo: "COL-7007",
+          type: "CREDIT_RETURN",
+          sourceFilePath: "COL-7007.pdf",
+          tripSheetId: tripSheet.id,
+          stopId: stop.id,
+          tenantId: f.a.tenantId,
+        },
+      });
+      colleague = { driverId: driver.id, tripSheetId: tripSheet.id, stopId: stop.id };
+    });
 
-      // Scope B's driver shares the name but has PIN 2222. Using scope A's link
-      // narrows the candidates to A, so B's PIN authenticates nothing here.
-      const result = await loginDriver("Jane Delivery", "2222", scopeA!.id);
-      expect(result.success).toBe(false);
+    afterAll(async () => {
+      await db().tripSheet.delete({ where: { id: colleague.tripSheetId } });
+      await db().driver.delete({ where: { id: colleague.driverId } });
+    });
+
+    it("cannot open a colleague's invoice by typing its filename", async () => {
+      const { GET } = await import("@/app/api/invoices/[id]/route");
+      useSession(driverSession(f.a));
+
+      for (const url of ["/api/invoices/INV-7007.pdf", "/api/invoices/INV-7007.pdf?signed=true"]) {
+        const res = await GET(req(url), params({ id: "INV-7007.pdf" }));
+        expect(res.status).toBe(404);
+      }
+      // Refused before any storage was touched.
+      expect(graphCalls).toHaveLength(0);
+    });
+
+    it("cannot sign a colleague's invoice, with or without one of their own stop ids", async () => {
+      const { PUT } = await import("@/app/api/invoices/[id]/route");
+      useSession(driverSession(f.a));
+
+      for (const body of [
+        { signatureImage: "data:image/png;base64,AAAA" },
+        { signatureImage: "data:image/png;base64,AAAA", stopId: f.a.stop.id },
+        { signatureImage: "data:image/png;base64,AAAA", stopId: colleague.stopId },
+      ]) {
+        const res = await PUT(
+          req("/api/invoices/INV-7007.pdf", { method: "PUT", body }),
+          params({ id: "INV-7007.pdf" })
+        );
+        expect(res.status).toBe(404);
+      }
+      const stop = await db().stop.findUnique({ where: { id: colleague.stopId } });
+      expect(stop?.status).not.toBe("SIGNED");
+    });
+
+    it("cannot trigger a confirmation email for a colleague's delivery", async () => {
+      const { POST } = await import("@/app/api/invoices/[id]/notify/route");
+      useSession(driverSession(f.a));
+
+      const res = await POST(
+        req(`/api/invoices/${colleague.stopId}/notify`, { method: "POST", body: {} }),
+        params({ id: colleague.stopId })
+      );
+      expect(res.status).toBe(404);
+      expect(sentEmails).toHaveLength(0);
+    });
+
+    it("cannot open a colleague's collection document", async () => {
+      const { GET } = await import("@/app/api/collections/document/[name]/route");
+      useSession(driverSession(f.a));
+
+      const res = await GET(
+        req("/api/collections/document/COL-7007.pdf"),
+        params({ name: "COL-7007.pdf" })
+      );
+      expect(res.status).toBe(404);
+      expect(graphCalls).toHaveLength(0);
+    });
+
+    it("the office can still open the same invoice", async () => {
+      const { GET } = await import("@/app/api/invoices/[id]/route");
+      useSession(adminSession(f.a));
+
+      await GET(req("/api/invoices/INV-7007.pdf"), params({ id: "INV-7007.pdf" }));
+      // It went to storage (the stubbed Graph) rather than being refused.
+      expect(graphCalls.length).toBeGreaterThan(0);
     });
   });
 
   // ── Admin deactivation ───────────────────────────────────────────────
   describe("admin deactivation", () => {
     it("a deactivated ADMIN cannot log in", async () => {
-      const { loginAdmin } = await import("@/lib/accounts");
+      const { login } = await import("@/lib/accounts");
 
       await db().admin.update({
         where: { id: f.b.admin.id },
         data: { active: false },
       });
 
-      const result = await loginAdmin(f.b.admin.email, "password123");
+      const result = await login(CREDENTIALS.admin("B").username, CREDENTIALS.admin("B").password);
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/deactivated/i);
+      expect(!result.success && result.error).toMatch(/deactivated/i);
 
       await db().admin.update({
         where: { id: f.b.admin.id },
@@ -1322,16 +1626,15 @@ suite("cross-ADMIN isolation", () => {
     });
 
     it("their drivers can still sign in — deactivating an office account does not strand drivers", async () => {
-      const { loginDriver } = await import("@/lib/accounts");
+      const { login } = await import("@/lib/accounts");
 
       await db().admin.update({
         where: { id: f.b.admin.id },
         data: { active: false },
       });
 
-      const result = await loginDriver("Jane Delivery", "2222", f.b.tenantId);
-      expect(result.success).toBe(true);
-      expect(result.account?.tenantId).toBe(f.b.tenantId);
+      const result = await login(CREDENTIALS.driver("B").username, CREDENTIALS.driver("B").password);
+      expect(result.success && result.account.tenantId).toBe(f.b.tenantId);
 
       await db().admin.update({
         where: { id: f.b.admin.id },
@@ -1339,8 +1642,8 @@ suite("cross-ADMIN isolation", () => {
       });
     });
 
-    it("a wrong password on a deactivated account still says only invalid credentials", async () => {
-      const { loginAdmin } = await import("@/lib/accounts");
+    it("a wrong password on a deactivated account still says only incorrect credentials", async () => {
+      const { login, LOGIN_FAILED } = await import("@/lib/accounts");
 
       await db().admin.update({
         where: { id: f.b.admin.id },
@@ -1348,9 +1651,9 @@ suite("cross-ADMIN isolation", () => {
       });
 
       // Checked after the password, so the deactivation message cannot be used
-      // to discover which emails exist.
-      const result = await loginAdmin(f.b.admin.email, "wrong-password");
-      expect(result.error).toBe("Invalid email or password");
+      // to discover which usernames exist.
+      const result = await login(CREDENTIALS.admin("B").username, "wrong-password1");
+      expect(!result.success && result.error).toBe(LOGIN_FAILED);
 
       await db().admin.update({
         where: { id: f.b.admin.id },
@@ -1544,7 +1847,8 @@ suite("cross-ADMIN isolation", () => {
           body: {
             name: "Admin C",
             email: "admin-c@example.test",
-            password: "password123",
+            username: "office.c",
+            password: "office-c-pass1",
           },
         })
       );
@@ -1596,7 +1900,8 @@ suite("cross-ADMIN isolation", () => {
           body: {
             name: "Sneaky",
             email: "sneaky@example.test",
-            password: "password123",
+            username: "sneaky.one",
+            password: "sneaky-pass-1",
           },
         })
       );
@@ -1612,74 +1917,12 @@ suite("cross-ADMIN isolation", () => {
           body: {
             name: "Interloper",
             email: "interloper@example.test",
-            password: "password123",
+            username: "interloper",
+            password: "interloper-pass1",
           },
         }) as any
       );
       expect(res.status).toBe(403);
-    });
-  });
-
-  // ── Driver login resolves the right scope ────────────────────────────
-  describe("driver login", () => {
-    it("resolves the scope from the name+PIN pair", async () => {
-      const { loginDriver } = await import("@/lib/accounts");
-
-      const asA = await loginDriver("Jane Delivery", "1111");
-      const asB = await loginDriver("Jane Delivery", "2222");
-
-      expect(asA.account?.tenantId).toBe(f.a.tenantId);
-      expect(asB.account?.tenantId).toBe(f.b.tenantId);
-    });
-
-    it("a wrong PIN reveals nothing about which scopes hold the name", async () => {
-      const { loginDriver } = await import("@/lib/accounts");
-
-      const wrongPin = await loginDriver("Jane Delivery", "9999");
-      const unknownName = await loginDriver("Nobody At All", "1111");
-
-      expect(wrongPin.success).toBe(false);
-      expect(unknownName.success).toBe(false);
-      // Identical message — the response cannot be used to enumerate names.
-      expect(wrongPin.error).toBe(unknownName.error);
-    });
-
-    it("refuses an ambiguous login rather than guessing a scope", async () => {
-      const { loginDriver } = await import("@/lib/accounts");
-
-      // Give B a driver with A's name AND A's PIN.
-      const clash = await db().driver.create({
-        data: {
-          name: "Ambiguous Ann",
-          pinHash: (await import("crypto")).scryptSync("3333", "aaaa", 64).toString("hex"),
-          tenantId: f.b.tenantId,
-        },
-      });
-      // Rewrite both with an identical, correctly-formatted hash+salt.
-      const salt = "b".repeat(32);
-      const hash = (await import("crypto")).scryptSync("3333", salt, 64).toString("hex");
-      await db().driver.update({
-        where: { id: clash.id },
-        data: { pinHash: `${salt}:${hash}` },
-      });
-      const clashA = await db().driver.create({
-        data: {
-          name: "Ambiguous Ann",
-          pinHash: `${salt}:${hash}`,
-          tenantId: f.a.tenantId,
-        },
-      });
-
-      const result = await loginDriver("Ambiguous Ann", "3333");
-
-      // Two scopes matched — dropping the driver into either would expose that
-      // ADMIN's deliveries, so the login is refused.
-      expect(result.success).toBe(false);
-      expect(result.account).toBeUndefined();
-
-      await db().driver.deleteMany({
-        where: { id: { in: [clash.id, clashA.id] } },
-      });
     });
   });
 

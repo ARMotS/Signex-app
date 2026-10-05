@@ -142,8 +142,16 @@ describe("configured limits", () => {
     );
   });
 
-  it("keeps the auth limit tight and long-windowed", () => {
-    expect(RATE_LIMITS.auth.maxAttempts).toBeLessThanOrEqual(5);
+  it("keeps the per-account lockout tight and long-windowed", () => {
+    expect(RATE_LIMITS.authUser.maxAttempts).toBeLessThanOrEqual(5);
+    expect(RATE_LIMITS.authUser.windowMs).toBeGreaterThanOrEqual(15 * 60 * 1000);
+  });
+
+  it("lets a depot's worth of typos through the per-IP auth limit, but bounds it", () => {
+    // One mistyped password each from a 20-driver depot must not lock the
+    // building out; the per-username lockout is the control on guessing.
+    expect(RATE_LIMITS.auth.maxAttempts).toBeGreaterThanOrEqual(20);
+    expect(RATE_LIMITS.auth.maxAttempts).toBeLessThanOrEqual(50);
     expect(RATE_LIMITS.auth.windowMs).toBeGreaterThanOrEqual(15 * 60 * 1000);
   });
 });

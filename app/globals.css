@@ -65,8 +65,13 @@
   --color-sidebar-text-active: var(--sidebar-text-active);
   --color-sidebar-accent: var(--sidebar-accent);
 
-  --font-sans: var(--font-geist-sans), "Geist", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-dm-mono), "DM Mono", ui-monospace, monospace;
+  /* Poppins everywhere. Tailwind v4 has no tailwind.config — the default font
+     is set here. `font-mono` is pointed at Poppins too, rather than rewriting
+     the ~650 places that use it: the app is one typeface, and those classes now
+     mean "the UI label style", not "monospace". Where columns of figures need
+     to line up, use `tabular-nums`. */
+  --font-sans: var(--font-poppins), "Poppins", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-poppins), "Poppins", ui-sans-serif, system-ui, sans-serif;
 }
 
 /* ─── Base Styles ──────────────────────────────────────────────────────── */

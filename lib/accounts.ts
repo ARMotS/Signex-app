@@ -1,17 +1,27 @@
 /**
  * Account management — PostgreSQL via Prisma.
- * Supports admin accounts (email/password) and driver accounts (name/PIN).
- * Passwords are hashed with Node.js crypto scrypt.
+ *
+ * Every account, whatever its role, signs in with a username and password.
+ * Usernames live in the LoginName registry (see prisma/schema.prisma), which is
+ * what makes them unique across every role and every scope. Passwords are
+ * hashed with Node.js crypto scrypt.
  *
  * Every driver operation is scoped: a driver belongs to exactly one ADMIN's
  * tenant and is invisible to every other ADMIN. Login is the sole exception —
- * it necessarily runs before a scope exists, and is handled below with care not
- * to leak which scopes hold which names.
+ * it necessarily runs before a scope exists, and its scope is the *output* of
+ * the lookup, taken from the matched account row.
  */
 
 import crypto from "crypto";
 import { UNSAFE_unscopedPrisma, scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
+import {
+  normalizeUsername,
+  validateUsername,
+  validatePassword,
+  USERNAME_TAKEN,
+  type AppRole,
+} from "./credentials";
 
 export type AccountRole = "admin" | "driver";
 
@@ -34,6 +44,54 @@ function verifyPassword(password: string, stored: string): boolean {
   return crypto.timingSafeEqual(a, b);
 }
 
+/**
+ * Verified against when the username does not exist or has no password, so an
+ * unknown name costs the same scrypt round as a known one and response time
+ * does not reveal which usernames are real.
+ */
+let dummyHash: string | null = null;
+function getDummyHash(): string {
+  dummyHash ??= hashPassword(crypto.randomBytes(16).toString("hex"));
+  return dummyHash;
+}
+
+// ─── Usernames ────────────────────────────────────────────────────────────
+
+/**
+ * True when the (normalised) username belongs to any account in any scope.
+ *
+ * This necessarily reveals that a name exists somewhere — the login form has no
+ * tenant selector, so uniqueness has to be global, and "Username already taken"
+ * is the answer the spec asks for. It reveals nothing else: not the role, the
+ * scope, or the account behind it.
+ */
+export async function isUsernameTaken(username: string): Promise<boolean> {
+  // SCOPE-EXEMPT: LoginName is the global sign-in registry and carries no
+  // tenantId. Only existence is returned.
+  const row = await UNSAFE_unscopedPrisma.loginName.findUnique({
+    where: { username: normalizeUsername(username) },
+    select: { username: true },
+  });
+  return row !== null;
+}
+
+/**
+ * After a write fails, decide whether a username race is why. The availability
+ * check runs first, but two creators can claim one name at the same moment —
+ * the LoginName primary key settles it, and the loser gets the same message it
+ * would have had a second earlier.
+ */
+async function explainWriteFailure(
+  err: unknown,
+  username: string | undefined
+): Promise<string | null> {
+  const code = (err as { code?: string } | null)?.code;
+  if (code === "P2002" && username && (await isUsernameTaken(username))) {
+    return USERNAME_TAKEN;
+  }
+  return null;
+}
+
 // ─── Admin Account Operations ─────────────────────────────────────────────
 
 /**
@@ -46,9 +104,21 @@ function verifyPassword(password: string, stored: string): boolean {
 export async function createAdminAccount(
   name: string,
   email: string,
+  username: string,
   password: string,
   tenantId: string
-): Promise<{ success: boolean; error?: string; account?: { id: string; name: string; email: string } }> {
+): Promise<{
+  success: boolean;
+  error?: string;
+  account?: { id: string; name: string; email: string; username: string };
+}> {
+  const usernameError = validateUsername(username);
+  if (usernameError) return { success: false, error: usernameError };
+  const passwordError = validatePassword(password);
+  if (passwordError) return { success: false, error: passwordError };
+
+  const normalizedUsername = normalizeUsername(username);
+
   try {
     // SCOPE-EXEMPT: Admin.email is globally unique across the installation, so
     // this collision check must span scopes. It returns only a boolean-ish
@@ -61,11 +131,18 @@ export async function createAdminAccount(
       return { success: false, error: "An account with this email already exists" };
     }
 
+    if (await isUsernameTaken(normalizedUsername)) {
+      return { success: false, error: USERNAME_TAKEN };
+    }
+
+    // The LoginName row is created in the same statement, so an admin can never
+    // exist without its username or the other way round.
     const admin = await scopedPrisma(tenantId).admin.create({
       data: {
         name,
         email: email.toLowerCase(),
         passwordHash: hashPassword(password),
+        login: { create: { username: normalizedUsername } },
       },
       select: { id: true, name: true, email: true },
     });
@@ -75,12 +152,14 @@ export async function createAdminAccount(
       entity: "admin",
       entityId: admin.id,
       userName: admin.name,
-      details: `Admin account created: ${admin.email}`,
+      details: `Admin account created: ${normalizedUsername}`,
       tenantId,
     });
 
-    return { success: true, account: admin };
+    return { success: true, account: { ...admin, username: normalizedUsername } };
   } catch (err) {
+    const explained = await explainWriteFailure(err, normalizedUsername);
+    if (explained) return { success: false, error: explained };
     console.error("Failed to create admin:", err);
     return { success: false, error: "Failed to create account" };
   }
@@ -88,14 +167,32 @@ export async function createAdminAccount(
 
 /**
  * Update an admin credential row, matched by its current email.
- * Only touches the Admin table (email/password/name live here); the
- * companion User row is updated separately by the caller.
+ * Only touches the Admin table and its LoginName; the companion User row is
+ * updated separately by the caller.
+ *
+ * A password change signs the account out everywhere unless `keepSession` is
+ * set — used when an account changes its own password and should stay signed
+ * in on the device it did it from.
  */
 export async function updateAdminAccount(
   tenantId: string,
   currentEmail: string,
-  updates: { name?: string; email?: string; password?: string }
+  updates: { name?: string; email?: string; username?: string; password?: string },
+  options: { keepSession?: boolean } = {}
 ): Promise<{ success: boolean; error?: string }> {
+  const changingPassword = updates.password !== undefined && updates.password !== "";
+  if (changingPassword) {
+    const passwordError = validatePassword(updates.password);
+    if (passwordError) return { success: false, error: passwordError };
+  }
+
+  let newUsername: string | undefined;
+  if (updates.username !== undefined && updates.username !== "") {
+    const usernameError = validateUsername(updates.username);
+    if (usernameError) return { success: false, error: usernameError };
+    newUsername = normalizeUsername(updates.username);
+  }
+
   try {
     const db = scopedPrisma(tenantId);
 
@@ -103,6 +200,7 @@ export async function updateAdminAccount(
     // SUPER_ADMIN cannot rewrite another scope's credentials by guessing an email.
     const admin = await db.admin.findFirst({
       where: { email: currentEmail.toLowerCase() },
+      include: { login: { select: { username: true } } },
     });
     if (!admin) {
       return { success: false, error: "Admin credentials not found" };
@@ -119,15 +217,29 @@ export async function updateAdminAccount(
       }
     }
 
+    const renaming = newUsername !== undefined && newUsername !== admin.login?.username;
+    if (renaming && (await isUsernameTaken(newUsername!))) {
+      return { success: false, error: USERNAME_TAKEN };
+    }
+
     await db.admin.update({
       where: { id: admin.id },
       data: {
         ...(updates.name !== undefined && { name: updates.name }),
         ...(updates.email !== undefined && { email: updates.email.toLowerCase() }),
-        ...(updates.password !== undefined &&
-          updates.password !== "" && {
-            passwordHash: hashPassword(updates.password),
-          }),
+        ...(changingPassword && {
+          passwordHash: hashPassword(updates.password!),
+          // A reset password must lock out whoever held the old one, now.
+          ...(!options.keepSession && { sessionToken: null }),
+        }),
+        ...(renaming && {
+          login: {
+            upsert: {
+              create: { username: newUsername! },
+              update: { username: newUsername! },
+            },
+          },
+        }),
       },
     });
 
@@ -136,20 +248,24 @@ export async function updateAdminAccount(
       entity: "admin",
       entityId: admin.id,
       userName: updates.name || admin.name,
-      details: `Admin account updated: ${(updates.email || admin.email).toLowerCase()}`,
+      details: `Admin account updated: ${(updates.email || admin.email).toLowerCase()}${
+        renaming ? ` (username → ${newUsername})` : ""
+      }${changingPassword ? " (password reset)" : ""}`,
       tenantId,
     });
 
     return { success: true };
   } catch (err) {
+    const explained = await explainWriteFailure(err, newUsername);
+    if (explained) return { success: false, error: explained };
     console.error("Failed to update admin:", err);
     return { success: false, error: "Failed to update admin credentials" };
   }
 }
 
 /**
- * Delete an admin credential row by email.
- * The companion User row is deleted separately by the caller.
+ * Delete an admin credential row by email. Its LoginName goes with it
+ * (ON DELETE CASCADE). The companion User row is deleted separately by the caller.
  */
 export async function deleteAdminAccount(
   tenantId: string,
@@ -180,160 +296,121 @@ export async function deleteAdminAccount(
   }
 }
 
-export async function loginAdmin(
-  email: string,
-  password: string
-): Promise<{
-  success: boolean;
-  error?: string;
-  account?: { id: string; name: string; email: string; tenantId: string };
-}> {
-  // SCOPE-EXEMPT: pre-session. Email is globally unique, so this resolves to at
-  // most one admin and its scope comes from the row itself.
-  const admin = await UNSAFE_unscopedPrisma.admin.findUnique({
-    where: { email: email.toLowerCase() },
-  });
+// ─── Login ────────────────────────────────────────────────────────────────
 
-  if (!admin) {
-    return { success: false, error: "Invalid email or password" };
+/** The only message a failed credential check ever produces. */
+export const LOGIN_FAILED = "Incorrect username or password";
+
+export type LoginResult =
+  | {
+      success: true;
+      account: {
+        id: string;
+        role: AppRole;
+        name: string;
+        email?: string;
+        tenantId: string;
+      };
+    }
+  | { success: false; error: string };
+
+/**
+ * Sign any account in by username + password.
+ *
+ * One lookup in the LoginName registry resolves the account, its role and its
+ * scope. Nothing about the scope comes from the client.
+ *
+ * Wrong username, wrong password, and a driver who has no password yet all
+ * return LOGIN_FAILED after the same scrypt work, so neither the message nor
+ * the timing says which part was wrong. Deactivation is reported only AFTER the
+ * password verifies, so it cannot be used to discover which usernames exist.
+ */
+export async function login(rawUsername: string, password: string): Promise<LoginResult> {
+  const username = normalizeUsername(rawUsername);
+
+  // SCOPE-EXEMPT: pre-session. LoginName is the global sign-in registry and the
+  // username is globally unique, so this resolves to at most one account; the
+  // session's scope is taken from that account's own row.
+  const entry = validateUsername(username)
+    ? null
+    : await UNSAFE_unscopedPrisma.loginName.findUnique({
+        where: { username },
+        select: {
+          admin: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              passwordHash: true,
+              active: true,
+              tenantId: true,
+            },
+          },
+          driver: {
+            select: {
+              id: true,
+              name: true,
+              passwordHash: true,
+              active: true,
+              tenantId: true,
+            },
+          },
+        },
+      });
+
+  const stored = entry?.admin?.passwordHash ?? entry?.driver?.passwordHash ?? null;
+  const passwordOk =
+    typeof password === "string" &&
+    verifyPassword(password, stored ?? getDummyHash()) &&
+    stored !== null;
+
+  if (!passwordOk || !entry) {
+    return { success: false, error: LOGIN_FAILED };
   }
 
-  if (!verifyPassword(password, admin.passwordHash)) {
-    return { success: false, error: "Invalid email or password" };
+  if (entry.admin) {
+    const admin = entry.admin;
+    if (!admin.active) {
+      return {
+        success: false,
+        error: "This account has been deactivated. Contact your administrator.",
+      };
+    }
+
+    // Role lives on User, keyed by the same globally unique email.
+    // SCOPE-EXEMPT: pre-session role lookup on the User registry.
+    const user = await UNSAFE_unscopedPrisma.user.findUnique({
+      where: { email: admin.email.toLowerCase() },
+      select: { role: true },
+    });
+
+    await logAudit({
+      action: "LOGIN",
+      entity: "admin",
+      entityId: admin.id,
+      userName: admin.name,
+      details: "Admin login",
+      tenantId: admin.tenantId,
+    });
+
+    return {
+      success: true,
+      account: {
+        id: admin.id,
+        role: user?.role === "SUPER_ADMIN" ? "super_admin" : "admin",
+        name: admin.name,
+        email: admin.email,
+        tenantId: admin.tenantId,
+      },
+    };
   }
 
-  // A deactivated ADMIN cannot log in. Checked AFTER the password so the message
-  // cannot be used to discover which emails exist.
-  if (!admin.active) {
+  const driver = entry.driver!;
+  if (!driver.active) {
     return {
       success: false,
       error: "This account has been deactivated. Contact your administrator.",
     };
-  }
-
-  await logAudit({
-    action: "LOGIN",
-    entity: "admin",
-    entityId: admin.id,
-    userName: admin.name,
-    details: "Admin login",
-    tenantId: admin.tenantId,
-  });
-
-  return {
-    success: true,
-    account: {
-      id: admin.id,
-      name: admin.name,
-      email: admin.email,
-      tenantId: admin.tenantId,
-    },
-  };
-}
-
-// ─── Driver Account Operations ────────────────────────────────────────────
-
-export async function createDriverAccount(
-  name: string,
-  pin: string,
-  tenantId: string
-): Promise<{ success: boolean; error?: string; account?: { id: string; name: string; active: boolean } }> {
-  if (pin.length !== 4 || !/^\d{4}$/.test(pin)) {
-    return { success: false, error: "PIN must be exactly 4 digits" };
-  }
-
-  try {
-    const db = scopedPrisma(tenantId);
-
-    // Uniqueness is per-scope. A global check would leak the fact that another
-    // ADMIN already employs a driver with this name.
-    const existing = await db.driver.findFirst({ where: { name } });
-
-    if (existing) {
-      return { success: false, error: "A driver with this name already exists" };
-    }
-
-    const driver = await db.driver.create({
-      data: {
-        name,
-        pinHash: hashPassword(pin),
-      },
-      select: { id: true, name: true, active: true },
-    });
-
-    await logAudit({
-      action: "DRIVER_CREATE",
-      entity: "driver",
-      entityId: driver.id,
-      userName: driver.name,
-      details: `Driver created: ${driver.name}`,
-      tenantId,
-    });
-
-    return { success: true, account: driver };
-  } catch (err) {
-    console.error("Failed to create driver:", err);
-    return { success: false, error: "Failed to create driver account" };
-  }
-}
-
-/**
- * Log a driver in by name + PIN, resolving their scope from the matched row.
- *
- * Driver names are unique only WITHIN a scope, so a name may exist in several
- * tenants. We therefore fetch every candidate with that name and accept the
- * login only if exactly one candidate's PIN verifies. Every failure path returns
- * the identical message, so the response can't be used to discover which names
- * exist, how many tenants hold them, or which ADMIN owns one.
- *
- * All PINs are verified before deciding, so response time does not depend on
- * which candidate matched.
- */
-export async function loginDriver(
-  name: string,
-  pin: string,
-  companyTenantId?: string
-): Promise<{
-  success: boolean;
-  error?: string;
-  account?: { id: string; name: string; active: boolean; tenantId: string };
-}> {
-  const GENERIC_ERROR = "Invalid name or PIN";
-
-  // SCOPE-EXEMPT: pre-session. No scope exists yet; the scope is the *output* of
-  // this function. Narrowed to a single row by PIN verification below, and
-  // nothing about the non-matching candidates is ever returned.
-  //
-  // When the sign-in page supplied the company the driver picked, the candidate
-  // set is narrowed to that scope. That is not a trust decision — the PIN is
-  // still verified — but it removes the ambiguity that arises when two operators
-  // happen to employ a same-named driver with the same PIN.
-  const candidates = await UNSAFE_unscopedPrisma.driver.findMany({
-    where: {
-      name,
-      ...(companyTenantId ? { tenantId: companyTenantId } : {}),
-    },
-  });
-
-  const verified = candidates.filter((d) => verifyPassword(pin, d.pinHash));
-
-  // 0 matches → wrong name or wrong PIN (indistinguishable, by design).
-  // >1 matches → two tenants have a same-named driver sharing a PIN. Refusing
-  // is the only safe answer: guessing would drop the driver into the wrong
-  // ADMIN's scope and expose that ADMIN's deliveries.
-  if (verified.length !== 1) {
-    if (verified.length > 1) {
-      console.error(
-        `[auth] Ambiguous driver login for "${name}": ${verified.length} scopes matched the same PIN. Login refused.`
-      );
-    }
-    return { success: false, error: GENERIC_ERROR };
-  }
-
-  const driver = verified[0];
-
-  if (!driver.active) {
-    return { success: false, error: "This driver account is deactivated" };
   }
 
   await logAudit({
@@ -349,45 +426,148 @@ export async function loginDriver(
     success: true,
     account: {
       id: driver.id,
+      role: "driver",
       name: driver.name,
-      active: driver.active,
       tenantId: driver.tenantId,
     },
   };
 }
 
-export async function listDrivers(
+// ─── Driver Account Operations ────────────────────────────────────────────
+
+export async function createDriverAccount(
+  name: string,
+  username: string,
+  password: string,
   tenantId: string
-): Promise<{ id: string; name: string; active: boolean; createdAt: Date }[]> {
-  return scopedPrisma(tenantId).driver.findMany({
+): Promise<{
+  success: boolean;
+  error?: string;
+  account?: { id: string; name: string; active: boolean; username: string };
+}> {
+  const usernameError = validateUsername(username);
+  if (usernameError) return { success: false, error: usernameError };
+  const passwordError = validatePassword(password);
+  if (passwordError) return { success: false, error: passwordError };
+
+  const normalizedUsername = normalizeUsername(username);
+
+  try {
+    const db = scopedPrisma(tenantId);
+
+    // Name uniqueness is per-scope — it is what trip sheets match on. A global
+    // check would leak the fact that another ADMIN already employs this name.
+    const existing = await db.driver.findFirst({ where: { name } });
+
+    if (existing) {
+      return { success: false, error: "A driver with this name already exists" };
+    }
+
+    if (await isUsernameTaken(normalizedUsername)) {
+      return { success: false, error: USERNAME_TAKEN };
+    }
+
+    const driver = await db.driver.create({
+      data: {
+        name,
+        passwordHash: hashPassword(password),
+        login: { create: { username: normalizedUsername } },
+      },
+      select: { id: true, name: true, active: true },
+    });
+
+    await logAudit({
+      action: "DRIVER_CREATE",
+      entity: "driver",
+      entityId: driver.id,
+      userName: driver.name,
+      details: `Driver created: ${driver.name} (${normalizedUsername})`,
+      tenantId,
+    });
+
+    return { success: true, account: { ...driver, username: normalizedUsername } };
+  } catch (err) {
+    const explained = await explainWriteFailure(err, normalizedUsername);
+    if (explained) return { success: false, error: explained };
+    console.error("Failed to create driver:", err);
+    return { success: false, error: "Failed to create driver account" };
+  }
+}
+
+export async function listDrivers(tenantId: string): Promise<
+  {
+    id: string;
+    name: string;
+    active: boolean;
+    createdAt: Date;
+    username: string | null;
+    canSignIn: boolean;
+  }[]
+> {
+  const drivers = await scopedPrisma(tenantId).driver.findMany({
     select: {
       id: true,
       name: true,
       active: true,
       createdAt: true,
+      passwordHash: true,
+      login: { select: { username: true } },
     },
     orderBy: { name: "asc" },
   });
+
+  // The hash itself never leaves this function.
+  return drivers.map(({ passwordHash, login, ...d }) => ({
+    ...d,
+    username: login?.username ?? null,
+    canSignIn: login !== null && passwordHash !== null,
+  }));
 }
 
+/**
+ * Update a driver, including setting or resetting their sign-in.
+ *
+ * A driver created before usernames existed has neither a username nor a
+ * password, and needs both before they can sign in — so a password alone is
+ * refused for them rather than leaving a half-set account.
+ */
 export async function updateDriver(
   tenantId: string,
   id: string,
-  updates: { name?: string; active?: boolean; pin?: string }
+  updates: { name?: string; active?: boolean; username?: string; password?: string }
 ): Promise<{ success: boolean; error?: string }> {
+  const changingPassword = updates.password !== undefined && updates.password !== "";
+  if (changingPassword) {
+    const passwordError = validatePassword(updates.password);
+    if (passwordError) return { success: false, error: passwordError };
+  }
+
+  let newUsername: string | undefined;
+  if (updates.username !== undefined && updates.username !== "") {
+    const usernameError = validateUsername(updates.username);
+    if (usernameError) return { success: false, error: usernameError };
+    newUsername = normalizeUsername(updates.username);
+  }
+
   try {
     const db = scopedPrisma(tenantId);
 
     // Scoped read: a driver in another tenant is simply not found.
-    const driver = await db.driver.findFirst({ where: { id } });
+    const driver = await db.driver.findFirst({
+      where: { id },
+      include: { login: { select: { username: true } } },
+    });
     if (!driver) {
       return { success: false, error: "Driver not found" };
     }
 
-    if (updates.pin !== undefined) {
-      if (updates.pin.length !== 4 || !/^\d{4}$/.test(updates.pin)) {
-        return { success: false, error: "PIN must be exactly 4 digits" };
-      }
+    const hasUsername = driver.login !== null || newUsername !== undefined;
+    const hasPassword = driver.passwordHash !== null || changingPassword;
+    if ((newUsername !== undefined || changingPassword) && !(hasUsername && hasPassword)) {
+      return {
+        success: false,
+        error: "This driver has no login yet — set both a username and a password",
+      };
     }
 
     // Renaming must not collide within the scope.
@@ -398,15 +578,35 @@ export async function updateDriver(
       }
     }
 
+    const renaming = newUsername !== undefined && newUsername !== driver.login?.username;
+    if (renaming && (await isUsernameTaken(newUsername!))) {
+      return { success: false, error: USERNAME_TAKEN };
+    }
+
+    // The LoginName is written through the driver, on the scoped client — so
+    // this can only ever attach a username to a driver in the caller's scope.
     await db.driver.update({
       where: { id },
       data: {
         ...(updates.name !== undefined && { name: updates.name }),
         ...(updates.active !== undefined && { active: updates.active }),
-        ...(updates.pin !== undefined && { pinHash: hashPassword(updates.pin) }),
+        ...(changingPassword && {
+          passwordHash: hashPassword(updates.password!),
+          // A reset password must lock out whoever held the old one, now.
+          sessionToken: null,
+        }),
+        ...(renaming && {
+          login: {
+            upsert: {
+              create: { username: newUsername! },
+              update: { username: newUsername! },
+            },
+          },
+        }),
       },
     });
 
+    // Never log the password itself — only which fields changed.
     await logAudit({
       action: "DRIVER_UPDATE",
       entity: "driver",
@@ -418,6 +618,8 @@ export async function updateDriver(
 
     return { success: true };
   } catch (err) {
+    const explained = await explainWriteFailure(err, newUsername);
+    if (explained) return { success: false, error: explained };
     console.error("Failed to update driver:", err);
     return { success: false, error: "Failed to update driver" };
   }

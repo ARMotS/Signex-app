@@ -30,8 +30,9 @@ import { prisma } from "./db";
  *
  * Named to be uncomfortable to type. Every use must sit under a
  * `// SCOPE-EXEMPT: <reason>` comment. The complete legitimate set is:
- *   - admin login by email        (pre-session; email is globally unique)
- *   - driver login candidates     (pre-session; narrowed by PIN, see lib/accounts.ts)
+ *   - login by username           (pre-session; LoginName is globally unique)
+ *   - username availability       (existence only; usernames span every scope)
+ *   - email collision checks      (Admin/User email is globally unique)
  *   - session token validation    (pre-authorization)
  *   - logout / session teardown
  *   - Tenant + User registry ops  (SUPER_ADMIN-gated; these models ARE the scope registry)
