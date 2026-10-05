@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import PasswordInput from "@/components/PasswordInput";
 import SigningDemo from "@/components/SigningDemo";
 import {
@@ -45,16 +46,20 @@ function rememberDriver(role: string, account?: { id: string; name: string }) {
   }
 }
 
+/** Links back to the home page — before signing in, home is where Signex is explained. */
 function Brand() {
   return (
-    <div className="flex items-center gap-2.5">
+    <Link
+      href="/"
+      className="inline-flex items-center gap-2.5 self-start rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-green focus-visible:ring-offset-2"
+    >
       <div className="w-9 h-9 bg-ink-black rounded-lg flex items-center justify-center">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
         </svg>
       </div>
       <span className="text-lg font-semibold tracking-tight text-ink-black">Signex</span>
-    </div>
+    </Link>
   );
 }
 
