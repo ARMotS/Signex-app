@@ -1,17 +1,14 @@
 import type { Metadata, Viewport } from "next";
-import { Geist } from "next/font/google";
-import { DM_Mono } from "next/font/google";
+import { Poppins } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// The one typeface for the whole app. Self-hosted by next/font, so drivers'
+// phones never fetch it from Google at the door.
+const poppins = Poppins({
+  variable: "--font-poppins",
+  weight: ["400", "500", "600", "700"],
   subsets: ["latin"],
-});
-
-const dmMono = DM_Mono({
-  variable: "--font-dm-mono",
-  weight: ["300", "400", "500"],
-  subsets: ["latin"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -45,7 +42,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${dmMono.variable} h-full`}
+      className={`${poppins.variable} h-full`}
       suppressHydrationWarning
     >
       <head>

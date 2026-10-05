@@ -1,36 +1,48 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import PasswordInput from "@/components/PasswordInput";
+import UsernameField, { type UsernameStatus } from "@/components/UsernameField";
+import { validatePassword, PASSWORD_HINT } from "@/lib/credentials";
 
 interface Driver {
   id: string;
   name: string;
   active: boolean;
   createdAt: string;
+  username: string | null;
+  /** False for drivers created before usernames existed — they need a login set. */
+  canSignIn: boolean;
 }
+
+const INPUT_CLASS =
+  "w-full px-3 py-2.5 bg-ink-surface border border-ink-border rounded text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors";
+const LABEL_CLASS = "block text-xs font-medium text-ink-muted uppercase tracking-wide mb-1.5";
+
+/** A username the form may submit: new and free, or the account's own. */
+const usernameUsable = (s: UsernameStatus) => s === "available" || s === "unchanged";
 
 export default function DriversPage() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
-  // The per-operator sign-in link this admin gives their own drivers.
-  const [signInLink, setSignInLink] = useState<{
-    slug: string;
-    path: string;
-    companyName: string | null;
-  } | null>(null);
-  const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
 
   // Add form
   const [newName, setNewName] = useState("");
-  const [newPin, setNewPin] = useState("");
+  const [newUsername, setNewUsername] = useState("");
+  const [newUsernameStatus, setNewUsernameStatus] = useState<UsernameStatus>("empty");
+  const [newPassword, setNewPassword] = useState("");
   const [addError, setAddError] = useState("");
   const [adding, setAdding] = useState(false);
 
-  // Edit form
+  // Edit form — also how a login is set for a driver who has none, and how a
+  // password is reset.
   const [editName, setEditName] = useState("");
-  const [editPin, setEditPin] = useState("");
+  const [editUsername, setEditUsername] = useState("");
+  const [editUsernameStatus, setEditUsernameStatus] = useState<UsernameStatus>("empty");
+  const [editPassword, setEditPassword] = useState("");
   const [editError, setEditError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -39,7 +51,6 @@ export default function DriversPage() {
       const res = await fetch("/api/drivers");
       const data = await res.json();
       setDrivers(data.drivers || []);
-      setSignInLink(data.signInLink ?? null);
     } catch {
       // ignore
     } finally {
@@ -51,6 +62,14 @@ export default function DriversPage() {
     fetchDrivers();
   }, [fetchDrivers]);
 
+  const newPasswordError = newPassword ? validatePassword(newPassword) : null;
+  const canAdd =
+    !!newName.trim() &&
+    usernameUsable(newUsernameStatus) &&
+    !!newPassword &&
+    !newPasswordError &&
+    !adding;
+
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     setAddError("");
@@ -60,16 +79,15 @@ export default function DriversPage() {
       const res = await fetch("/api/drivers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: newName,
-          pin: newPin,
-        }),
+        body: JSON.stringify({ name: newName, username: newUsername, password: newPassword }),
       });
       const data = await res.json();
 
       if (res.ok) {
+        setNotice(`${data.driver.name} can now log in as “${data.driver.username}”.`);
         setNewName("");
-        setNewPin("");
+        setNewUsername("");
+        setNewPassword("");
         setShowAdd(false);
         fetchDrivers();
       } else {
@@ -85,20 +103,37 @@ export default function DriversPage() {
   const startEdit = (driver: Driver) => {
     setEditingId(driver.id);
     setEditName(driver.name);
-    setEditPin("");
+    setEditUsername(driver.username ?? "");
+    setEditPassword("");
     setEditError("");
+    setNotice("");
   };
+
+  const editing = drivers.find((d) => d.id === editingId) ?? null;
+  // A driver with no login needs both fields; otherwise the password is optional.
+  const editNeedsPassword = !!editing && !editing.canSignIn;
+  const editPasswordError = editPassword ? validatePassword(editPassword) : null;
+  // A driver with no login can still be renamed without setting one.
+  const nameOnlyEdit =
+    !!editing && !editing.username && editUsernameStatus === "empty" && !editPassword;
+  const canSave =
+    !!editName.trim() &&
+    !editPasswordError &&
+    (nameOnlyEdit ||
+      (usernameUsable(editUsernameStatus) && (!editNeedsPassword || !!editPassword))) &&
+    !saving;
 
   const handleEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingId) return;
+    if (!editing) return;
     setEditError("");
     setSaving(true);
 
     try {
-      const updates: Record<string, string> = { id: editingId };
-      if (editName) updates.name = editName;
-      if (editPin) updates.pin = editPin;
+      const updates: Record<string, string> = { id: editing.id };
+      if (editName.trim() !== editing.name) updates.name = editName;
+      if (editUsername && editUsername !== editing.username) updates.username = editUsername;
+      if (editPassword) updates.password = editPassword;
 
       const res = await fetch("/api/drivers", {
         method: "PUT",
@@ -108,6 +143,13 @@ export default function DriversPage() {
       const data = await res.json();
 
       if (res.ok) {
+        if (editPassword) {
+          setNotice(
+            editing.canSignIn
+              ? `Password reset for ${editing.name}. They have been signed out — give them the new password.`
+              : `${editing.name} can now log in.`
+          );
+        }
         setEditingId(null);
         fetchDrivers();
       } else {
@@ -150,30 +192,13 @@ export default function DriversPage() {
 
   const activeDrivers = drivers.filter((d) => d.active);
   const inactiveDrivers = drivers.filter((d) => !d.active);
-
-  const fullSignInUrl =
-    signInLink && typeof window !== "undefined"
-      ? `${window.location.origin}${signInLink.path}`
-      : (signInLink?.path ?? "");
-
-  const copySignInLink = async () => {
-    if (!fullSignInUrl) return;
-    try {
-      await navigator.clipboard.writeText(fullSignInUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard access can be blocked; the link is selectable on screen anyway.
-    }
-  };
+  const withoutLogin = drivers.filter((d) => !d.canSignIn);
 
   return (
     <div className="animate-fade-in">
       <div className="flex items-start justify-between mb-8 gap-4">
         <div>
-          <h1 className="font-mono text-2xl font-medium text-ink-black tracking-tight">
-            Drivers
-          </h1>
+          <h1 className="text-2xl font-semibold text-ink-black tracking-tight">Drivers</h1>
           <p className="text-sm text-ink-muted mt-1">
             {loading
               ? "Loading…"
@@ -184,8 +209,9 @@ export default function DriversPage() {
           onClick={() => {
             setShowAdd(!showAdd);
             setAddError("");
+            setNotice("");
           }}
-          className="flex items-center gap-2 px-4 py-2.5 bg-ink-green text-white font-mono text-sm font-medium rounded hover:bg-ink-green-hover active:scale-[0.98] transition-all"
+          className="flex items-center gap-2 px-4 py-2.5 bg-ink-green text-white text-sm font-medium rounded hover:bg-ink-green-hover active:scale-[0.98] transition-all shrink-0"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <line x1="12" y1="5" x2="12" y2="19" />
@@ -195,42 +221,45 @@ export default function DriversPage() {
         </button>
       </div>
 
-      {/* ─── Driver sign-in link ──────────────────────────────────────────
-          Drivers reach this workspace through a link unique to it. There is no
-          public list of companies, so holding this link is what lets a driver
-          see these names at all — share it with your drivers, not publicly. */}
-      {signInLink && (
-        <div className="bg-ink-card border border-ink-border rounded p-4 mb-6">
-          <div className="flex items-start justify-between gap-4 flex-wrap">
-            <div className="min-w-0">
-              <p className="font-mono text-xs uppercase tracking-wide text-ink-muted mb-1.5">
-                Your drivers&apos; sign-in link
-              </p>
-              <code className="font-mono text-sm text-ink-black break-all">
-                {fullSignInUrl}
-              </code>
-              <p className="text-xs text-ink-muted mt-2 max-w-lg">
-                Send this to your drivers so they can sign in. Only your drivers
-                appear on it. Anyone with the link can see your drivers&apos;
-                names, so share it with them rather than publishing it.
-              </p>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
+      {notice && (
+        <div
+          role="status"
+          className="flex items-start justify-between gap-3 px-4 py-3 mb-6 bg-ink-green-dim rounded border border-ink-green/20 animate-fade-in"
+        >
+          <span className="text-sm text-ink-black">{notice}</span>
+          <button
+            onClick={() => setNotice("")}
+            className="text-xs text-ink-muted hover:text-ink-black shrink-0"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* ─── Drivers who cannot sign in yet ────────────────────────────────
+          Everyone now signs in with a username and password at /login. Drivers
+          created when sign-in was a name + PIN have neither until an admin sets
+          them here. */}
+      {!loading && withoutLogin.length > 0 && (
+        <div className="bg-ink-amber-dim border border-ink-amber/30 rounded p-4 mb-6">
+          <p className="text-sm font-medium text-ink-black">
+            {`${withoutLogin.length} driver${withoutLogin.length !== 1 ? "s" : ""} can't log in yet`}
+          </p>
+          <p className="text-xs text-ink-muted mt-1 mb-3 max-w-xl">
+            Drivers now log in with a username and password instead of a PIN. Set a login for
+            each driver below, then give it to them.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {withoutLogin.map((d) => (
               <button
-                onClick={copySignInLink}
-                className="px-3 py-2 text-xs font-mono text-ink-black border border-ink-border rounded hover:bg-ink-surface transition-colors"
+                key={d.id}
+                onClick={() => startEdit(d)}
+                className="px-3 py-1.5 text-xs font-medium bg-ink-card border border-ink-border rounded hover:border-ink-amber transition-colors"
               >
-                {copied ? "Copied" : "Copy link"}
+                Set login · {d.name}
               </button>
-              <a
-                href={signInLink.path}
-                target="_blank"
-                rel="noreferrer"
-                className="px-3 py-2 text-xs font-mono text-ink-muted border border-ink-border rounded hover:text-ink-black hover:bg-ink-surface transition-colors"
-              >
-                Open
-              </a>
-            </div>
+            ))}
           </div>
         </div>
       )}
@@ -238,56 +267,73 @@ export default function DriversPage() {
       {/* ─── Add Driver Form ──────────────────────────────────────────── */}
       {showAdd && (
         <div className="bg-ink-card border border-ink-green/30 rounded p-6 mb-6 animate-fade-in">
-          <h3 className="font-mono text-sm font-medium text-ink-black mb-4">
-            New Driver Account
-          </h3>
+          <h3 className="text-sm font-semibold text-ink-black mb-4">New Driver Account</h3>
           {addError && (
-            <div className="flex items-center gap-2 px-3 py-2 mb-4 bg-ink-red-dim rounded border border-ink-red/20">
-              <span className="text-xs font-mono text-ink-red">{addError}</span>
+            <div role="alert" className="flex items-center gap-2 px-3 py-2 mb-4 bg-ink-red-dim rounded border border-ink-red/20">
+              <span className="text-xs text-ink-red">{addError}</span>
             </div>
           )}
-          <form onSubmit={handleAdd} className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <form onSubmit={handleAdd} className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
-              <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
-                Full Name *
+              <label htmlFor="new-driver-name" className={LABEL_CLASS}>
+                Full name *
               </label>
               <input
+                id="new-driver-name"
                 type="text"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 required
-                placeholder="Sipho Dlamini"
-                className="w-full px-3 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
+                autoComplete="off"
+                placeholder="As it appears on trip sheets"
+                className={INPUT_CLASS}
+              />
+              <p className="text-xs text-ink-muted mt-1.5">Trip sheets are matched on this name.</p>
+            </div>
+            <div>
+              <label htmlFor="new-driver-username" className={LABEL_CLASS}>
+                Username *
+              </label>
+              <UsernameField
+                id="new-driver-username"
+                value={newUsername}
+                onChange={setNewUsername}
+                onStatusChange={setNewUsernameStatus}
+                required
+                className={INPUT_CLASS}
               />
             </div>
             <div>
-              <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
-                4-Digit PIN *
+              <label htmlFor="new-driver-password" className={LABEL_CLASS}>
+                Password *
               </label>
-              <input
-                type="text"
-                value={newPin}
-                onChange={(e) => setNewPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              <PasswordInput
+                id="new-driver-password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
                 required
-                maxLength={4}
-                placeholder="1234"
-                className="w-full px-3 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors tracking-[0.3em]"
+                autoComplete="new-password"
+                placeholder="Set a password"
+                className={INPUT_CLASS}
               />
+              <p className={`text-xs mt-1.5 ${newPasswordError ? "text-ink-red" : "text-ink-muted"}`}>
+                {newPasswordError ?? PASSWORD_HINT}
+              </p>
             </div>
-            <div className="flex items-end gap-2">
-              <button
-                type="submit"
-                disabled={adding || newPin.length !== 4 || !newName.trim()}
-                className="flex-1 px-4 py-2.5 bg-ink-green text-white font-mono text-sm font-medium rounded hover:bg-ink-green-hover active:scale-[0.98] transition-all disabled:opacity-50"
-              >
-                {adding ? "Adding…" : "Add"}
-              </button>
+            <div className="md:col-span-3 flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setShowAdd(false)}
-                className="px-4 py-2.5 text-ink-muted font-mono text-sm hover:text-ink-black transition-colors"
+                className="px-4 py-2.5 text-ink-muted text-sm hover:text-ink-black transition-colors"
               >
                 Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!canAdd}
+                className="px-6 py-2.5 bg-ink-green text-white text-sm font-medium rounded hover:bg-ink-green-hover active:scale-[0.98] transition-all disabled:opacity-50"
+              >
+                {adding ? "Adding…" : "Add driver"}
               </button>
             </div>
           </form>
@@ -298,7 +344,7 @@ export default function DriversPage() {
       {loading && (
         <div className="bg-ink-card border border-ink-border rounded p-12 text-center">
           <div className="w-6 h-6 border-2 border-ink-border border-t-ink-green rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-sm font-mono text-ink-muted">Loading drivers…</p>
+          <p className="text-sm text-ink-muted">Loading drivers…</p>
         </div>
       )}
 
@@ -306,15 +352,14 @@ export default function DriversPage() {
       {!loading && drivers.length === 0 && (
         <div className="bg-ink-card border-2 border-dashed border-ink-border rounded p-12 text-center">
           <div className="text-4xl mb-4">👤</div>
-          <p className="font-mono text-sm font-medium text-ink-black mb-2">
-            No drivers yet
-          </p>
+          <p className="text-sm font-medium text-ink-black mb-2">No drivers yet</p>
           <p className="text-xs text-ink-muted max-w-sm mx-auto mb-4">
-            Add driver accounts so they can log in to the driver app with their name and PIN.
+            Add driver accounts so they can log in to the driver app with their own username and
+            password.
           </p>
           <button
             onClick={() => setShowAdd(true)}
-            className="px-5 py-2.5 bg-ink-green text-white font-mono text-sm font-medium rounded hover:bg-ink-green-hover active:scale-[0.98] transition-all"
+            className="px-5 py-2.5 bg-ink-green text-white text-sm font-medium rounded hover:bg-ink-green-hover active:scale-[0.98] transition-all"
           >
             Add First Driver
           </button>
@@ -324,105 +369,136 @@ export default function DriversPage() {
       {/* ─── Driver Table ─────────────────────────────────────────────── */}
       {!loading && drivers.length > 0 && (
         <div className="bg-ink-card border border-ink-border rounded">
-          <div className="hidden sm:grid grid-cols-12 gap-4 px-5 py-3 border-b border-ink-border text-xs font-mono text-ink-muted uppercase tracking-wide">
-            <div className="col-span-5">Driver</div>
-            <div className="col-span-3">Status</div>
+          <div className="hidden md:grid grid-cols-12 gap-4 px-5 py-3 border-b border-ink-border text-xs font-medium text-ink-muted uppercase tracking-wide">
+            <div className="col-span-3">Driver</div>
+            <div className="col-span-3">Username</div>
+            <div className="col-span-2">Status</div>
             <div className="col-span-4 text-right">Actions</div>
           </div>
           <div className="divide-y divide-ink-border stagger-children">
             {[...activeDrivers, ...inactiveDrivers].map((d) => (
               <div key={d.id}>
                 {editingId === d.id ? (
-                  /* Edit mode */
-                  <form
-                    onSubmit={handleEdit}
-                    className="px-5 py-4 bg-ink-surface/50 animate-fade-in"
-                  >
+                  /* Edit mode — also sets a login, or resets a password */
+                  <form onSubmit={handleEdit} className="px-5 py-4 bg-ink-surface/50 animate-fade-in">
+                    <p className="text-sm font-semibold text-ink-black mb-3">
+                      {d.canSignIn ? `Edit ${d.name}` : `Set a login for ${d.name}`}
+                    </p>
                     {editError && (
-                      <div className="flex items-center gap-2 px-3 py-2 mb-3 bg-ink-red-dim rounded border border-ink-red/20">
-                        <span className="text-xs font-mono text-ink-red">{editError}</span>
+                      <div role="alert" className="flex items-center gap-2 px-3 py-2 mb-3 bg-ink-red-dim rounded border border-ink-red/20">
+                        <span className="text-xs text-ink-red">{editError}</span>
                       </div>
                     )}
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <input
-                        type="text"
-                        value={editName}
-                        onChange={(e) => setEditName(e.target.value)}
-                        placeholder="Name"
-                        className="px-3 py-2 bg-ink-card border border-ink-border rounded font-mono text-sm focus:outline-none focus:border-ink-green transition-colors"
-                      />
-                      <input
-                        type="text"
-                        value={editPin}
-                        onChange={(e) => setEditPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-                        placeholder="New PIN (leave blank to keep)"
-                        maxLength={4}
-                        className="px-3 py-2 bg-ink-card border border-ink-border rounded font-mono text-sm focus:outline-none focus:border-ink-green transition-colors tracking-[0.3em]"
-                      />
-                      <div className="flex gap-2">
-                        <button
-                          type="submit"
-                          disabled={saving}
-                          className="flex-1 px-3 py-2 bg-ink-green text-white font-mono text-xs font-medium rounded hover:bg-ink-green-hover transition-all disabled:opacity-50"
-                        >
-                          {saving ? "Saving…" : "Save"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEditingId(null)}
-                          className="px-3 py-2 text-ink-muted font-mono text-xs hover:text-ink-black transition-colors"
-                        >
-                          Cancel
-                        </button>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label htmlFor={`edit-name-${d.id}`} className={LABEL_CLASS}>
+                          Full name
+                        </label>
+                        <input
+                          id={`edit-name-${d.id}`}
+                          type="text"
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          autoComplete="off"
+                          className={INPUT_CLASS}
+                        />
                       </div>
+                      <div>
+                        <label htmlFor={`edit-username-${d.id}`} className={LABEL_CLASS}>
+                          Username{d.canSignIn ? "" : " *"}
+                        </label>
+                        <UsernameField
+                          id={`edit-username-${d.id}`}
+                          value={editUsername}
+                          onChange={setEditUsername}
+                          currentUsername={d.username}
+                          onStatusChange={setEditUsernameStatus}
+                          required={!d.canSignIn}
+                          className={INPUT_CLASS}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor={`edit-password-${d.id}`} className={LABEL_CLASS}>
+                          {d.canSignIn ? "New password" : "Password *"}
+                        </label>
+                        <PasswordInput
+                          id={`edit-password-${d.id}`}
+                          value={editPassword}
+                          onChange={(e) => setEditPassword(e.target.value)}
+                          required={editNeedsPassword}
+                          autoComplete="new-password"
+                          placeholder={d.canSignIn ? "Leave blank to keep" : "Set a password"}
+                          className={INPUT_CLASS}
+                        />
+                        <p className={`text-xs mt-1.5 ${editPasswordError ? "text-ink-red" : "text-ink-muted"}`}>
+                          {editPasswordError ??
+                            (d.canSignIn
+                              ? "Resetting signs the driver out on every device."
+                              : PASSWORD_HINT)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex justify-end gap-2 mt-3">
+                      <button
+                        type="button"
+                        onClick={() => setEditingId(null)}
+                        className="px-3 py-2 text-ink-muted text-xs hover:text-ink-black transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={!canSave}
+                        className="px-5 py-2 bg-ink-green text-white text-xs font-medium rounded hover:bg-ink-green-hover transition-all disabled:opacity-50"
+                      >
+                        {saving ? "Saving…" : "Save"}
+                      </button>
                     </div>
                   </form>
                 ) : (
                   /* Display mode */
                   <div
-                    className={`grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center px-5 py-4 transition-colors ${
-                      d.active
-                        ? "hover:bg-ink-surface/50"
-                        : "opacity-50 bg-ink-surface/30"
+                    className={`grid grid-cols-1 md:grid-cols-12 gap-2 md:gap-4 items-center px-5 py-4 transition-colors ${
+                      d.active ? "hover:bg-ink-surface/50" : "opacity-50 bg-ink-surface/30"
                     }`}
                   >
-                    <div className="sm:col-span-5 flex items-center gap-3">
+                    <div className="md:col-span-3 flex items-center gap-3 min-w-0">
                       <div className="w-9 h-9 rounded bg-ink-surface flex items-center justify-center shrink-0">
-                        <span className="text-xs font-mono font-medium text-ink-muted">
+                        <span className="text-xs font-medium text-ink-muted">
                           {d.name
                             .split(" ")
                             .map((n) => n[0])
-                            .join("")}
+                            .join("")
+                            .slice(0, 3)}
                         </span>
                       </div>
-                      <span className="text-sm font-medium text-ink-black">
-                        {d.name}
-                      </span>
+                      <span className="text-sm font-medium text-ink-black truncate">{d.name}</span>
                     </div>
-                    <div className="sm:col-span-3">
-                      <span
-                        className={
-                          d.active ? "badge-signed" : "badge-pending"
-                        }
-                      >
+                    <div className="md:col-span-3 min-w-0">
+                      {d.canSignIn ? (
+                        <span className="text-sm text-ink-black truncate block">{d.username}</span>
+                      ) : (
+                        <span className="badge-progress">No login</span>
+                      )}
+                    </div>
+                    <div className="md:col-span-2">
+                      <span className={d.active ? "badge-signed" : "badge-pending"}>
                         <span
-                          className={`w-1.5 h-1.5 rounded-full ${
-                            d.active ? "bg-ink-green" : "bg-ink-red"
-                          }`}
+                          className={`w-1.5 h-1.5 rounded-full ${d.active ? "bg-ink-green" : "bg-ink-red"}`}
                         />
                         {d.active ? "Active" : "Inactive"}
                       </span>
                     </div>
-                    <div className="sm:col-span-4 flex items-center justify-end gap-2">
+                    <div className="md:col-span-4 flex items-center justify-end gap-1 flex-wrap">
                       <button
                         onClick={() => startEdit(d)}
-                        className="px-3 py-1.5 text-xs font-mono text-ink-muted hover:text-ink-black hover:bg-ink-surface rounded transition-colors"
+                        className="px-3 py-1.5 text-xs whitespace-nowrap text-ink-muted hover:text-ink-black hover:bg-ink-surface rounded transition-colors"
                       >
-                        Edit
+                        {d.canSignIn ? "Edit / password" : "Set login"}
                       </button>
                       <button
                         onClick={() => toggleActive(d)}
-                        className={`px-3 py-1.5 text-xs font-mono rounded transition-colors ${
+                        className={`px-3 py-1.5 text-xs rounded transition-colors ${
                           d.active
                             ? "text-ink-amber hover:bg-ink-amber-dim"
                             : "text-ink-green hover:bg-ink-green-dim"
@@ -432,7 +508,7 @@ export default function DriversPage() {
                       </button>
                       <button
                         onClick={() => handleDelete(d)}
-                        className="px-3 py-1.5 text-xs font-mono text-ink-red hover:bg-ink-red-dim rounded transition-colors"
+                        className="px-3 py-1.5 text-xs text-ink-red hover:bg-ink-red-dim rounded transition-colors"
                       >
                         Delete
                       </button>

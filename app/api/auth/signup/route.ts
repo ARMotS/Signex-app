@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createAdminAccount, getAdminCount } from "@/lib/accounts";
 import { createSession } from "@/lib/session";
+import { validatePassword, validateUsername } from "@/lib/credentials";
 import { UNSAFE_unscopedPrisma } from "@/lib/db-scoped";
 
 /**
@@ -17,20 +18,18 @@ import { UNSAFE_unscopedPrisma } from "@/lib/db-scoped";
  */
 export async function POST(request: Request) {
   try {
-    const { name, email, password } = await request.json();
+    const { name, email, username, password } = await request.json();
 
-    if (!name || !email || !password) {
+    if (!name || !email || !username || !password) {
       return NextResponse.json(
-        { error: "Name, email, and password are required" },
+        { error: "Name, email, username and password are required" },
         { status: 400 }
       );
     }
 
-    if (password.length < 6) {
-      return NextResponse.json(
-        { error: "Password must be at least 6 characters" },
-        { status: 400 }
-      );
+    const invalid = validateUsername(username) ?? validatePassword(password);
+    if (invalid) {
+      return NextResponse.json({ error: invalid }, { status: 400 });
     }
 
     const adminCount = await getAdminCount();
@@ -58,6 +57,7 @@ export async function POST(request: Request) {
     const result = await createAdminAccount(
       name,
       normalizedEmail,
+      username,
       password,
       rootTenant.id
     );

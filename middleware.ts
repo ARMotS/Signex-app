@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { checkRateLimit, checkAndRecordRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import { homePathForRole } from "@/lib/credentials";
 
 function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get("x-forwarded-for");
@@ -26,6 +27,7 @@ const ADMIN_ROUTES = [
   "/drivers",
   "/trip-sheet",
   "/invoices",
+  "/collections",
   "/settings",
   "/backups",
   "/users",
@@ -33,7 +35,7 @@ const ADMIN_ROUTES = [
 
 const SUPER_ADMIN_ONLY_ROUTES = ["/users"];
 
-const DRIVER_ROUTES = ["/run", "/sign"];
+const DRIVER_ROUTES = ["/run", "/sign", "/collect"];
 
 interface SessionHint {
   id?: string;
@@ -155,38 +157,53 @@ export async function middleware(request: NextRequest) {
     return response;
   }
 
-  // Page route protection — lazy import session check to avoid edge runtime issues
-  const isAdminRoute = ADMIN_ROUTES.some((r) => pathname.startsWith(r));
-  const isDriverRoute = DRIVER_ROUTES.some((r) => pathname.startsWith(r));
+  // The driver PIN sign-in (/select, /select/<company>) is retired. Old
+  // bookmarks and home-screen shortcuts land on the one login instead.
+  if (pathname === "/select" || pathname.startsWith("/select/")) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  const isAdminRoute = matchesRoute(pathname, ADMIN_ROUTES);
+  const isDriverRoute = matchesRoute(pathname, DRIVER_ROUTES);
 
   if (!isAdminRoute && !isDriverRoute) {
     return NextResponse.next();
   }
 
   // Lightweight cookie check only — the authoritative check is server-side in
-  // getScope(), which verifies the HMAC. This just avoids rendering a page that
-  // is certain to be rejected.
+  // getScope(), which verifies the HMAC, and every API route enforces its own
+  // role with requireRole(). This just avoids rendering a page that is certain
+  // to be rejected, and sends each role to its own side of the app.
   const data = readSessionHint(request);
-  if (!data) {
+  if (!data || !data.exp || data.exp < Date.now()) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  if (!data.exp || data.exp < Date.now()) {
-    return NextResponse.redirect(new URL("/login", request.url));
+  const role = data.role;
+  const home = new URL(homePathForRole(role), request.url);
+
+  // A driver never sees an admin page, whatever URL they type.
+  if (isAdminRoute && role !== "admin" && role !== "super_admin") {
+    return NextResponse.redirect(home);
   }
 
-  // Block drivers from admin routes
-  if (isAdminRoute && data.role === "driver") {
-    return NextResponse.redirect(new URL("/select", request.url));
+  // The driver app is for drivers. An office account has no run of its own, and
+  // would otherwise reach driver screens with an admin session.
+  if (isDriverRoute && role !== "driver") {
+    return NextResponse.redirect(home);
   }
 
   // Block regular admins from super_admin-only routes
-  const isSuperOnly = SUPER_ADMIN_ONLY_ROUTES.some((r) => pathname.startsWith(r));
-  if (isSuperOnly && data.role !== "super_admin") {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
+  if (matchesRoute(pathname, SUPER_ADMIN_ONLY_ROUTES) && role !== "super_admin") {
+    return NextResponse.redirect(home);
   }
 
   return NextResponse.next();
+}
+
+/** `/users` matches `/users` and `/users/x`, but not `/users-export`. */
+function matchesRoute(pathname: string, routes: string[]): boolean {
+  return routes.some((r) => pathname === r || pathname.startsWith(`${r}/`));
 }
 
 export const config = {
@@ -197,10 +214,13 @@ export const config = {
     "/drivers/:path*",
     "/trip-sheet/:path*",
     "/invoices/:path*",
+    "/collections/:path*",
     "/settings/:path*",
     "/backups/:path*",
     "/users/:path*",
     "/run/:path*",
     "/sign/:path*",
+    "/collect/:path*",
+    "/select/:path*",
   ],
 };

@@ -55,16 +55,15 @@ const serwist = new Serwist({
     },
     // Entry points — always network first.
     //
-    // /select/<slug> is the per-operator driver sign-in link and /login is the
-    // admin one. These must never be served from a stale cache: a phone that had
-    // cached this app before /select/<slug> existed would resolve the navigation
-    // against its old route manifest and land on bare /select instead, which is
-    // exactly the "your link doesn't work" symptom. Auth entry points are also the
-    // last place a day-old response is acceptable.
+    // /login is the one sign-in for every role; / and the retired driver PIN
+    // pages (/select, /select/<slug>) now redirect to it. These must never be
+    // served from a stale cache: a phone that cached the old PIN sign-in would
+    // otherwise keep showing it, and auth entry points are the last place a
+    // day-old response is acceptable. v3: drivers moved to username + password.
     {
-      matcher: ({ url }) => /^\/(select|login)(\/|$)/.test(url.pathname),
+      matcher: ({ url }) => /^\/((select|login)(\/|$)|$)/.test(url.pathname),
       handler: new NetworkFirst({
-        cacheName: "signex-entry-v2",
+        cacheName: "signex-entry-v3",
         networkTimeoutSeconds: 10,
         plugins: [
           new ExpirationPlugin({
@@ -85,14 +84,15 @@ const serwist = new Serwist({
     // up the new one on the load AFTER that, so a behavioural change appears not
     // to have deployed at all. v3: the signature screen lost its send-email
     // button when confirmations became automatic, and drivers kept seeing — and
-    // pressing — the old one.
+    // pressing — the old one. v4: "Switch Driver" (a link to the retired /select)
+    // became Sign out.
     {
       matcher: ({ url }) =>
         /^\/(dashboard|run|sign|drivers|contacts|invoices|settings|trip-sheet|backups|users)/.test(
           url.pathname
         ),
       handler: new StaleWhileRevalidate({
-        cacheName: "signex-pages-v3",
+        cacheName: "signex-pages-v4",
         plugins: [
           new ExpirationPlugin({
             maxEntries: 30,
@@ -113,9 +113,8 @@ serwist.addEventListeners();
  *
  * Serwist's precache is versioned automatically, but runtime caches are not — a
  * renamed cache leaves the old one on disk, still holding responses from an
- * earlier deployment. Without this, a phone that cached the app before
- * /select/<slug> existed would keep serving the stale pages that made the driver
- * sign-in link appear broken.
+ * earlier deployment. Without this, a phone that cached the old driver PIN
+ * sign-in would keep serving it after drivers moved to username + password.
  *
  * Anything not named here is deleted on activation. With skipWaiting and
  * clientsClaim already set, that happens on the user's next load.
@@ -123,8 +122,8 @@ serwist.addEventListeners();
 const EXPECTED_RUNTIME_CACHES = new Set([
   "signex-api-cache",
   "signex-static-assets",
-  "signex-entry-v2",
-  "signex-pages-v3",
+  "signex-entry-v3",
+  "signex-pages-v4",
 ]);
 
 self.addEventListener("activate", (event) => {

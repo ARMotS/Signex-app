@@ -4,6 +4,7 @@ import { getSessionContext, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { createAdminAccount } from "@/lib/accounts";
 import { logAudit } from "@/lib/audit";
+import { validatePassword, validateUsername } from "@/lib/credentials";
 
 /**
  * POST /api/admin/tenants
@@ -18,24 +19,29 @@ export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getSessionContext();
   requireRole(ctx, "SUPER_ADMIN");
 
-  const { tenantName, tenantSlug, adminEmail, adminName, adminPassword } =
+  const { tenantName, tenantSlug, adminEmail, adminName, adminUsername, adminPassword } =
     await request.json();
 
-  if (!tenantName || !tenantSlug || !adminEmail || !adminName || !adminPassword) {
+  if (
+    !tenantName ||
+    !tenantSlug ||
+    !adminEmail ||
+    !adminName ||
+    !adminUsername ||
+    !adminPassword
+  ) {
     return NextResponse.json(
       {
         error:
-          "tenantName, tenantSlug, adminEmail, adminName and adminPassword are required",
+          "tenantName, tenantSlug, adminEmail, adminName, adminUsername and adminPassword are required",
       },
       { status: 400 }
     );
   }
 
-  if (String(adminPassword).length < 6) {
-    return NextResponse.json(
-      { error: "adminPassword must be at least 6 characters" },
-      { status: 400 }
-    );
+  const invalid = validateUsername(adminUsername) ?? validatePassword(adminPassword);
+  if (invalid) {
+    return NextResponse.json({ error: invalid }, { status: 400 });
   }
 
   const normalizedEmail = String(adminEmail).toLowerCase().trim();
@@ -68,6 +74,7 @@ export const POST = withAuth(async (request: NextRequest) => {
   const result = await createAdminAccount(
     adminName,
     normalizedEmail,
+    adminUsername,
     adminPassword,
     tenant.id
   );

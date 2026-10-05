@@ -5,6 +5,7 @@ import {
 } from "@/lib/collections";
 import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { driverOwnsCollectionDocument } from "@/lib/driver-access";
 
 /**
  * Serve a collection document — the pending original, or the stamped output.
@@ -35,6 +36,14 @@ export const GET = withAuth(async (
   const filename = decodeURIComponent(name);
 
   const wantSigned = new URL(request.url).searchParams.get("signed") === "true";
+
+  // A driver may open only the documents for collections on their own run.
+  if (
+    ctx.role === "DRIVER" &&
+    !(await driverOwnsCollectionDocument(ctx.db, ctx.userId, filename, wantSigned))
+  ) {
+    return NextResponse.json({ error: "Collection document not found" }, { status: 404 });
+  }
 
   let buffer: Buffer | null = null;
   try {

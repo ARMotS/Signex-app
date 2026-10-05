@@ -44,8 +44,26 @@ export interface RateLimitConfig {
  * are what one person can do in a minute — not one office.
  */
 export const RATE_LIMITS = {
-  /** Login/signup, per IP. Counts failures only; a success clears the counter. */
+  /**
+   * Login/signup, per IP. Counts failures only; a success clears the counter.
+   *
+   * Deliberately looser than `authUser`: a depot of drivers shares one NAT
+   * address, and the day passwords are handed out is the day typos peak. Five
+   * per IP would let five mistakes lock out every driver in the building. This
+   * one stops spraying many usernames from one address; `authUser` is what
+   * stops guessing at any one account.
+   */
   auth: {
+    maxAttempts: 30,
+    windowMs: 15 * 60 * 1000,
+  } satisfies RateLimitConfig,
+
+  /**
+   * Login, per submitted USERNAME (normalised). The lockout after repeated
+   * failures. Counted whether or not the name exists, so a lockout message does
+   * not reveal which usernames are real.
+   */
+  authUser: {
     maxAttempts: 5,
     windowMs: 15 * 60 * 1000,
   } satisfies RateLimitConfig,

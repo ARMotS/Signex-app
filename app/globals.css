@@ -65,8 +65,13 @@
   --color-sidebar-text-active: var(--sidebar-text-active);
   --color-sidebar-accent: var(--sidebar-accent);
 
-  --font-sans: var(--font-geist-sans), "Geist", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-dm-mono), "DM Mono", ui-monospace, monospace;
+  /* Poppins everywhere. Tailwind v4 has no tailwind.config — the default font
+     is set here. `font-mono` is pointed at Poppins too, rather than rewriting
+     the ~650 places that use it: the app is one typeface, and those classes now
+     mean "the UI label style", not "monospace". Where columns of figures need
+     to line up, use `tabular-nums`. */
+  --font-sans: var(--font-poppins), "Poppins", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-poppins), "Poppins", ui-sans-serif, system-ui, sans-serif;
 }
 
 /* ─── Base Styles ──────────────────────────────────────────────────────── */
@@ -228,6 +233,56 @@ body {
 .stagger-children > *:nth-child(6) { animation-delay: 250ms; }
 .stagger-children > *:nth-child(7) { animation-delay: 300ms; }
 .stagger-children > *:nth-child(8) { animation-delay: 350ms; }
+
+/* ─── Sign-in hero: an invoice signed at the door (components/SigningDemo) ──
+   One 9s loop shared by every part, so they stay in step: hint fades (4–9%),
+   signature writes (9–36%), flourish (36–42%), signed line (46%), badge pops
+   (50–54%), hold, then everything clears together (90–96%) and restarts. */
+.sx-demo {
+  --sx-loop: 9s;
+}
+.sx-sig {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+}
+.sx-sig-1 { animation: sx-write-1 var(--sx-loop) cubic-bezier(.45,.05,.55,.95) infinite; }
+.sx-sig-2 { animation: sx-write-2 var(--sx-loop) ease-out infinite; }
+.sx-hint  { animation: sx-hint var(--sx-loop) ease infinite; }
+.sx-meta  { animation: sx-meta var(--sx-loop) ease infinite; }
+.sx-badge { animation: sx-badge var(--sx-loop) cubic-bezier(.34,1.56,.64,1) infinite; }
+
+@keyframes sx-write-1 {
+  0%, 9%    { stroke-dashoffset: 1; opacity: 1; }
+  36%, 90%  { stroke-dashoffset: 0; opacity: 1; }
+  96%, 100% { stroke-dashoffset: 0; opacity: 0; }
+}
+@keyframes sx-write-2 {
+  0%, 36%   { stroke-dashoffset: 1; opacity: 1; }
+  42%, 90%  { stroke-dashoffset: 0; opacity: 1; }
+  96%, 100% { stroke-dashoffset: 0; opacity: 0; }
+}
+@keyframes sx-hint {
+  0%, 4%    { opacity: 1; }
+  9%, 94%   { opacity: 0; }
+  100%      { opacity: 1; }
+}
+@keyframes sx-meta {
+  0%, 44%   { opacity: 0; transform: translateY(4px); }
+  48%, 90%  { opacity: 1; transform: none; }
+  96%, 100% { opacity: 0; }
+}
+@keyframes sx-badge {
+  0%, 50%   { opacity: 0; transform: scale(.6); }
+  54%, 90%  { opacity: 1; transform: scale(1); }
+  96%, 100% { opacity: 0; transform: scale(1); }
+}
+
+/* Reduced motion: the finished, signed invoice, still. */
+@media (prefers-reduced-motion: reduce) {
+  .sx-sig-1, .sx-sig-2, .sx-hint, .sx-meta, .sx-badge { animation: none; }
+  .sx-sig  { stroke-dashoffset: 0; }
+  .sx-hint { opacity: 0; }
+}
 
 /* ─── Touch Targets (mobile driver app) ────────────────────────────────── */
 .touch-target {

@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from "react";
 import PasswordInput from "@/components/PasswordInput";
+import UsernameField, { type UsernameStatus } from "@/components/UsernameField";
+import { validatePassword, PASSWORD_HINT } from "@/lib/credentials";
 
 /**
  * Each row is an ADMIN account. Because every ADMIN owns its own isolated
@@ -20,6 +22,8 @@ interface User {
   id: string;
   name: string | null;
   email: string;
+  /** What they sign in with. */
+  username: string | null;
   role: string;
   active: boolean;
   isSelf: boolean;
@@ -34,6 +38,8 @@ export default function UsersPage() {
   const [name, setName] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
+  const [usernameStatus, setUsernameStatus] = useState<UsernameStatus>("empty");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -49,6 +55,8 @@ export default function UsersPage() {
   const [editUser, setEditUser] = useState<User | null>(null);
   const [editName, setEditName] = useState("");
   const [editEmail, setEditEmail] = useState("");
+  const [editUsername, setEditUsername] = useState("");
+  const [editUsernameStatus, setEditUsernameStatus] = useState<UsernameStatus>("empty");
   const [editPassword, setEditPassword] = useState("");
   const [editRole, setEditRole] = useState("ADMIN");
   const [savingEdit, setSavingEdit] = useState(false);
@@ -95,6 +103,7 @@ export default function UsersPage() {
           name,
           companyName: companyName || undefined,
           email,
+          username,
           password,
           role: "ADMIN",
         }),
@@ -103,11 +112,12 @@ export default function UsersPage() {
 
       if (res.ok) {
         setSuccess(
-          `Account created for ${data.user.email} in its own isolated workspace`
+          `Account created — they log in as “${username.trim().toLowerCase()}”, in their own isolated workspace`
         );
         setName("");
         setCompanyName("");
         setEmail("");
+        setUsername("");
         setPassword("");
         setShowForm(false);
         fetchUsers();
@@ -127,6 +137,7 @@ export default function UsersPage() {
     setEditUser(user);
     setEditName(user.name || "");
     setEditEmail(user.email);
+    setEditUsername(user.username ?? "");
     setEditPassword("");
     setEditRole(user.role);
   };
@@ -146,6 +157,8 @@ export default function UsersPage() {
           id: editUser.id,
           name: editName,
           email: editEmail,
+          username:
+            editUsername && editUsername !== editUser.username ? editUsername : undefined,
           password: editPassword || undefined,
           role: editRole,
         }),
@@ -153,7 +166,11 @@ export default function UsersPage() {
       const data = await res.json();
 
       if (res.ok) {
-        setSuccess(`Updated ${data.user.email}`);
+        setSuccess(
+          editPassword && !editUser.isSelf
+            ? `Updated ${data.user.email} — password reset, they have been signed out`
+            : `Updated ${data.user.email}`
+        );
         setEditUser(null);
         fetchUsers();
       } else {
@@ -293,11 +310,11 @@ export default function UsersPage() {
               value={companyName}
               onChange={(e) => setCompanyName(e.target.value)}
               className="w-full px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
-              placeholder="Shown to their drivers at sign-in"
+              placeholder="The company this workspace belongs to"
             />
             <p className="text-[11px] text-ink-muted mt-1.5">
-              This is the only detail drivers see before logging in. Defaults to the
-              admin&apos;s name if left blank.
+              Labels their workspace in this console. Defaults to the admin&apos;s name
+              if left blank.
             </p>
           </div>
           <div>
@@ -310,25 +327,47 @@ export default function UsersPage() {
               onChange={(e) => setEmail(e.target.value)}
               required
               className="w-full px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
-              placeholder="user@company.com"
+              placeholder="Their work email"
             />
           </div>
           <div>
-            <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
+            <label htmlFor="new-admin-username" className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
+              Username
+            </label>
+            <UsernameField
+              id="new-admin-username"
+              value={username}
+              onChange={setUsername}
+              onStatusChange={setUsernameStatus}
+              required
+              className="w-full px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
+            />
+          </div>
+          <div>
+            <label htmlFor="new-admin-password" className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
               Password
             </label>
             <PasswordInput
+              id="new-admin-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              minLength={6}
+              autoComplete="new-password"
               className="w-full px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
-              placeholder="Min 6 characters"
+              placeholder="Set a password"
             />
+            <p className={`text-[11px] mt-1.5 ${password && validatePassword(password) ? "text-ink-red" : "text-ink-muted"}`}>
+              {(password && validatePassword(password)) || PASSWORD_HINT}
+            </p>
           </div>
           <button
             type="submit"
-            disabled={submitting}
+            disabled={
+              submitting ||
+              usernameStatus !== "available" ||
+              !password ||
+              validatePassword(password) !== null
+            }
             className="w-full px-4 py-2.5 bg-ink-green text-white text-sm font-mono rounded hover:bg-ink-green/90 disabled:opacity-50 transition-colors"
           >
             {submitting ? "Creating..." : "Create Admin Account"}
@@ -365,6 +404,9 @@ export default function UsersPage() {
                     {isSelf(user) && (
                       <span className="ml-2 text-[10px] text-ink-muted uppercase tracking-wide">(you)</span>
                     )}
+                    <div className="text-[11px] text-ink-muted">
+                      {user.username ? `@${user.username}` : "no username"}
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-ink-muted">{user.email}</td>
                   <td className="px-4 py-3">
@@ -467,16 +509,34 @@ export default function UsersPage() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
-                  New Password <span className="text-ink-muted-light normal-case">(leave blank to keep current)</span>
+                <label htmlFor="edit-admin-username" className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">Username</label>
+                <UsernameField
+                  id="edit-admin-username"
+                  value={editUsername}
+                  onChange={setEditUsername}
+                  currentUsername={editUser.username}
+                  onStatusChange={setEditUsernameStatus}
+                  className="w-full px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
+                />
+              </div>
+              <div>
+                <label htmlFor="edit-admin-password" className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">
+                  Reset password <span className="text-ink-muted-light normal-case">(leave blank to keep current)</span>
                 </label>
                 <PasswordInput
+                  id="edit-admin-password"
                   value={editPassword}
                   onChange={(e) => setEditPassword(e.target.value)}
-                  minLength={6}
+                  autoComplete="new-password"
                   className="w-full px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
-                  placeholder="Min 6 characters"
+                  placeholder="Leave blank to keep"
                 />
+                <p className={`text-[11px] mt-1.5 ${editPassword && validatePassword(editPassword) ? "text-ink-red" : "text-ink-muted"}`}>
+                  {(editPassword && validatePassword(editPassword)) ||
+                    (isSelf(editUser)
+                      ? PASSWORD_HINT
+                      : `${PASSWORD_HINT}. Resetting signs them out on every device.`)}
+                </p>
               </div>
               <div>
                 <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">Role</label>
@@ -496,7 +556,18 @@ export default function UsersPage() {
                   className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors">
                   Cancel
                 </button>
-                <button type="submit" disabled={savingEdit}
+                <button
+                  type="submit"
+                  disabled={
+                    savingEdit ||
+                    !(
+                      editUsernameStatus === "available" ||
+                      editUsernameStatus === "unchanged" ||
+                      // An account that predates usernames can be saved without one.
+                      (editUsernameStatus === "empty" && !editUser.username)
+                    ) ||
+                    (!!editPassword && validatePassword(editPassword) !== null)
+                  }
                   className="px-4 py-2 text-sm font-mono text-white bg-ink-green rounded hover:bg-ink-green/90 disabled:opacity-50 transition-colors">
                   {savingEdit ? "Saving…" : "Save Changes"}
                 </button>

@@ -8,6 +8,7 @@ import {
   setAdminActive,
 } from "@/lib/accounts";
 import { logAudit } from "@/lib/audit";
+import { validatePassword, validateUsername } from "@/lib/credentials";
 import crypto from "crypto";
 
 /**
@@ -37,6 +38,7 @@ export const GET = withAuth(async () => {
       active: true,
       createdAt: true,
       tenantId: true,
+      login: { select: { username: true } },
       tenant: {
         select: {
           id: true,
@@ -63,6 +65,7 @@ export const GET = withAuth(async () => {
       userId: u?.id ?? null,
       name: a.name,
       email: a.email,
+      username: a.login?.username ?? null,
       role: u?.role ?? "ADMIN",
       active: a.active,
       createdAt: a.createdAt,
@@ -167,20 +170,19 @@ export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireRole(ctx, "SUPER_ADMIN");
 
-  const { name, email, password, companyName } = await request.json();
+  const { name, email, username, password, companyName } = await request.json();
 
-  if (!name || !email || !password) {
+  if (!name || !email || !username || !password) {
     return NextResponse.json(
-      { error: "Name, email, and password are required" },
+      { error: "Name, email, username and password are required" },
       { status: 400 }
     );
   }
 
-  if (password.length < 6) {
-    return NextResponse.json(
-      { error: "Password must be at least 6 characters" },
-      { status: 400 }
-    );
+  // Validated before a tenant is minted, so a bad form leaves nothing behind.
+  const invalid = validateUsername(username) ?? validatePassword(password);
+  if (invalid) {
+    return NextResponse.json({ error: invalid }, { status: 400 });
   }
 
   const normalizedEmail = String(email).toLowerCase().trim();
@@ -208,7 +210,13 @@ export const POST = withAuth(async (request: NextRequest) => {
   });
 
   // createAdminAccount writes into the NEW tenant, not the caller's.
-  const result = await createAdminAccount(name, normalizedEmail, password, tenant.id);
+  const result = await createAdminAccount(
+    name,
+    normalizedEmail,
+    username,
+    password,
+    tenant.id
+  );
   if (!result.success) {
     // Roll back the empty scope so a failed creation leaves nothing behind.
     await UNSAFE_unscopedPrisma.tenant.delete({ where: { id: tenant.id } }).catch(() => {});
@@ -253,7 +261,11 @@ export const POST = withAuth(async (request: NextRequest) => {
 });
 /**
  * PATCH /api/admin/users
- * Body: { id: <Admin.id>, name?, email?, password?, role? }
+ * Body: { id: <Admin.id>, name?, email?, username?, password?, role? }
+ *
+ * A non-empty `password` is a reset: it signs the target out everywhere, so
+ * whoever held the old password loses access at once — except when the caller
+ * resets their own, which keeps the session they did it from.
  *
  * Edit an ADMIN account. Addressed by Admin.id across scopes, matching what the
  * Users console lists — each ADMIN owns its own tenant, so a scoped lookup would
@@ -264,7 +276,7 @@ export const PATCH = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireRole(ctx, "SUPER_ADMIN");
 
-  const { id, name, email, password, role } = await request.json();
+  const { id, name, email, username, password, role } = await request.json();
 
   if (!id) {
     return NextResponse.json({ error: "Admin ID is required" }, { status: 400 });
@@ -313,11 +325,18 @@ export const PATCH = withAuth(async (request: NextRequest) => {
     newRole = role;
   }
 
-  if (password !== undefined && password !== "" && password.length < 6) {
-    return NextResponse.json(
-      { error: "Password must be at least 6 characters" },
-      { status: 400 }
-    );
+  if (password !== undefined && password !== "") {
+    const invalid = validatePassword(password);
+    if (invalid) {
+      return NextResponse.json({ error: invalid }, { status: 400 });
+    }
+  }
+
+  if (username !== undefined && username !== "") {
+    const invalid = validateUsername(username);
+    if (invalid) {
+      return NextResponse.json({ error: invalid }, { status: 400 });
+    }
   }
 
   const newEmail =
@@ -350,11 +369,12 @@ export const PATCH = withAuth(async (request: NextRequest) => {
   }
 
   // The credential row lives in the ADMIN's own scope.
-  const adminResult = await updateAdminAccount(target.tenantId, target.email, {
-    name,
-    email: newEmail,
-    password,
-  });
+  const adminResult = await updateAdminAccount(
+    target.tenantId,
+    target.email,
+    { name, email: newEmail, username, password },
+    { keepSession: isSelf }
+  );
   if (!adminResult.success) {
     return NextResponse.json({ error: adminResult.error }, { status: 400 });
   }

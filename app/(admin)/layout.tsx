@@ -220,21 +220,6 @@ export default function AdminLayout({
         {/* Scope switcher — SUPER_ADMIN only, renders nothing otherwise */}
         <ScopeSwitcher role={role} />
 
-        {/* Quick links */}
-        <div className="px-3 py-3 border-t border-white/5">
-          <Link
-            href="/select"
-            className="flex items-center gap-3 px-3 py-2.5 rounded text-sm font-mono text-sidebar-text hover:bg-white/5 hover:text-sidebar-text-active transition-colors"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-              <polyline points="10 17 15 12 10 7" />
-              <line x1="15" y1="12" x2="3" y2="12" />
-            </svg>
-            Driver App
-          </Link>
-        </div>
-
         {/* Footer */}
         <div className="px-5 py-4 border-t border-white/5">
           <div className="flex items-center gap-2">
@@ -289,12 +274,6 @@ export default function AdminLayout({
             </span>
           </Link>
           <div className="flex items-center gap-2">
-            <Link
-              href="/select"
-              className="text-xs font-mono px-3 py-1.5 rounded bg-ink-green-dim text-ink-green hover:bg-ink-green hover:text-white transition-all"
-            >
-              Driver App →
-            </Link>
             <button
               onClick={handleLogout}
               className="w-8 h-8 flex items-center justify-center rounded hover:bg-ink-surface transition-colors text-ink-muted"
@@ -311,26 +290,28 @@ export default function AdminLayout({
 
         {/* Mobile bottom nav */}
         <div className="md:hidden fixed bottom-0 left-0 right-0 bg-ink-card border-t border-ink-border z-50 safe-bottom">
-          <nav className="flex items-center justify-around py-2">
+          {/* Eight or nine destinations cannot share a phone's width without
+              clipping their labels, so the bar scrolls sideways instead. */}
+          <nav className="flex items-center gap-1 px-1 py-2 overflow-x-auto [scrollbar-width:none]">
             {navItems.map((item) => {
               const isActive = pathname === item.href;
               return (
                 <Link
                   key={item.href}
                   href={item.href}
-                  className={`flex flex-col items-center gap-1 px-3 py-1.5 rounded transition-colors touch-target ${
+                  className={`flex flex-col items-center gap-1 px-2.5 py-1.5 shrink-0 rounded transition-colors touch-target ${
                     isActive ? "text-ink-green" : "text-ink-muted"
                   }`}
                 >
                   {item.icon}
-                  <span className="text-[10px] font-mono">{item.label}</span>
+                  <span className="text-[10px] font-mono whitespace-nowrap">{item.label}</span>
                 </Link>
               );
             })}
             {role === "super_admin" && (
               <Link
                 href="/users"
-                className={`flex flex-col items-center gap-1 px-3 py-1.5 rounded transition-colors touch-target ${
+                className={`flex flex-col items-center gap-1 px-2.5 py-1.5 shrink-0 rounded transition-colors touch-target ${
                   pathname === "/users" ? "text-ink-green" : "text-ink-muted"
                 }`}
               >
@@ -340,7 +321,7 @@ export default function AdminLayout({
                   <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
                   <path d="M16 3.13a4 4 0 0 1 0 7.75" />
                 </svg>
-                <span className="text-[10px] font-mono">Users</span>
+                <span className="text-[10px] font-mono whitespace-nowrap">Users</span>
               </Link>
             )}
           </nav>
