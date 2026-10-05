@@ -142,8 +142,10 @@ export default function AdminLayout({
     <div className="flex min-h-dvh">
       {/* ─── Sidebar ─────────────────────────────────────────────────── */}
       <aside className="hidden md:flex w-56 flex-col bg-sidebar-bg border-r border-white/5 shrink-0 fixed top-0 left-0 h-dvh z-40">
-        {/* Logo — links to home */}
-        <Link href="/" className="flex items-center gap-2 px-5 py-5 border-b border-white/5 hover:bg-white/5 transition-colors">
+        {/* Logo — deliberately NOT a link. Inside the app the way out is Log out,
+            which ends the session; a logo leading to the public home page would
+            leave a signed-in session behind it. */}
+        <div className="flex items-center gap-2 px-5 py-5 border-b border-white/5">
           <div className="w-7 h-7 bg-ink-green/10 rounded flex items-center justify-center">
             <svg
               width="14"
@@ -164,7 +166,7 @@ export default function AdminLayout({
           <span className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/5 text-sidebar-text">
             ADMIN
           </span>
-        </Link>
+        </div>
 
         {/* Navigation */}
         <nav className="flex-1 px-3 py-4 space-y-1">
@@ -238,7 +240,8 @@ export default function AdminLayout({
             </div>
             <button
               onClick={handleLogout}
-              title="Sign out"
+              title="Log out"
+              aria-label="Log out"
               className="w-7 h-7 rounded flex items-center justify-center hover:bg-white/10 transition-colors text-sidebar-text hover:text-ink-red"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -254,7 +257,8 @@ export default function AdminLayout({
       {/* ─── Mobile Header ───────────────────────────────────────────── */}
       <div className="flex flex-1 flex-col min-w-0 md:ml-56">
         <header className="md:hidden flex items-center justify-between px-4 py-3 bg-ink-card border-b border-ink-border">
-          <Link href="/" className="flex items-center gap-2">
+          {/* Not a link — see the sidebar logo. */}
+          <div className="flex items-center gap-2">
             <div className="w-7 h-7 bg-ink-black rounded flex items-center justify-center">
               <svg
                 width="14"
@@ -272,18 +276,19 @@ export default function AdminLayout({
             <span className="font-mono text-sm font-medium text-ink-black">
               SIGNEX
             </span>
-          </Link>
+          </div>
           <div className="flex items-center gap-2">
             <button
               onClick={handleLogout}
-              className="w-8 h-8 flex items-center justify-center rounded hover:bg-ink-surface transition-colors text-ink-muted"
-              title="Sign out"
+              className="flex items-center gap-1.5 h-8 px-2.5 rounded text-xs font-medium hover:bg-ink-surface transition-colors text-ink-muted hover:text-ink-red"
+              title="Log out"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
                 <polyline points="16 17 21 12 16 7" />
                 <line x1="21" y1="12" x2="9" y2="12" />
               </svg>
+              Log out
             </button>
           </div>
         </header>

@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
@@ -40,10 +39,9 @@ export default function DriverLayout({
     <div className="min-h-dvh flex flex-col bg-ink-surface">
       {/* Minimal top bar */}
       <header className="flex items-center justify-between px-4 py-3 bg-ink-card border-b border-ink-border safe-top">
-        <Link
-          href="/run"
-          className="flex items-center gap-2 hover:opacity-80 transition-opacity"
-        >
+        {/* Not a link: inside the app the way out is Sign out, which ends the
+            session. A tap on the logo mid-delivery should do nothing. */}
+        <div className="flex items-center gap-2">
           <div className="w-7 h-7 bg-ink-black rounded flex items-center justify-center">
             <svg
               width="14"
@@ -61,7 +59,7 @@ export default function DriverLayout({
           <span className="font-mono text-sm font-medium text-ink-black tracking-tight">
             SIGNEX
           </span>
-        </Link>
+        </div>
         <div className="flex items-center gap-3">
           {/* Switching driver on a shared device is signing out: the next
               driver signs in with their own username. */}
