@@ -250,6 +250,64 @@ describe("fixture: a row carrying both an invoice and a collection", () => {
   });
 });
 
+describe('"0" and "-" mean there is none', () => {
+  it.each(["0", "-"])("a COLLECTNO of %j is a plain delivery", async (blank) => {
+    const result = await parse([
+      HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Acme Hardware", "INV-2041", blank, "", "3"],
+    ]);
+
+    const stops = result.driverResults[0].stops;
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toMatchObject({ invoiceNumber: "INV-2041", invoiceFile: "INV-2041.pdf" });
+    expect(stops[0].collections).toEqual([]);
+    expect(result.totalCollections).toBe(0);
+  });
+
+  it.each(["0", "-"])("an INVOICENO of %j beside a COLLECTNO is an ad hoc collection", async (blank) => {
+    const result = await parse([
+      HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Delta Trading", blank, "COL-119", "", ""],
+    ]);
+
+    const stops = result.driverResults[0].stops;
+    expect(stops).toHaveLength(1);
+    expect(stops[0].invoiceNumber).toBe("");
+    expect(stops[0].collections![0]).toMatchObject({
+      collectionNo: "COL-119",
+      originalInvoiceNo: null,
+    });
+    expect(result.missingInvoices).toEqual([]);
+  });
+
+  it("drops a row where both are placeholders", async () => {
+    const result = await parse([
+      HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Ghost Supplies", "0", "-", "", "2"],
+    ]);
+
+    expect(result.totalRows).toBe(0);
+    expect(result.driverResults).toEqual([]);
+  });
+});
+
+describe("matching INVOICENO to an IV-style PDF", () => {
+  it.each(["IV-365-4", "INV-365-4", "INVOICE 365", "365"])("%s finds IV-365-4.pdf", async (cell) => {
+    invoiceFiles = [invoice("IV-365-4"), invoice("IV-633291")];
+    const result = await parse([
+      LEGACY_HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Acme Hardware", cell, "3"],
+      ["2026-08-24", "John Smith", "CA 123-456", "Beta Supplies", "633291", "1"],
+    ]);
+
+    expect(result.driverResults[0].stops.map((s) => s.invoiceFile)).toEqual([
+      "IV-365-4.pdf",
+      "IV-633291.pdf",
+    ]);
+    expect(result.missingInvoices).toEqual([]);
+  });
+});
+
 // ─── Grouping ─────────────────────────────────────────────────────────────
 
 describe("grouping collections onto a customer's stop", () => {
