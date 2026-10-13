@@ -357,7 +357,7 @@ let currentSession: FakeSession | null = null;
 export function sessionMockFactory() {
   return {
     getSession: vi.fn(async () => currentSession),
-    createSession: vi.fn(async () => {}),
+    createSession: vi.fn(async () => ({ ok: true as const })),
     setViewScope: vi.fn(async (tenantId: string | null) => {
       if (currentSession) currentSession.viewTenantId = tenantId;
       return true;

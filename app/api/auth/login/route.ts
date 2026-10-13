@@ -19,7 +19,11 @@ function getClientIp(request: NextRequest): string {
 
 /**
  * POST /api/auth/login
- * Body: { username, password }
+ * Body: { username, password, confirmEvict? }
+ *
+ * 409 { code: "SESSION_LIMIT" } when an admin is already signed in on the
+ * maximum number of devices; resubmitting with confirmEvict: true signs the
+ * oldest of them out and proceeds.
  *
  * The single sign-in for every role. The account's role and isolation scope
  * come from its own DB row — the client never supplies or influences either —
@@ -74,13 +78,30 @@ export async function POST(request: NextRequest) {
     await Promise.all([clearAttempts(ip, "auth"), clearAttempts(username, "auth:user")]);
 
     const { account } = result;
-    await createSession({
-      id: account.id,
-      role: account.role,
-      name: account.name,
-      email: account.email,
-      tenantId: account.tenantId,
-    });
+    const started = await createSession(
+      {
+        id: account.id,
+        role: account.role,
+        name: account.name,
+        email: account.email,
+        tenantId: account.tenantId,
+      },
+      { evictOldest: body?.confirmEvict === true }
+    );
+
+    // An admin already on MAX_ADMIN_SESSIONS devices. Nothing was signed in or
+    // out; the form asks, and resubmits with confirmEvict if they go ahead.
+    // Only reachable with the right password, so it reveals nothing to a guesser.
+    if (!started.ok) {
+      return NextResponse.json(
+        {
+          code: "SESSION_LIMIT",
+          activeSessions: started.activeSessions,
+          error: `This account is already signed in on ${started.activeSessions} devices.`,
+        },
+        { status: 409 }
+      );
+    }
 
     return NextResponse.json({
       success: true,

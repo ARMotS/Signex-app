@@ -83,7 +83,13 @@ model Admin {
   // A deactivated ADMIN cannot log in. Their drivers are unaffected and keep
   // signing in and completing deliveries; see login() in lib/accounts.ts.
   active       Boolean     @default(true)
+  // Retired: one session per admin. Still written (the newest login) so the
+  // previous deploy keeps validating through the rollout; drop it in a later
+  // migration once nothing reads it.
   sessionToken String?
+  // Live sessions, oldest first, at most MAX_ADMIN_SESSIONS (lib/session.ts).
+  // A new login past the cap evicts the oldest device.
+  sessionTokens String[]   @default([])
   tenantId     String      @default("")
   tenant       Tenant      @relation(fields: [tenantId], references: [id])
   createdAt    DateTime    @default(now())

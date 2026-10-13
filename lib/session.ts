@@ -1,7 +1,14 @@
 /**
  * Simple cookie-based session management.
- * Uses a signed JSON payload in an httpOnly cookie.
- * Enforces single active session per user via session tokens stored in DB.
+ * Uses a signed JSON payload in an httpOnly cookie, revocable via session
+ * tokens stored in DB.
+ *
+ * A DRIVER has one live session: signing in on a new phone signs the old one
+ * out. An ADMIN / SUPER_ADMIN may be signed in on up to MAX_ADMIN_SESSIONS
+ * devices (office PC, laptop, phone). A login past that is held back and the
+ * person is asked first; only if they confirm is the OLDEST device signed out.
+ * Expired sessions do not count, so a closed browser frees its slot within a
+ * day.
  */
 
 import crypto from "crypto";
@@ -42,11 +49,93 @@ function sign(data: string): string {
   return hmac.digest("hex");
 }
 
-function generateSessionToken(): string {
-  return crypto.randomBytes(32).toString("hex");
+/**
+ * `<issued-at, base36 ms>.<random hex>`. The issue time lets the session list
+ * tell a live device from a cookie that has long since expired: a browser that
+ * was simply closed never logs out, and without this its token would hold one
+ * of the account's device slots forever.
+ */
+function generateSessionToken(now = Date.now()): string {
+  return `${now.toString(36)}.${crypto.randomBytes(32).toString("hex")}`;
 }
 
 const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
+
+/** Devices an ADMIN / SUPER_ADMIN may be signed in on at once. */
+export const MAX_ADMIN_SESSIONS = 3;
+
+/**
+ * Whether a stored token can still belong to a live cookie. A token from
+ * before issue times were embedded (bare hex) has an unknown age and is
+ * treated as live; there is at most one per admin, carried over by the
+ * migration, and it leaves the list like any other.
+ */
+export function isSessionTokenLive(token: string, now = Date.now()): boolean {
+  const dot = token.indexOf(".");
+  if (dot === -1) return true;
+  const issuedAt = parseInt(token.slice(0, dot), 36);
+  return Number.isFinite(issuedAt) && now - issuedAt < SESSION_MAX_AGE_SECONDS * 1000;
+}
+
+export type AdminSessionPlan =
+  | { ok: true; tokens: string[] }
+  | { ok: false; activeSessions: number };
+
+/**
+ * Decide what a new admin login does to the session list (oldest first).
+ *
+ * Expired tokens are dropped first, so only devices that can really still be
+ * signed in count. At the limit the login is REFUSED unless the person has
+ * confirmed they want the oldest device signed out — a 4th login must never
+ * silently sign out someone else who is working.
+ */
+export function planAdminSession(
+  current: string[],
+  token: string,
+  evictOldest: boolean,
+  now = Date.now()
+): AdminSessionPlan {
+  const live = current.filter((t) => isSessionTokenLive(t, now));
+  if (live.length >= MAX_ADMIN_SESSIONS && !evictOldest) {
+    return { ok: false, activeSessions: live.length };
+  }
+  return { ok: true, tokens: [...live, token].slice(-MAX_ADMIN_SESSIONS) };
+}
+
+/**
+ * Record a new admin session, or refuse it at the device limit.
+ *
+ * The row is locked for the read-decide-write, so two logins racing on one
+ * account cannot both see a free slot, nor drop each other's token.
+ * `sessionToken` is still written for the previous deploy (see schema).
+ */
+export async function addAdminSession(
+  adminId: string,
+  token: string,
+  evictOldest: boolean
+): Promise<AdminSessionPlan> {
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<{ sessionTokens: string[] }[]>`
+      SELECT "sessionTokens" FROM "Admin" WHERE "id" = ${adminId} FOR UPDATE`;
+    const plan = planAdminSession(rows[0]?.sessionTokens ?? [], token, evictOldest);
+    if (plan.ok) {
+      await tx.admin.update({
+        where: { id: adminId },
+        data: { sessionTokens: plan.tokens, sessionToken: token },
+      });
+    }
+    return plan;
+  });
+}
+
+/** Revoke one admin session, leaving the account's other devices signed in. */
+export async function removeAdminSession(adminId: string, token: string): Promise<void> {
+  await prisma.$executeRaw`
+    UPDATE "Admin"
+    SET "sessionTokens" = array_remove("sessionTokens", ${token}),
+        "sessionToken" = NULLIF("sessionToken", ${token})
+    WHERE "id" = ${adminId}`;
+}
 
 /** Serialise, sign and write the session cookie. */
 async function writeSessionCookie(session: SessionData): Promise<void> {
@@ -63,26 +152,36 @@ async function writeSessionCookie(session: SessionData): Promise<void> {
   });
 }
 
-export async function createSession(user: {
-  id: string;
-  role: "admin" | "driver" | "super_admin";
-  name: string;
-  email?: string;
-  tenantId?: string;
-}): Promise<void> {
+/**
+ * Start a session and write its cookie.
+ *
+ * Returns `{ ok: false }` — with NO cookie written — when an admin is already
+ * signed in on MAX_ADMIN_SESSIONS devices and `evictOldest` was not set. The
+ * caller asks the person, and retries with `evictOldest: true` if they agree
+ * to sign the oldest device out.
+ */
+export async function createSession(
+  user: {
+    id: string;
+    role: "admin" | "driver" | "super_admin";
+    name: string;
+    email?: string;
+    tenantId?: string;
+  },
+  options: { evictOldest?: boolean } = {}
+): Promise<{ ok: true } | { ok: false; activeSessions: number }> {
   const sessionToken = generateSessionToken();
 
-  // Store session token in DB — invalidates any prior session for this user
+  // Store session token in DB. A driver's replaces any prior session; an
+  // admin's joins the list, up to MAX_ADMIN_SESSIONS.
   if (user.role === "driver") {
     await prisma.driver.update({
       where: { id: user.id },
       data: { sessionToken },
     });
   } else {
-    await prisma.admin.update({
-      where: { id: user.id },
-      data: { sessionToken },
-    });
+    const plan = await addAdminSession(user.id, sessionToken, !!options.evictOldest);
+    if (!plan.ok) return plan;
   }
 
   await writeSessionCookie({
@@ -92,6 +191,7 @@ export async function createSession(user: {
     sessionToken,
     exp: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
   });
+  return { ok: true };
 }
 
 /**
@@ -152,9 +252,16 @@ export async function validateSessionToken(session: SessionData): Promise<boolea
     } else {
       const admin = await prisma.admin.findUnique({
         where: { id: session.id },
-        select: { sessionToken: true },
+        select: { sessionTokens: true, sessionToken: true },
       });
-      return admin?.sessionToken === session.sessionToken;
+      // sessionToken: a login served by the previous deploy during the
+      // rollout wrote only that column. It is always cleared alongside the
+      // list, so it never keeps a revoked session alive.
+      return (
+        !!admin &&
+        (admin.sessionTokens.includes(session.sessionToken) ||
+          admin.sessionToken === session.sessionToken)
+      );
     }
   } catch {
     return false;
@@ -173,17 +280,16 @@ export async function destroySession(): Promise<void> {
         const data: SessionData = JSON.parse(
           Buffer.from(payload, "base64").toString("utf-8")
         );
-        // Clear session token in DB on logout
+        // Revoke THIS device's token only. Conditional on the token still being
+        // ours: a device that was signed out by a newer login must not, on its
+        // way out, revoke the session that replaced it.
         if (data.role === "driver") {
-          await prisma.driver.update({
-            where: { id: data.id },
+          await prisma.driver.updateMany({
+            where: { id: data.id, sessionToken: data.sessionToken },
             data: { sessionToken: null },
           }).catch(() => {});
         } else {
-          await prisma.admin.update({
-            where: { id: data.id },
-            data: { sessionToken: null },
-          }).catch(() => {});
+          await removeAdminSession(data.id, data.sessionToken).catch(() => {});
         }
       }
     } catch {}

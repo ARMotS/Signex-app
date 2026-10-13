@@ -170,15 +170,15 @@ export async function createAdminAccount(
  * Only touches the Admin table and its LoginName; the companion User row is
  * updated separately by the caller.
  *
- * A password change signs the account out everywhere unless `keepSession` is
- * set — used when an account changes its own password and should stay signed
- * in on the device it did it from.
+ * A password change signs the account out on every device except the one
+ * whose token is `keepSessionToken` — set when an account changes its own
+ * password and should stay signed in where it did it from.
  */
 export async function updateAdminAccount(
   tenantId: string,
   currentEmail: string,
   updates: { name?: string; email?: string; username?: string; password?: string },
-  options: { keepSession?: boolean } = {}
+  options: { keepSessionToken?: string } = {}
 ): Promise<{ success: boolean; error?: string }> {
   const changingPassword = updates.password !== undefined && updates.password !== "";
   if (changingPassword) {
@@ -222,6 +222,13 @@ export async function updateAdminAccount(
       return { success: false, error: USERNAME_TAKEN };
     }
 
+    // Only a token that is still live is kept — a device already signed out
+    // must not be revived by the password change it made on its way out.
+    const keep =
+      options.keepSessionToken && admin.sessionTokens.includes(options.keepSessionToken)
+        ? options.keepSessionToken
+        : null;
+
     await db.admin.update({
       where: { id: admin.id },
       data: {
@@ -229,8 +236,10 @@ export async function updateAdminAccount(
         ...(updates.email !== undefined && { email: updates.email.toLowerCase() }),
         ...(changingPassword && {
           passwordHash: hashPassword(updates.password!),
-          // A reset password must lock out whoever held the old one, now.
-          ...(!options.keepSession && { sessionToken: null }),
+          // A reset password must lock out whoever held the old one, now —
+          // on every device but the caller's own when they changed it themselves.
+          sessionToken: keep,
+          sessionTokens: keep ? [keep] : [],
         }),
         ...(renaming && {
           login: {
@@ -682,9 +691,9 @@ export async function setAdminActive(
       where: { id: adminId },
       data: {
         active,
-        // Revoking the session token logs a deactivated admin out immediately
-        // rather than letting their current cookie run to expiry.
-        ...(active ? {} : { sessionToken: null }),
+        // Revoking every session token logs a deactivated admin out of all
+        // their devices immediately rather than letting cookies run to expiry.
+        ...(active ? {} : { sessionToken: null, sessionTokens: [] }),
       },
     });
 

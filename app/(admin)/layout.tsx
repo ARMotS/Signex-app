@@ -117,7 +117,9 @@ export default function AdminLayout({
         .then((r) => r.json())
         .then((data) => {
           if (data.kicked || !data.session) {
-            router.replace("/login");
+            // Kicked: signed out from another device (or a password reset) —
+            // the login screen says so, rather than silently showing a form.
+            router.replace(data.kicked ? "/login?signedOut=1" : "/login");
             return;
           }
           if (data.session.role === "admin" || data.session.role === "super_admin") {

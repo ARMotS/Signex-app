@@ -1694,7 +1694,7 @@ suite("cross-ADMIN isolation", () => {
 
       await db().admin.update({
         where: { id: f.b.admin.id },
-        data: { sessionToken: "live-token" },
+        data: { sessionToken: "live-token", sessionTokens: ["t1", "t2", "live-token"] },
       });
 
       await PUT(
@@ -1704,13 +1704,124 @@ suite("cross-ADMIN isolation", () => {
         })
       );
 
-      expect(
-        (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionToken
-      ).toBeNull();
+      const row = await db().admin.findUnique({ where: { id: f.b.admin.id } });
+      expect(row?.sessionToken).toBeNull();
+      // Every device, not just the most recent one.
+      expect(row?.sessionTokens).toEqual([]);
 
       await db().admin.update({
         where: { id: f.b.admin.id },
         data: { active: true },
+      });
+    });
+
+    // lib/session is mocked for the route handlers; these exercise the real
+    // SQL that records and revokes admin sessions.
+    describe("an admin signed in on several devices", () => {
+      const realSession = () =>
+        vi.importActual<typeof import("@/lib/session")>("@/lib/session");
+      const tokens = async () =>
+        (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionTokens;
+
+      beforeEach(async () => {
+        await db().admin.update({
+          where: { id: f.b.admin.id },
+          data: { sessionToken: null, sessionTokens: [] },
+        });
+      });
+
+      it("holds a fourth login back, and signs out the oldest only once confirmed", async () => {
+        const { addAdminSession, MAX_ADMIN_SESSIONS } = await realSession();
+        expect(MAX_ADMIN_SESSIONS).toBe(3);
+
+        for (const t of ["d1", "d2", "d3"]) await addAdminSession(f.b.admin.id, t, false);
+        expect(await tokens()).toEqual(["d1", "d2", "d3"]);
+
+        // Unconfirmed: nobody is signed out and the new device is not added.
+        expect(await addAdminSession(f.b.admin.id, "d4", false)).toEqual({
+          ok: false,
+          activeSessions: 3,
+        });
+        expect(await tokens()).toEqual(["d1", "d2", "d3"]);
+
+        // Confirmed: the oldest goes.
+        expect((await addAdminSession(f.b.admin.id, "d4", true)).ok).toBe(true);
+        expect(await tokens()).toEqual(["d2", "d3", "d4"]);
+        // Still written for the previous deploy during the rollout.
+        expect(
+          (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionToken
+        ).toBe("d4");
+      });
+
+      it("drops expired sessions instead of prompting over them", async () => {
+        const { addAdminSession } = await realSession();
+        const stale = `${(Date.now() - 25 * 3_600_000).toString(36)}.stale`;
+        await db().admin.update({
+          where: { id: f.b.admin.id },
+          data: { sessionTokens: [stale, "d2", "d3"] },
+        });
+
+        expect((await addAdminSession(f.b.admin.id, "d4", false)).ok).toBe(true);
+        expect(await tokens()).toEqual(["d2", "d3", "d4"]);
+      });
+
+      it("racing logins cannot both take the last free slot", async () => {
+        const { addAdminSession } = await realSession();
+        await addAdminSession(f.b.admin.id, "d1", false);
+        await addAdminSession(f.b.admin.id, "d2", false);
+
+        const results = await Promise.all(
+          ["r1", "r2"].map((t) => addAdminSession(f.b.admin.id, t, false))
+        );
+        expect(results.filter((r) => r.ok)).toHaveLength(1);
+        expect(await tokens()).toHaveLength(3);
+      });
+
+      it("logging out of one device leaves the others signed in", async () => {
+        const { addAdminSession, removeAdminSession } = await realSession();
+        for (const t of ["d1", "d2", "d3"]) await addAdminSession(f.b.admin.id, t, false);
+
+        await removeAdminSession(f.b.admin.id, "d2");
+        expect(await tokens()).toEqual(["d1", "d3"]);
+        expect(
+          (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionToken
+        ).toBe("d3");
+      });
+
+      it("an evicted device signing out does not revoke the devices that replaced it", async () => {
+        const { addAdminSession, removeAdminSession } = await realSession();
+        for (const t of ["d1", "d2", "d3", "d4"]) await addAdminSession(f.b.admin.id, t, true);
+
+        await removeAdminSession(f.b.admin.id, "d1");
+        expect(await tokens()).toEqual(["d2", "d3", "d4"]);
+      });
+
+      it("one admin's sessions never touch another admin's", async () => {
+        const { addAdminSession } = await realSession();
+        await db().admin.update({ where: { id: f.a.admin.id }, data: { sessionTokens: ["a-only"] } });
+
+        for (const t of ["d1", "d2", "d3", "d4"]) await addAdminSession(f.b.admin.id, t, true);
+        expect(
+          (await db().admin.findUnique({ where: { id: f.a.admin.id } }))?.sessionTokens
+        ).toEqual(["a-only"]);
+
+        await db().admin.update({ where: { id: f.a.admin.id }, data: { sessionTokens: [] } });
+      });
+
+      it("a password reset by the SUPER_ADMIN signs out every device", async () => {
+        const { PATCH } = await import("@/app/api/admin/users/route");
+        const { addAdminSession } = await realSession();
+        for (const t of ["d1", "d2", "d3"]) await addAdminSession(f.b.admin.id, t, false);
+
+        useSession(superAdminSession(f));
+        const res = await PATCH(
+          req("/api/admin/users", {
+            method: "PATCH",
+            body: { id: f.b.admin.id, password: CREDENTIALS.admin("B").password },
+          })
+        );
+        expect(res.status).toBe(200);
+        expect(await tokens()).toEqual([]);
       });
     });
 
