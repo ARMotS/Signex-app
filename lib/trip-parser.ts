@@ -258,13 +258,13 @@ function mapColumns(headers: string[]): Record<string, number> {
 // ─── Invoice Number Normalization ─────────────────────────────────────────
 
 /**
- * A cell that is filled in but means "nothing here". Depots write "0" or "-"
- * in INVOICENO / COLLECTNO rather than leaving the cell blank, and taken
- * literally that is an invoice called "0" with no PDF, or a collection called
- * "-" for the driver to go and fetch.
+ * A cell that is filled in but means "nothing here". Depots write "0", the
+ * letter "O" or a dash in INVOICENO / COLLECTNO rather than leaving the cell
+ * blank, and taken literally that is an invoice called "0" with no PDF, or a
+ * collection called "-" for the driver to go and fetch.
  */
 export function isPlaceholderCell(raw: string): boolean {
-  return /^(?:0+(?:\.0+)?|[-–—_.]+|N\/?A|NIL|NONE|NULL)$/i.test(String(raw ?? "").trim());
+  return /^(?:[0O]+(?:\.0+)?|[-–—‐‑−_.]+|N\/?A|NIL|NONE|NULL)$/i.test(String(raw ?? "").trim());
 }
 
 /** A sheet cell, with placeholders ("0", "-", "N/A") read as blank. */

@@ -66,7 +66,7 @@ describe("matching a sheet's invoice number to a PDF", () => {
 });
 
 describe("placeholder cells", () => {
-  it.each(["0", "00", "-", "--", "–", "N/A", "nil", " 0 "])("reads %j as empty", (v) => {
+  it.each(["0", "00", "O", "o", "-", "--", "–", "‐", "N/A", "nil", " 0 "])("reads %j as empty", (v) => {
     expect(isPlaceholderCell(v)).toBe(true);
   });
 
