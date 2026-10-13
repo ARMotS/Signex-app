@@ -80,6 +80,14 @@ export default function SignInScreen() {
 
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // Set when the account is already on its maximum number of devices: the
+  // login is held until the person agrees to sign the oldest one out.
+  const [sessionLimit, setSessionLimit] = useState<number | null>(null);
+  const [signedOutElsewhere, setSignedOutElsewhere] = useState(false);
+
+  useEffect(() => {
+    setSignedOutElsewhere(new URLSearchParams(window.location.search).has("signedOut"));
+  }, []);
 
   useEffect(() => {
     fetch("/api/auth/session")
@@ -97,8 +105,7 @@ export default function SignInScreen() {
       .catch(() => setCheckingSession(false));
   }, [router]);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitLogin = async (confirmEvict: boolean) => {
     setError("");
     setSubmitting(true);
 
@@ -106,7 +113,7 @@ export default function SignInScreen() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, confirmEvict }),
       });
       const data = await res.json().catch(() => ({}));
 
@@ -115,12 +122,25 @@ export default function SignInScreen() {
         router.replace(data.redirectTo || homePathForRole(data.role));
         return;
       }
+      if (res.status === 409 && data.code === "SESSION_LIMIT") {
+        // Password was right; keep it so "Continue" can resubmit.
+        setSessionLimit(data.activeSessions ?? 3);
+        setSubmitting(false);
+        return;
+      }
+      setSessionLimit(null);
       setError(data.error || "Incorrect username or password");
       setPassword("");
     } catch {
       setError("Can't reach Signex. Check your connection and try again.");
     }
     setSubmitting(false);
+  };
+
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    setSessionLimit(null);
+    void submitLogin(false);
   };
 
   const handleSetup = async (e: React.FormEvent) => {
@@ -175,7 +195,10 @@ export default function SignInScreen() {
             name="username"
             type="text"
             value={username}
-            onChange={(e) => setUsername(e.target.value)}
+            onChange={(e) => {
+              setUsername(e.target.value);
+              setSessionLimit(null);
+            }}
             required
             autoComplete="username"
             autoCapitalize="none"
@@ -193,20 +216,63 @@ export default function SignInScreen() {
             id="password"
             name="password"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              setSessionLimit(null);
+            }}
             required
             autoComplete="current-password"
             className={INPUT_CLASS}
             placeholder="Enter your password"
           />
         </div>
-        <button
-          type="submit"
-          disabled={submitting}
-          className="w-full px-4 py-3 bg-ink-black text-white text-sm font-semibold rounded-md hover:bg-ink-black/85 active:scale-[0.99] transition-all disabled:opacity-50 touch-target focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-ink-green"
-        >
-          {submitting ? "Logging in…" : "Log in"}
-        </button>
+        {sessionLimit !== null ? (
+          <div
+            role="alertdialog"
+            aria-labelledby="session-limit-title"
+            aria-describedby="session-limit-body"
+            className="p-4 bg-ink-amber-dim rounded-md border border-ink-amber/30 space-y-3 animate-fade-in"
+          >
+            <p id="session-limit-title" className="text-sm font-semibold text-ink-black">
+              Too many devices signed in
+            </p>
+            <p id="session-limit-body" className="text-sm text-ink-black/80">
+              This account is already signed in on {sessionLimit} devices. Continuing
+              will sign out the device that signed in longest ago — if someone is
+              using it, they will lose their place.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <button
+                type="button"
+                autoFocus
+                disabled={submitting}
+                onClick={() => void submitLogin(true)}
+                className="flex-1 px-4 py-3 bg-ink-black text-white text-sm font-semibold rounded-md hover:bg-ink-black/85 transition-all disabled:opacity-50 touch-target focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-ink-green"
+              >
+                {submitting ? "Logging in…" : "Sign them out and continue"}
+              </button>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => {
+                  setSessionLimit(null);
+                  setPassword("");
+                }}
+                className="flex-1 px-4 py-3 bg-ink-card text-ink-black text-sm font-semibold rounded-md border border-ink-border hover:bg-ink-surface transition-all disabled:opacity-50 touch-target focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-ink-green"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="submit"
+            disabled={submitting}
+            className="w-full px-4 py-3 bg-ink-black text-white text-sm font-semibold rounded-md hover:bg-ink-black/85 active:scale-[0.99] transition-all disabled:opacity-50 touch-target focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-ink-green"
+          >
+            {submitting ? "Logging in…" : "Log in"}
+          </button>
+        )}
         <p className="text-sm text-ink-muted">
           Forgotten your login? Ask your office to reset it.
         </p>
@@ -330,6 +396,18 @@ export default function SignInScreen() {
           <h2 className="text-xl font-semibold text-ink-black mb-6">
             {mode === "login" ? "Log in" : "Set up Signex"}
           </h2>
+
+          {signedOutElsewhere && !error && mode === "login" && (
+            <div
+              role="status"
+              className="px-3 py-2.5 mb-4 bg-ink-amber-dim rounded-md border border-ink-amber/30 animate-fade-in"
+            >
+              <span className="text-sm text-ink-black">
+                You were signed out. This account signed in on another device, or
+                its password was changed.
+              </span>
+            </div>
+          )}
 
           {error && (
             <div

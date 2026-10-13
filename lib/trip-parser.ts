@@ -258,33 +258,113 @@ function mapColumns(headers: string[]): Record<string, number> {
 // ─── Invoice Number Normalization ─────────────────────────────────────────
 
 /**
- * Normalize an invoice number for matching.
- * Handles formats: "Invoice # 001", "INV-001", "Invoice 001", "001", "827323", etc.
- * For "IV-365-4.pdf" style filenames, extracts the middle numeric value (365).
- * Strips prefixes, spaces, hyphens. Leading zeros are preserved.
+ * A cell that is filled in but means "nothing here". Depots write "0", the
+ * letter "O" or a dash in INVOICENO / COLLECTNO rather than leaving the cell
+ * blank, and taken literally that is an invoice called "0" with no PDF, or a
+ * collection called "-" for the driver to go and fetch.
+ */
+export function isPlaceholderCell(raw: string): boolean {
+  return /^(?:[0O]+(?:\.0+)?|[-–—‐‑−_.]+|N\/?A|NIL|NONE|NULL)$/i.test(String(raw ?? "").trim());
+}
+
+/** A sheet cell, with placeholders ("0", "-", "N/A") read as blank. */
+function cellValue(raw: unknown): string {
+  const value = String(raw ?? "").trim();
+  return isPlaceholderCell(value) ? "" : value;
+}
+
+/**
+ * Prefixes written in front of the number, on the sheet or in the filename:
+ * IV-365, INV-365, INVOICE-365, INVOICE 365, Invoice # 365, Invoice No. 365,
+ * Tax Invoice 365, SI-365, SINV365. Only stripped when digits follow, so an
+ * alphanumeric invoice number that merely starts with these letters survives.
+ */
+const INVOICE_PREFIX =
+  /^(?:TAX\s*INVOICE|INVOICE|INV|IV|SINV|SI)\s*(?:NO\.?|NUMBER|NUM\.?)?\s*[#:]?[\s\-_.#:]*(?=\d)/;
+
+/** Marks a duplicated file rather than a different invoice: "IV-365-4 (1)", "INV-365 copy". */
+const COPY_SUFFIX = /(?:\s*\(\d+\)|[\s_\-]*COPY(?:\s*\d+)?)$/;
+
+/** NNN followed by a short trailing number: the 365 in IV-365-4. */
+const BASE_WITH_SUFFIX = /^(\d+)[\s\-_./]+\d{1,3}$/;
+
+const SEPARATORS = /[\s\-_./]/g;
+
+/**
+ * The keys an invoice number is matched on, strongest first. The same function
+ * runs on the INVOICENO cell and on the PDF's filename stem, so the two only
+ * have to agree on one key:
+ *
+ *   0. exact     — prefix and separators removed      IV-365-4 → 3654
+ *   1. base      — trailing -N dropped                IV-365-4 → 365
+ *   2. digits    — every non-digit removed            ABC/365  → 365
+ *   3. unpadded  — leading zeros dropped              IV-000365 → 365
+ *
+ * The trailing -N on IV-365-4 is a page/copy counter, not part of the invoice
+ * number, so the sheet may write IV-365-4, INV-365-4, INVOICE 365 or just 365
+ * and still find IV-365-4.pdf. Exact keys are tried first, so two files that
+ * differ only in that counter each still match their own exact number.
+ */
+export function invoiceMatchKeys(raw: string): [string, string | null, string | null, string | null] {
+  let value = String(raw ?? "").trim().toUpperCase();
+  value = value.replace(/\.PDF$/, "").trim();
+  value = value.replace(COPY_SUFFIX, "").trim();
+  value = value.replace(INVOICE_PREFIX, "").trim();
+
+  const exact = value.replace(SEPARATORS, "");
+  const baseMatch = value.match(BASE_WITH_SUFFIX);
+  const base = baseMatch ? baseMatch[1] : null;
+  const digits = exact.replace(/\D/g, "") || null;
+  const unpadded = (base ?? digits)?.replace(/^0+(?=\d)/, "") ?? null;
+
+  return [exact, base, digits, unpadded];
+}
+
+/**
+ * Normalize an invoice number to the value deliveries are assigned on: the
+ * prefix-free number, without the trailing -N of an IV-365-4 style name.
+ * "Invoice # 001" → "001", "INV-2041" → "2041", "IV-365-4" → "365".
  */
 export function normalizeInvoiceNumber(raw: string): string {
-  let normalized = String(raw).trim().toUpperCase();
+  const [exact, base] = invoiceMatchKeys(raw);
+  return base ?? exact;
+}
 
-  // Strip .pdf extension if present
-  normalized = normalized.replace(/\.PDF$/i, "");
+/**
+ * Index files by every match key. Each tier is registered for all files before
+ * the next, so an exact key is never shadowed by another file's looser one.
+ *
+ * @param maxTier Highest key tier to use (see invoiceMatchKeys).
+ */
+export function buildInvoiceLookup(
+  files: { filename: string; invoiceNumber: string }[],
+  maxTier = 3
+): Map<string, string> {
+  const lookup = new Map<string, string>();
+  const keyed = files.map((f) => ({ filename: f.filename, keys: invoiceMatchKeys(f.invoiceNumber) }));
 
-  // Handle IV-NNN-N format: extract the middle number only
-  const ivMatch = normalized.match(/^IV[- ](\d+)[- ]\d+$/i);
-  if (ivMatch) {
-    return ivMatch[1];
+  for (let tier = 0; tier <= maxTier; tier++) {
+    for (const { filename, keys } of keyed) {
+      const key = keys[tier];
+      if (key && !lookup.has(key)) lookup.set(key, filename);
+    }
   }
+  return lookup;
+}
 
-  // Remove common prefixes: "INVOICE #", "INVOICE#", "INV-", "INV ", "INVOICE "
-  normalized = normalized
-    .replace(/^INVOICE\s*#\s*/i, "")
-    .replace(/^INVOICE\s+/i, "")
-    .replace(/^INV[\s\-\.#]*/i, "");
-
-  // Remove remaining spaces and hyphens for comparison
-  normalized = normalized.replace(/[\s\-]/g, "");
-
-  return normalized;
+/** The filename a sheet's invoice number resolves to, trying its keys strongest first. */
+export function matchInvoiceFile(
+  lookup: Map<string, string>,
+  invoiceNumber: string,
+  maxTier = 3
+): string | undefined {
+  const keys = invoiceMatchKeys(invoiceNumber);
+  for (let tier = 0; tier <= maxTier; tier++) {
+    const key = keys[tier];
+    const hit = key ? lookup.get(key) : undefined;
+    if (hit) return hit;
+  }
+  return undefined;
 }
 
 // ─── Collection Type ──────────────────────────────────────────────────────
@@ -421,17 +501,20 @@ export async function parseTripSheet(
         customerName: columnMap.customerName !== undefined
           ? row[columnMap.customerName]?.trim() || ""
           : "",
+        // "0" / "-" in either cell means there is none: a "0" COLLECTNO is a
+        // plain delivery, and a "0" INVOICENO beside a COLLECTNO is an ad hoc
+        // collection not credited against any invoice.
         invoiceNumber: columnMap.invoiceNumber !== undefined
-          ? String(row[columnMap.invoiceNumber] ?? "").trim()
+          ? cellValue(row[columnMap.invoiceNumber])
           : "",
         collectionNo: columnMap.collectionNo !== undefined
-          ? String(row[columnMap.collectionNo] ?? "").trim()
+          ? cellValue(row[columnMap.collectionNo])
           : "",
         collectionType: columnMap.collectionType !== undefined
           ? String(row[columnMap.collectionType] ?? "").trim()
           : "",
         originalInvoiceNo: columnMap.originalInvoiceNo !== undefined
-          ? String(row[columnMap.originalInvoiceNo] ?? "").trim()
+          ? cellValue(row[columnMap.originalInvoiceNo])
           : "",
         collectQty: columnMap.collectQty !== undefined
           ? parseInt(row[columnMap.collectQty]) || null
@@ -470,17 +553,8 @@ export async function parseTripSheet(
 
     const collectionLookup = buildCollectionLookup(collectionFolder.documents);
 
-    // Build invoice lookup: normalized number → filename
-    const invoiceLookup = new Map<string, string>();
-    for (const inv of invoiceFiles) {
-      const normalized = normalizeInvoiceNumber(inv.invoiceNumber);
-      invoiceLookup.set(normalized, inv.filename);
-      // Also try just the numeric part
-      const numericOnly = normalized.replace(/\D/g, "");
-      if (numericOnly) {
-        invoiceLookup.set(numericOnly, inv.filename);
-      }
-    }
+    // Invoice lookup: every match key → filename (see invoiceMatchKeys)
+    const invoiceLookup = buildInvoiceLookup(invoiceFiles);
 
     // Build driver lookup by name
     const driverByName = new Map<string, { id: string; name: string }>();
@@ -606,10 +680,7 @@ export async function parseTripSheet(
         let matchedFile: string | undefined;
 
         if (row.invoiceNumber) {
-          const normalizedInv = normalizeInvoiceNumber(row.invoiceNumber);
-          const numericOnly = normalizedInv.replace(/\D/g, "");
-          matchedFile =
-            invoiceLookup.get(normalizedInv) || invoiceLookup.get(numericOnly);
+          matchedFile = matchInvoiceFile(invoiceLookup, row.invoiceNumber);
 
           if (matchedFile) {
             totalMatched++;
@@ -794,19 +865,20 @@ async function detectAlreadySignedInvoices(
     }
   }
 
-  // Source 2: Check filesystem signed/ folder
-  const normalizedInput = new Map(
-    invoiceNumbers.map((inv) => [normalizeInvoiceNumber(inv), inv])
-  );
+  // Source 2: Check filesystem signed/ folder. Exact and base keys only — the
+  // preview skips these invoices by default, so the digits-only fallbacks that
+  // are fine for finding a PDF are too loose for declaring one already signed.
+  const signedFiles = invoiceFiles.filter((f) => f.isSigned);
+  const signedLookup = buildInvoiceLookup(signedFiles, 1);
+  const signedByFilename = new Map(signedFiles.map((f) => [f.filename, f]));
 
-  for (const file of invoiceFiles) {
-    if (!file.isSigned) continue;
-    const normalized = normalizeInvoiceNumber(file.invoiceNumber);
-    const originalInv = normalizedInput.get(normalized);
-    if (originalInv && !seen.has(originalInv.toUpperCase())) {
-      seen.add(originalInv.toUpperCase());
+  for (const inv of invoiceNumbers) {
+    const filename = matchInvoiceFile(signedLookup, inv, 1);
+    const file = filename ? signedByFilename.get(filename) : undefined;
+    if (file && !seen.has(inv.toUpperCase())) {
+      seen.add(inv.toUpperCase());
       results.push({
-        invoiceNumber: originalInv,
+        invoiceNumber: inv,
         signedAt: file.signedAt || null,
         driverName: null,
         source: "filesystem",

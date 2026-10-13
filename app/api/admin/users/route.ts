@@ -8,6 +8,7 @@ import {
   setAdminActive,
 } from "@/lib/accounts";
 import { logAudit } from "@/lib/audit";
+import { getSession } from "@/lib/session";
 import { validatePassword, validateUsername } from "@/lib/credentials";
 import crypto from "crypto";
 
@@ -368,12 +369,14 @@ export const PATCH = withAuth(async (request: NextRequest) => {
     }
   }
 
-  // The credential row lives in the ADMIN's own scope.
+  // The credential row lives in the ADMIN's own scope. Changing your own
+  // password keeps this device signed in and signs out your other devices.
+  const keepSessionToken = isSelf ? (await getSession())?.sessionToken : undefined;
   const adminResult = await updateAdminAccount(
     target.tenantId,
     target.email,
     { name, email: newEmail, username, password },
-    { keepSession: isSelf }
+    { keepSessionToken }
   );
   if (!adminResult.success) {
     return NextResponse.json({ error: adminResult.error }, { status: 400 });

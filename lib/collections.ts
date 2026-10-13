@@ -126,28 +126,47 @@ export function assertCollectionsFolderIsSibling(
 // ─── Collection number normalisation ──────────────────────────────────────
 
 /**
- * Normalise a collection number for filename matching.
- *
- * Mirrors normalizeInvoiceNumber in lib/trip-parser.ts: same strip-prefix,
- * strip-separator, keep-leading-zeros rules, with the prefixes an office
- * actually writes on collection paperwork ("COL-", "COLL ", "CR#", "UPL-").
- * Matching is filename-based, so both sides go through this before comparison.
+ * Prefixes an office writes in front of a collection number, on the sheet or
+ * in the document's filename: Collection # 001, Col 001, COLL-001, CO-001,
+ * CO 001, C001, CR-001, UPL-001. Only stripped when digits follow, so a
+ * collection number that merely starts with these letters survives.
  */
+const COLLECTION_PREFIX =
+  /^(?:COLLECTION|COLLECT|COLL|COL|CO|CR|C|UPLIFT|UPL)\s*(?:NO\.?|NUMBER|NUM\.?)?\s*[#:]?[\s\-_.#:]*(?=\d)/;
+
+/** Marks a duplicated file rather than a different collection: "C001 (1)", "C001 copy". */
+const COPY_SUFFIX = /(?:\s*\(\d+\)|[\s_\-]*COPY(?:\s*\d+)?)$/;
+
+/**
+ * The keys a collection number is matched on, strongest first. Same scheme as
+ * invoiceMatchKeys in lib/trip-parser.ts, run on both the COLLECTNO cell and
+ * the document's filename stem:
+ *
+ *   0. exact     — prefix and separators removed   CO-001 → 001, C001A → 001A
+ *   1. digits    — every non-digit removed         C001A  → 001
+ *   2. unpadded  — leading zeros dropped           CO-001 → 1  (numeric only)
+ *
+ * So Col 001, 001, C001, CO-001 and CO 001 all find one another, and a sheet
+ * that writes 1 still finds C001.pdf.
+ */
+export function collectionMatchKeys(raw: string): [string, string | null, string | null] {
+  let value = String(raw ?? "").trim().toUpperCase();
+  value = value.replace(/\.PDF$/, "").trim();
+  value = value.replace(COPY_SUFFIX, "").trim();
+  value = value.replace(COLLECTION_PREFIX, "").trim();
+
+  const exact = value.replace(/[\s\-_./]/g, "");
+  const digits = exact.replace(/\D/g, "") || null;
+  // Only a purely numeric number is unpadded: C001A must not answer to "1",
+  // which belongs to C001.
+  const unpadded = /^\d+$/.test(exact) ? exact.replace(/^0+(?=\d)/, "") : null;
+
+  return [exact, digits, unpadded];
+}
+
+/** Normalise a collection number for filename matching (its exact key). */
 export function normalizeCollectionNumber(raw: string): string {
-  let normalized = String(raw ?? "").trim().toUpperCase();
-
-  normalized = normalized.replace(/\.PDF$/i, "");
-
-  normalized = normalized
-    .replace(/^COLLECTION\s*#\s*/i, "")
-    .replace(/^COLLECTION\s+/i, "")
-    .replace(/^COLL?[\s\-.#]*/i, "")
-    .replace(/^CR[\s\-.#]+/i, "")
-    .replace(/^UPL[\s\-.#]*/i, "");
-
-  normalized = normalized.replace(/[\s\-]/g, "");
-
-  return normalized;
+  return collectionMatchKeys(raw)[0];
 }
 
 /** Characters Windows refuses in a filename, plus the path separators. */
@@ -357,19 +376,21 @@ export async function listSignedCollectionDocuments(
  * Build the collection-number → document lookup used when a trip sheet is
  * parsed.
  *
- * Same two-key scheme as the invoice lookup in lib/trip-parser.ts: the
- * normalised number and its digits-only form, so "CR-00412" on the sheet still
- * finds "412.pdf" in the folder.
+ * Every key tier (collectionMatchKeys) is registered for all documents before
+ * the next, so an exact name is never shadowed by another document's looser
+ * key: "CR-00412" on the sheet still finds "412.pdf", but C001 and C001A each
+ * keep their own document.
  */
 export function buildCollectionLookup(
   documents: CollectionDocument[]
 ): Map<string, CollectionDocument> {
   const lookup = new Map<string, CollectionDocument>();
-  for (const doc of documents) {
-    const normalized = normalizeCollectionNumber(doc.collectionNo);
-    if (normalized && !lookup.has(normalized)) lookup.set(normalized, doc);
-    const numericOnly = normalized.replace(/\D/g, "");
-    if (numericOnly && !lookup.has(numericOnly)) lookup.set(numericOnly, doc);
+  const keyed = documents.map((doc) => ({ doc, keys: collectionMatchKeys(doc.collectionNo) }));
+  for (let tier = 0; tier < 3; tier++) {
+    for (const { doc, keys } of keyed) {
+      const key = keys[tier];
+      if (key && !lookup.has(key)) lookup.set(key, doc);
+    }
   }
   return lookup;
 }
@@ -412,8 +433,11 @@ export function matchCollectionDocument(
   lookup: Map<string, CollectionDocument>,
   collectionNo: string
 ): CollectionDocument | undefined {
-  const normalized = normalizeCollectionNumber(collectionNo);
-  return lookup.get(normalized) || lookup.get(normalized.replace(/\D/g, ""));
+  for (const key of collectionMatchKeys(collectionNo)) {
+    const hit = key ? lookup.get(key) : undefined;
+    if (hit) return hit;
+  }
+  return undefined;
 }
 
 // ─── Reading a document ───────────────────────────────────────────────────

@@ -5,7 +5,8 @@ import { getAdminCount } from "@/lib/accounts";
 /**
  * GET /api/auth/session
  * Returns the current session info, or null if not logged in.
- * Validates session token against DB to enforce single-session per user.
+ * Validates session token against DB, so a revoked or evicted session (driver:
+ * one device; admin: MAX_ADMIN_SESSIONS devices) is signed out.
  */
 export async function GET() {
   try {

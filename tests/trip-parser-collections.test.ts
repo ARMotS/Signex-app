@@ -250,6 +250,123 @@ describe("fixture: a row carrying both an invoice and a collection", () => {
   });
 });
 
+describe('"0" and "-" mean there is none', () => {
+  it.each(["0", "-"])("a COLLECTNO of %j is a plain delivery", async (blank) => {
+    const result = await parse([
+      HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Acme Hardware", "INV-2041", blank, "", "3"],
+    ]);
+
+    const stops = result.driverResults[0].stops;
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toMatchObject({ invoiceNumber: "INV-2041", invoiceFile: "INV-2041.pdf" });
+    expect(stops[0].collections).toEqual([]);
+    expect(result.totalCollections).toBe(0);
+  });
+
+  it.each(["0", "-"])("an INVOICENO of %j beside a COLLECTNO is an ad hoc collection", async (blank) => {
+    const result = await parse([
+      HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Delta Trading", blank, "COL-119", "", ""],
+    ]);
+
+    const stops = result.driverResults[0].stops;
+    expect(stops).toHaveLength(1);
+    expect(stops[0].invoiceNumber).toBe("");
+    expect(stops[0].collections![0]).toMatchObject({
+      collectionNo: "COL-119",
+      originalInvoiceNo: null,
+    });
+    expect(result.missingInvoices).toEqual([]);
+  });
+
+  it("reads a numeric 0 in an Excel COLLECTIONNO column as no collection", async () => {
+    // The shape of a real depot sheet: Excel stores the 0 as a number, the
+    // header is spelled COLLECTIONNO, and the invoices are IV-style PDFs.
+    invoiceFiles = [invoice("IV-365-4"), invoice("IV-633291")];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet([
+        ["DATE", "DRIVER", "REGNO", "CUSTOMER", "INVOICENO", "COLLECTIONNO", "NOP"],
+        ["2026-10-13", "John Smith", "LT70HCGP", "Newlands Auto Spares", "IV-365-4", 0, 1],
+        ["2026-10-13", "John Smith", "LT70HCGP", "Bennbliss Auto", 633291, "-", 1],
+      ]),
+      "Trip Sheet"
+    );
+    const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+
+    const result = await parseTripSheet(TENANT, buffer, "trip.xlsx");
+
+    expect(result.totalCollections).toBe(0);
+    expect(result.driverResults[0].stops.map((s) => [s.invoiceNumber, s.invoiceFile])).toEqual([
+      ["IV-365-4", "IV-365-4.pdf"],
+      ["633291", "IV-633291.pdf"],
+    ]);
+    expect(result.missingInvoices).toEqual([]);
+  });
+
+  it.each(["COLLECTIONNO", "COLLECTION NO", "COLLECTION"])(
+    "parses the PETRUS sheet as three deliveries (header %s)",
+    async (collectionHeader) => {
+      // Cell for cell the sheet the office reported: numeric invoice numbers,
+      // a numeric 0 under the collection column, PDFs named IV-<number>.pdf.
+      invoiceFiles = [invoice("IV-632981"), invoice("IV-633689"), invoice("IV-633690")];
+      drivers = [{ id: "driver-p", name: "PETRUS (JHB)" }];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.aoa_to_sheet([
+          ["Date", "Driver", "REG No", "CUSTOMER", "INVOICE NO", collectionHeader, "NOP"],
+          ["13/10/2026", "PETRUS (JHB)", "MN59NDGP", "NEWLANDS AUTO SPARES", 632981, 0, 1],
+          ["13/10/2026", "PETRUS (JHB)", "MN59NDGP", "BENNBLISS AUTO", 633689, 0, 1],
+          ["13/10/2026", "PETRUS (JHB)", "MN59NDGP", "AUTO PRIME 5 SPARES", 633690, 0, 1],
+        ]),
+        "Sheet1"
+      );
+      const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+
+      const result = await parseTripSheet(TENANT, buffer, "petrus.xlsx");
+
+      expect(result.totalCollections).toBe(0);
+      expect(result.matchedInvoices).toBe(3);
+      expect(result.driverResults[0].stops.map((s) => s.invoiceFile)).toEqual([
+        "IV-632981.pdf",
+        "IV-633689.pdf",
+        "IV-633690.pdf",
+      ]);
+      expect(result.missingInvoices).toEqual([]);
+    }
+  );
+
+  it("drops a row where both are placeholders", async () => {
+    const result = await parse([
+      HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Ghost Supplies", "0", "-", "", "2"],
+    ]);
+
+    expect(result.totalRows).toBe(0);
+    expect(result.driverResults).toEqual([]);
+  });
+});
+
+describe("matching INVOICENO to an IV-style PDF", () => {
+  it.each(["IV-365-4", "INV-365-4", "INVOICE 365", "365"])("%s finds IV-365-4.pdf", async (cell) => {
+    invoiceFiles = [invoice("IV-365-4"), invoice("IV-633291")];
+    const result = await parse([
+      LEGACY_HEADERS,
+      ["2026-08-24", "John Smith", "CA 123-456", "Acme Hardware", cell, "3"],
+      ["2026-08-24", "John Smith", "CA 123-456", "Beta Supplies", "633291", "1"],
+    ]);
+
+    expect(result.driverResults[0].stops.map((s) => s.invoiceFile)).toEqual([
+      "IV-365-4.pdf",
+      "IV-633291.pdf",
+    ]);
+    expect(result.missingInvoices).toEqual([]);
+  });
+});
+
 // ─── Grouping ─────────────────────────────────────────────────────────────
 
 describe("grouping collections onto a customer's stop", () => {
@@ -369,6 +486,63 @@ describe("matching a COLLECTNO to a document", () => {
     expect(result.missingInvoices).toEqual([]);
     const collection = result.driverResults[0].stops[0].collections![0];
     expect(collection.sourceFilePath).toBeNull();
+  });
+
+  const FORMATS = ["Col 001", "001", "C001", "CO-001", "CO 001"];
+
+  it.each(FORMATS.flatMap((sheet) => FORMATS.map((file) => [sheet, file])))(
+    "COLLECTNO %s finds the document %s.pdf",
+    async (sheet, file) => {
+      collectionDocs = [doc(file), doc("C002")];
+      const result = await parse([
+        HEADERS,
+        ["2026-10-13", "John Smith", "CA 123-456", "Acme Hardware", "INV-2041", sheet, "", "3"],
+      ]);
+
+      expect(result.matchedCollections).toBe(1);
+      expect(result.driverResults[0].stops[0].collections![0].sourceFilePath).toBe(`${file}.pdf`);
+    }
+  );
+
+  it("finds C001.pdf from an unpadded 1, and keeps C001 and C001A apart", async () => {
+    collectionDocs = [doc("C001A"), doc("C001")];
+    const result = await parse([
+      HEADERS,
+      ["2026-10-13", "John Smith", "CA 123-456", "Acme Hardware", "", "1", "", ""],
+      ["2026-10-13", "John Smith", "CA 123-456", "Beta Supplies", "", "C001A", "", ""],
+    ]);
+
+    // C001A is listed first on purpose: a looser key must not let it answer
+    // for "1", which is C001.
+    const files = result.driverResults[0].stops.map((s) => s.collections![0].sourceFilePath);
+    expect(files).toEqual(["C001.pdf", "C001A.pdf"]);
+  });
+
+  it.each(["0", "O", "o", "-", "–"])(
+    "an INVOICENO with a COLLECTNO of %j is a delivery, with no collection to match",
+    async (blank) => {
+      const result = await parse([
+        HEADERS,
+        ["2026-10-13", "John Smith", "CA 123-456", "Acme Hardware", "INV-2041", blank, "", "3"],
+      ]);
+
+      expect(result.totalCollections).toBe(0);
+      expect(result.driverResults[0].stops[0]).toMatchObject({
+        invoiceNumber: "INV-2041",
+        invoiceFile: "INV-2041.pdf",
+      });
+    }
+  );
+
+  it("a blank INVOICENO beside a COLLECTNO is an ad hoc collection, matched to its document", async () => {
+    collectionDocs = [doc("CO-001")];
+    const result = await parse([
+      HEADERS,
+      ["2026-10-13", "John Smith", "CA 123-456", "Delta Trading", "", "Col 001", "", ""],
+    ]);
+
+    const collection = result.driverResults[0].stops[0].collections![0];
+    expect(collection).toMatchObject({ originalInvoiceNo: null, sourceFilePath: "CO-001.pdf" });
   });
 
   it("matches loosely, the way invoice numbers do", async () => {
