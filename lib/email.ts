@@ -34,6 +34,8 @@ export interface DeliveryConfirmationParams {
   invoiceNumber: string;
   driverName: string;
   deliveryAddress: string;
+  /** The name the customer typed when signing; blank in the email if absent. */
+  signedByName?: string;
   signedAt: Date;
   signedPDFUrl: string;
   companyName: string;

@@ -147,7 +147,7 @@ export default function AdminLayout({
         {/* Logo — deliberately NOT a link. Inside the app the way out is Log out,
             which ends the session; a logo leading to the public home page would
             leave a signed-in session behind it. */}
-        <div className="flex items-center gap-2 px-5 py-5 border-b border-white/5">
+        <div className="flex items-center gap-2 px-5 py-5 border-b border-white/5 shrink-0">
           <div className="w-7 h-7 bg-ink-green/10 rounded flex items-center justify-center">
             <svg
               width="14"
@@ -170,6 +170,10 @@ export default function AdminLayout({
           </span>
         </div>
 
+        {/* Nav + scope switcher scroll together; the logo and the account
+            footer stay pinned, so Log out is reachable on short windows
+            (e.g. with the browser's bookmarks bar showing). */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain flex flex-col">
         {/* Navigation */}
         <nav className="flex-1 px-3 py-4 space-y-1">
           {navItems.map((item) => {
@@ -223,9 +227,10 @@ export default function AdminLayout({
 
         {/* Scope switcher — SUPER_ADMIN only, renders nothing otherwise */}
         <ScopeSwitcher role={role} />
+        </div>
 
         {/* Footer */}
-        <div className="px-5 py-4 border-t border-white/5">
+        <div className="px-5 py-4 border-t border-white/5 shrink-0">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded bg-white/10 flex items-center justify-center">
               <span className="text-xs font-mono text-sidebar-text">

@@ -110,7 +110,10 @@ export default function ScopeSwitcher({ role }: { role: string | null }) {
       </button>
 
       {open && (
-        <div className="mt-2 space-y-1 max-h-72 overflow-y-auto">
+        <div
+          ref={(el) => el?.scrollIntoView({ block: "nearest" })}
+          className="mt-2 space-y-1 max-h-[min(18rem,50dvh)] overflow-y-auto overscroll-contain"
+        >
           {scopes.map((scope) => {
             const owner = scope.admins[0];
             return (
