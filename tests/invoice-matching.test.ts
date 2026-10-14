@@ -37,6 +37,26 @@ describe("matching a sheet's invoice number to a PDF", () => {
     }
   );
 
+  // The depot names PDFs IV-<number>-<year> while the sheet writes the bare
+  // number. Before the year was read as a suffix, every one of these missed.
+  it.each(["1010", "IV-1010", "INV 1010", "IV-1010-2026"])(
+    "%s finds IV-1010-2026.pdf",
+    (sheet) => {
+      const lookup = buildInvoiceLookup(
+        files("IV-1009-2026.pdf", "IV-1010-2026.pdf", "IV-1011-2026.pdf", "IV-701-2026.pdf")
+      );
+      expect(matchInvoiceFile(lookup, sheet)).toBe("IV-1010-2026.pdf");
+    }
+  );
+
+  it("reads only a plausible year as a 4-digit suffix", () => {
+    expect(normalizeInvoiceNumber("IV-1010-2026")).toBe("1010");
+    expect(normalizeInvoiceNumber("IV-1010-1999")).toBe("1010");
+    // Not a year: still part of the invoice number.
+    expect(normalizeInvoiceNumber("IV-1010-5678")).toBe("10105678");
+    expect(matchInvoiceFile(buildInvoiceLookup(files("IV-1010-5678.pdf")), "1010")).toBeUndefined();
+  });
+
   it("ignores the trailing -N for assignment", () => {
     expect(normalizeInvoiceNumber("IV-365-4")).toBe("365");
     expect(normalizeInvoiceNumber("INV-365-4.pdf")).toBe("365");
