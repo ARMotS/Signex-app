@@ -285,8 +285,12 @@ const INVOICE_PREFIX =
 /** Marks a duplicated file rather than a different invoice: "IV-365-4 (1)", "INV-365 copy". */
 const COPY_SUFFIX = /(?:\s*\(\d+\)|[\s_\-]*COPY(?:\s*\d+)?)$/;
 
-/** NNN followed by a short trailing number: the 365 in IV-365-4. */
-const BASE_WITH_SUFFIX = /^(\d+)[\s\-_./]+\d{1,3}$/;
+/**
+ * NNN followed by a short trailing number — the 365 in IV-365-4 — or by a
+ * year: the 1010 in IV-1010-2026. Only a plausible year (19xx/20xx) counts as
+ * a 4-digit suffix; any other 4-digit tail stays part of the number.
+ */
+const BASE_WITH_SUFFIX = /^(\d+)[\s\-_./]+(?:\d{1,3}|(?:19|20)\d{2})$/;
 
 const SEPARATORS = /[\s\-_./]/g;
 
@@ -296,7 +300,7 @@ const SEPARATORS = /[\s\-_./]/g;
  * have to agree on one key:
  *
  *   0. exact     — prefix and separators removed      IV-365-4 → 3654
- *   1. base      — trailing -N dropped                IV-365-4 → 365
+ *   1. base      — trailing -N or -YYYY dropped       IV-365-4 → 365, IV-1010-2026 → 1010
  *   2. digits    — every non-digit removed            ABC/365  → 365
  *   3. unpadded  — leading zeros dropped              IV-000365 → 365
  *
