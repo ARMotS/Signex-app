@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTripSheetsForDriver, updateStopStatus } from "@/lib/trip-data";
+import { getTripSheetsForDriver, updateStopStatus, normalizeSignerName } from "@/lib/trip-data";
 import type { StopStatus } from "@/lib/trip-data";
 import { scheduleDeliveryConfirmation } from "@/lib/delivery-notify";
 import { getScope } from "@/lib/tenant";
@@ -52,7 +52,7 @@ export const GET = withAuth(async (request: NextRequest) => {
 export const PUT = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
 
-  const { stopId, status, signatureData } = await request.json();
+  const { stopId, status, signatureData, signedByName } = await request.json();
 
   if (!stopId || !status) {
     return NextResponse.json(
@@ -86,7 +86,13 @@ export const PUT = withAuth(async (request: NextRequest) => {
     }
   }
 
-  const result = await updateStopStatus(ctx.tenantId, stopId, status, signatureData);
+  const result = await updateStopStatus(
+    ctx.tenantId,
+    stopId,
+    status,
+    signatureData,
+    normalizeSignerName(signedByName)
+  );
   if (!result.success) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }

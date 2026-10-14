@@ -165,6 +165,7 @@ export async function sendStopDeliveryConfirmation(
       invoiceNumber: stop.invoiceNumber,
       driverName,
       deliveryAddress: stop.address,
+      signedByName: stop.signedByName ?? undefined,
       signedAt: stop.signedAt ?? new Date(),
       signedPDFUrl: "",
       companyName: process.env.COMPANY_NAME ?? "Signex",
@@ -276,7 +277,7 @@ async function resolveDriverName(
  * invoice folder. Best-effort: a confirmation without the attachment is far
  * better than no confirmation.
  */
-async function readSignedPdf(
+export async function readSignedPdf(
   tenantId: string,
   invoiceFile: string | null
 ): Promise<{ filename: string; content: Buffer } | undefined> {

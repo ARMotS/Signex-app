@@ -24,6 +24,10 @@ export default function SignInvoicePage() {
   // drawing code would have drifted apart.
   const padRef = useRef<SignaturePadHandle>(null);
   const [hasSignature, setHasSignature] = useState(false);
+  // Typed by the customer beside their signature; stamped on the signed PDF
+  // and shown as "Delivered to" in the confirmation email.
+  const [signedByName, setSignedByName] = useState("");
+  const canConfirm = hasSignature && signedByName.trim().length > 0;
   const [status, setStatus] = useState<"idle" | "loading" | "saving" | "done" | "error">("loading");
   const [stop, setStop] = useState<StopData | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
@@ -75,7 +79,7 @@ export default function SignInvoicePage() {
   }, [fetchStopData]);
 
   const handleConfirm = async () => {
-    if (!stop || !hasSignature) return;
+    if (!stop || !canConfirm) return;
 
     const signatureImage = padRef.current?.toDataURL();
     if (!signatureImage) return;
@@ -94,7 +98,7 @@ export default function SignInvoicePage() {
             body: JSON.stringify({
               signatureImage,
               stopId: stop.id,
-              signerName: stop.customerName !== "Unknown" ? stop.customerName : undefined,
+              signedByName: signedByName.trim(),
             }),
           }
         );
@@ -116,6 +120,7 @@ export default function SignInvoicePage() {
           body: JSON.stringify({
             stopId: stop.id,
             status: "SIGNED",
+            signedByName: signedByName.trim(),
           }),
         });
 
@@ -268,11 +273,30 @@ export default function SignInvoicePage() {
 
       {/* Signature area — sticky at bottom */}
       <div className="bg-ink-card border-t border-ink-border p-4">
+        <label
+          htmlFor="signed-by-name"
+          className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5"
+        >
+          Your name <span className="text-ink-red">*</span>
+        </label>
+        <input
+          id="signed-by-name"
+          type="text"
+          value={signedByName}
+          onChange={(e) => setSignedByName(e.target.value)}
+          maxLength={80}
+          autoComplete="name"
+          autoCapitalize="words"
+          enterKeyHint="done"
+          className="w-full mb-3 px-3 py-2 bg-ink-card border border-ink-border rounded font-mono text-sm focus:border-ink-green outline-none"
+          placeholder="Name of the person signing"
+        />
+
         <SignaturePad ref={padRef} onChange={setHasSignature} />
 
         <button
           onClick={handleConfirm}
-          disabled={!hasSignature}
+          disabled={!canConfirm || status === "saving"}
           className="w-full mt-3 py-2.5 bg-ink-green text-white text-sm font-mono font-medium rounded disabled:opacity-40 disabled:cursor-not-allowed hover:bg-ink-green-hover active:scale-[0.98] transition-all touch-target"
         >
           {status === "saving" ? "Saving…" : "Confirm & Save"}

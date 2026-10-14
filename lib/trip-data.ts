@@ -91,7 +91,15 @@ export interface ArchivedStop {
   address: string;
   nop: number;
   signedAt: string | null;
+  /** Absent on snapshots taken before the signer's name was captured. */
+  signedByName?: string | null;
+  /** The signed PDF's filename, for resending. Absent on older snapshots. */
+  invoiceFile?: string | null;
   emailStatus: string;
+  /** Resends from the archive that went out — not part of the frozen JSON;
+   *  joined in from ArchivedEmailResend by getCompletedTripSheets. */
+  resends?: number;
+  lastResentAt?: string | null;
 }
 
 /**
@@ -446,6 +454,19 @@ export async function getStopsForDriver(
   return trip?.stops || [];
 }
 
+/** Longest signer name kept; the PDF stamp has one line for it. */
+export const SIGNER_NAME_MAX = 80;
+
+/**
+ * Tidy the name a customer typed beside their signature: trimmed, inner
+ * whitespace collapsed, capped. Blank reads as "not given" (null).
+ */
+export function normalizeSignerName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const name = value.replace(/\s+/g, " ").trim().slice(0, SIGNER_NAME_MAX);
+  return name || null;
+}
+
 /**
  * Update a stop's status. A stop id from another scope is "not found".
  */
@@ -453,7 +474,8 @@ export async function updateStopStatus(
   tenantId: string,
   stopId: string,
   status: StopStatus,
-  signatureData?: string
+  signatureData?: string,
+  signedByName?: string | null
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const db = scopedPrisma(tenantId);
@@ -470,6 +492,7 @@ export async function updateStopStatus(
         status: status as PrismaStopStatus,
         ...(status === "SIGNED" && { signedAt: new Date() }),
         ...(signatureData && { signatureData }),
+        ...(status === "SIGNED" && signedByName && { signedByName }),
       },
     });
 
@@ -636,6 +659,8 @@ export async function completeTripSheet(
           address: s.address,
           nop: s.nop,
           signedAt: s.signedAt ? s.signedAt.toISOString() : null,
+          signedByName: s.signedByName,
+          invoiceFile: s.invoiceFile,
           emailStatus: s.emailStatus,
         })),
         // Frozen for the same reason the stops are, and carrying both file
@@ -783,6 +808,24 @@ export async function getCompletedTripSheets(
     take: Math.min(Math.max(limit, 1), 500),
   });
 
+  // Resends that went out, per archived stop. Kept beside the snapshot rather
+  // than written into it: the archive is frozen.
+  const resends = rows.length
+    ? await db.archivedEmailResend.findMany({
+        where: { completedTripSheetId: { in: rows.map((r) => r.id) }, sentAt: { not: null } },
+        select: { completedTripSheetId: true, stopNumber: true, sentAt: true },
+      })
+    : [];
+  const resendsByStop = new Map<string, { count: number; last: Date }>();
+  for (const r of resends) {
+    const key = `${r.completedTripSheetId}:${r.stopNumber}`;
+    const prev = resendsByStop.get(key);
+    resendsByStop.set(key, {
+      count: (prev?.count ?? 0) + 1,
+      last: prev && prev.last > r.sentAt! ? prev.last : r.sentAt!,
+    });
+  }
+
   return rows.map((r) => ({
     id: r.id,
     tripSheetId: r.tripSheetId,
@@ -801,7 +844,16 @@ export async function getCompletedTripSheets(
     collectedCollections: r.collectedCollections,
     // Written by completeTripSheet above and never updated, so the shape is
     // ours — but it is still JSON coming back out of the database.
-    stops: Array.isArray(r.stops) ? (r.stops as unknown as ArchivedStop[]) : [],
+    stops: (Array.isArray(r.stops) ? (r.stops as unknown as ArchivedStop[]) : []).map(
+      (s) => {
+        const sent = resendsByStop.get(`${r.id}:${s.stopNumber}`);
+        return {
+          ...s,
+          resends: sent?.count ?? 0,
+          lastResentAt: sent ? sent.last.toISOString() : null,
+        };
+      }
+    ),
     // Null on every trip archived before collections existed, which reads
     // correctly as "this trip had none".
     collections: Array.isArray(r.collections)

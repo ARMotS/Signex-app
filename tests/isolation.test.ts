@@ -2340,6 +2340,152 @@ suite("cross-ADMIN isolation", () => {
       const res = await GET(req("/api/dashboard/completions"));
       expect(res.status).toBe(403);
     });
+
+    // ── Resending from the archive ──────────────────────────────────────
+    describe("resending a confirmation from the archive", () => {
+      const archivedDelivery = (fx: typeof f.a) =>
+        db().completedTripSheet.create({
+          data: {
+            tripSheetId: `resend-${fx.tenantId}`,
+            driverId: fx.driver.id,
+            driverName: fx.driver.name,
+            sourceFilename: "resend.csv",
+            uploadedAt: new Date(),
+            uploadedBy: fx.admin.id,
+            totalStops: 1,
+            signedStops: 1,
+            stops: [
+              {
+                stopNumber: 1,
+                invoiceNumber: "INV-RESEND",
+                customerName: "Shared Name Traders",
+                address: "1 Resend Rd",
+                nop: 1,
+                signedAt: new Date().toISOString(),
+                emailStatus: "FAILED",
+              },
+            ],
+            tenantId: fx.tenantId,
+          },
+        });
+
+      it("another ADMIN's archive is a 404, and their customer is never emailed", async () => {
+        const { POST } = await import("@/app/api/trip-sheet/completed/[id]/resend/route");
+        const rowB = await archivedDelivery(f.b);
+        const contactB = await db().contact.create({
+          data: {
+            companyName: "Shared Name Traders",
+            email: "b-customer@example.com",
+            tenantId: f.b.tenantId,
+          },
+        });
+
+        useSession(adminSession(f.a));
+        const res = await POST(
+          req(`/api/trip-sheet/completed/${rowB.id}/resend`, {
+            method: "POST",
+            body: { stopNumber: 1 },
+          }),
+          params({ id: rowB.id })
+        );
+        expect(res.status).toBe(404);
+        expect(sentEmails).toHaveLength(0);
+        expect(await db().archivedEmailResend.count({ where: { completedTripSheetId: rowB.id } })).toBe(0);
+
+        await db().completedTripSheet.delete({ where: { id: rowB.id } });
+        await db().contact.delete({ where: { id: contactB.id } });
+      });
+
+      it("resolves the recipient in the caller's own scope, and stops at three", async () => {
+        const { POST } = await import("@/app/api/trip-sheet/completed/[id]/resend/route");
+        const rowA = await archivedDelivery(f.a);
+        // The same company name in both scopes: only A's address may be used.
+        const contacts = await Promise.all([
+          db().contact.create({
+            data: { companyName: "Shared Name Traders", email: "a-customer@example.com", tenantId: f.a.tenantId },
+          }),
+          db().contact.create({
+            data: { companyName: "Shared Name Traders", email: "b-customer@example.com", tenantId: f.b.tenantId },
+          }),
+        ]);
+
+        useSession(adminSession(f.a));
+        const resend = () =>
+          POST(
+            req(`/api/trip-sheet/completed/${rowA.id}/resend`, {
+              method: "POST",
+              body: { stopNumber: 1 },
+            }),
+            params({ id: rowA.id })
+          );
+
+        for (let i = 1; i <= 3; i++) {
+          const res = await resend();
+          expect(res.status).toBe(200);
+          expect((await res.json()).used).toBe(i);
+        }
+        const fourth = await resend();
+        expect(fourth.status).toBe(429);
+
+        expect(sentEmails).toHaveLength(3);
+        expect(sentEmails.every((e) => e.to === "a-customer@example.com")).toBe(true);
+
+        // The database holds the line too, not just the route.
+        await expect(
+          db().archivedEmailResend.create({
+            data: {
+              completedTripSheetId: rowA.id,
+              stopNumber: 1,
+              attempt: 4,
+              recipient: "x@example.com",
+              tenantId: f.a.tenantId,
+            },
+          })
+        ).rejects.toThrow();
+
+        // Resends are reported back on A's archive, and the rows go with it.
+        const { GET } = await import("@/app/api/trip-sheet/completed/route");
+        const body = await (await GET(req("/api/trip-sheet/completed?range=all"))).json();
+        const sheet = body.completed.find((c: any) => c.id === rowA.id);
+        expect(sheet.stops[0].resends).toBe(3);
+
+        await db().completedTripSheet.delete({ where: { id: rowA.id } });
+        expect(await db().archivedEmailResend.count({ where: { completedTripSheetId: rowA.id } })).toBe(0);
+        await db().contact.deleteMany({ where: { id: { in: contacts.map((c) => c.id) } } });
+      });
+
+      it("a resend row cannot point at another scope's archive", async () => {
+        const rowB = await archivedDelivery(f.b);
+        await expect(
+          db().archivedEmailResend.create({
+            data: {
+              completedTripSheetId: rowB.id,
+              stopNumber: 1,
+              attempt: 1,
+              recipient: "x@example.com",
+              tenantId: f.a.tenantId,
+            },
+          })
+        ).rejects.toThrow();
+        await db().completedTripSheet.delete({ where: { id: rowB.id } });
+      });
+
+      it("is closed to DRIVER sessions", async () => {
+        const { POST } = await import("@/app/api/trip-sheet/completed/[id]/resend/route");
+        const rowA = await archivedDelivery(f.a);
+        useSession(driverSession(f.a));
+        const res = await POST(
+          req(`/api/trip-sheet/completed/${rowA.id}/resend`, {
+            method: "POST",
+            body: { stopNumber: 1 },
+          }),
+          params({ id: rowA.id })
+        );
+        expect(res.status).toBe(403);
+        expect(sentEmails).toHaveLength(0);
+        await db().completedTripSheet.delete({ where: { id: rowA.id } });
+      });
+    });
   });
 
   // ── Delivery confirmation email ──────────────────────────────────────

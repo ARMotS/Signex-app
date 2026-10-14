@@ -334,8 +334,16 @@ export async function embedSignatureOnPdf(
     color: rgb(0.4, 0.4, 0.4),
   });
 
-  const signedText = signerName
-    ? `Signed by ${signerName} · ${timestamp}`
+  // The name is typed by the customer, and the standard Helvetica font can
+  // only encode Latin-1: an emoji or another script would make drawText throw
+  // and fail a signature the customer has already given. Drop what it cannot
+  // draw — the full name is still stored on the stop and used in the email.
+  const stampName = signerName
+    ?.replace(/[^\x20-\x7E -ÿ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const signedText = stampName
+    ? `Signed by ${stampName} · ${timestamp}`
     : `Signed · ${timestamp}`;
 
   targetPage.drawText(signedText, {

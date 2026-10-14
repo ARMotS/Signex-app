@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { readInvoiceFile, saveSignedInvoice, embedSignatureOnPdf, getInvoiceFolderPath } from "@/lib/invoices";
 import { getOneDriveInvoiceSource, downloadSignedInvoiceByName } from "@/lib/microsoft-graph";
-import { updateStopStatus } from "@/lib/trip-data";
+import { updateStopStatus, normalizeSignerName } from "@/lib/trip-data";
 import { scheduleDeliveryConfirmation } from "@/lib/delivery-notify";
 import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
@@ -128,7 +128,12 @@ export const PUT = withAuth(async (
   const decodedFilename = decodeURIComponent(id);
 
   const body = await request.json();
-  const { signatureImage, stopId, signerName } = body;
+  const { signatureImage, stopId } = body;
+  // The name the customer typed beside their signature. `signerName` is what
+  // clients before the name field sent (the stop's company name): still
+  // stamped on the PDF, but never stored as the person who signed.
+  const signedByName = normalizeSignerName(body.signedByName);
+  const stampName = signedByName ?? normalizeSignerName(body.signerName) ?? undefined;
 
   if (!signatureImage) {
     return NextResponse.json(
@@ -189,7 +194,7 @@ export const PUT = withAuth(async (
       ctx.tenantId,
       originalPdf,
       signatureBytes,
-      signerName
+      stampName
     );
   } catch (err) {
     console.error("Failed to embed signature on PDF:", err);
@@ -215,7 +220,7 @@ export const PUT = withAuth(async (
   }
 
   if (stopId) {
-    await updateStopStatus(ctx.tenantId, stopId, "SIGNED");
+    await updateStopStatus(ctx.tenantId, stopId, "SIGNED", undefined, signedByName);
   }
 
   // Contact lookup / auto-create — within this scope only. A customer name that

@@ -139,7 +139,41 @@ interface ArchivedStop {
   nop: number;
   signedAt: string | null;
   emailStatus: string;
+  /** Resends from the archive that went out, out of ARCHIVE_RESEND_LIMIT. */
+  resends?: number;
+  lastResentAt?: string | null;
 }
+
+/** Mirrors MAX_ARCHIVE_RESENDS in lib/archive-resend.ts (the DB enforces it). */
+const ARCHIVE_RESEND_LIMIT = 3;
+
+/** Trip sheets shown per tab before "Show more", and how many each press adds. */
+const TRIPS_PAGE_SIZE = 10;
+
+/** Files per page in the trip sheet folder listing. */
+const CLOUD_PER_PAGE = 10;
+
+/**
+ * Signed deliveries on a live trip whose confirmation has not gone out.
+ * Collection-only stops (no invoice number) have no confirmation to send.
+ */
+function unsentEmails(stops: TripStop[]) {
+  const failed: TripStop[] = [];
+  const noEmail: TripStop[] = [];
+  const waiting: TripStop[] = [];
+  for (const s of stops) {
+    if (s.status !== "SIGNED" || !s.invoiceNumber) continue;
+    if (s.emailStatus === "SENT" || (!s.emailStatus && s.emailSentAt)) continue;
+    if (s.emailStatus === "FAILED") failed.push(s);
+    else if (s.emailStatus === "NO_EMAIL" || !s.contact?.email) noEmail.push(s);
+    else waiting.push(s);
+  }
+  return { failed, noEmail, waiting, total: failed.length + noEmail.length + waiting.length };
+}
+
+/** An archived delivery whose confirmation never went out and was not resent. */
+const archivedStopUnsent = (s: ArchivedStop) =>
+  !!s.signedAt && !!s.invoiceNumber && s.emailStatus !== "SENT" && !(s.resends ?? 0);
 
 interface CompletedTripSheet {
   id: string;
@@ -235,10 +269,28 @@ export default function TripSheetPage() {
   const [cloudImporting, setCloudImporting] = useState<string | null>(null);
   const [importSourceFile, setImportSourceFile] = useState<string | null>(null);
 
-  // Pagination state
-  const ITEMS_PER_PAGE = 20;
+  // Pagination state. The folder pages; the trip lists grow with "Show more",
+  // so the sheet a dispatcher already has open never moves to another page.
   const [cloudPage, setCloudPage] = useState(1);
-  const [tripPage, setTripPage] = useState(1);
+  const [showCloudFolder, setShowCloudFolder] = useState(true);
+  const [activeShown, setActiveShown] = useState(TRIPS_PAGE_SIZE);
+  const [completedShown, setCompletedShown] = useState(TRIPS_PAGE_SIZE);
+
+  // Filters on the trip lists. The driver filter is shared by both tabs, like
+  // the search box, so following one driver survives the switch to Completed.
+  const [driverFilter, setDriverFilter] = useState("");
+  const [activeStatusFilter, setActiveStatusFilter] = useState<
+    "all" | "in_progress" | "ready" | "unsent"
+  >("all");
+  const [completedStatusFilter, setCompletedStatusFilter] = useState<"all" | "unsent">("all");
+
+  /** Complete pressed on a sheet with unsent emails — waiting for the second click. */
+  const [pendingCompleteId, setPendingCompleteId] = useState<string | null>(null);
+
+  // Resends from the completed archive, keyed `${sheetId}:${stopNumber}`.
+  const [archiveResend, setArchiveResend] = useState<
+    Record<string, { state: "sending" | "sent" | "failed"; message?: string }>
+  >({});
 
   // Search state. Two boxes rather than one: the folder listing and the
   // deployed sheets are separate piles of paper, and someone hunting an
@@ -438,26 +490,51 @@ export default function TripSheetPage() {
    * be useless here.
    */
   const visibleTripSheets = useMemo(() => {
-    if (tripTokens.length === 0) return tripSheets;
-    return tripSheets.filter(
-      (t) =>
+    return tripSheets.filter((t) => {
+      if (driverFilter && t.driverId !== driverFilter) return false;
+      if (activeStatusFilter !== "all") {
+        const allSigned = t.stops.length > 0 && t.stops.every((s) => s.status === "SIGNED");
+        if (activeStatusFilter === "ready" && !allSigned) return false;
+        if (activeStatusFilter === "in_progress" && allSigned) return false;
+        if (activeStatusFilter === "unsent" && unsentEmails(t.stops).total === 0) return false;
+      }
+      if (tripTokens.length === 0) return true;
+      return (
         matchesTokens(tripTokens, [t.driverName, t.regNo, t.sourceFilename]) ||
         t.stops.some((s) =>
           matchesTokens(tripTokens, [s.invoiceNumber, s.customerName, s.address])
         )
-    );
-  }, [tripSheets, tripTokens]);
+      );
+    });
+  }, [tripSheets, tripTokens, driverFilter, activeStatusFilter]);
 
   const visibleCompletedSheets = useMemo(() => {
-    if (tripTokens.length === 0) return completedSheets;
-    return completedSheets.filter(
-      (c) =>
+    return completedSheets.filter((c) => {
+      if (driverFilter && c.driverId !== driverFilter) return false;
+      if (completedStatusFilter === "unsent" && !c.stops.some(archivedStopUnsent)) return false;
+      if (tripTokens.length === 0) return true;
+      return (
         matchesTokens(tripTokens, [c.driverName, c.regNo, c.sourceFilename, c.archivedFile]) ||
         c.stops.some((s) =>
           matchesTokens(tripTokens, [s.invoiceNumber, s.customerName, s.address])
         )
-    );
-  }, [completedSheets, tripTokens]);
+      );
+    });
+  }, [completedSheets, tripTokens, driverFilter, completedStatusFilter]);
+
+  /** Drivers that appear on either list, for the driver filter. */
+  const tripDrivers = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const t of tripSheets) byId.set(t.driverId, t.driverName);
+    for (const c of completedSheets) if (!byId.has(c.driverId)) byId.set(c.driverId, c.driverName);
+    return [...byId.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [tripSheets, completedSheets]);
+
+  const tripFiltersActive =
+    !!driverFilter ||
+    (tripTab === "active" ? activeStatusFilter !== "all" : completedStatusFilter !== "all");
 
   /** Marks the stop that put its sheet in the list, inside an expanded sheet. */
   const stopMatchesQuery = (stop: {
@@ -501,7 +578,7 @@ export default function TripSheetPage() {
       ? dayKey(new Date(todayStart.getTime() - 24 * 60 * 60 * 1000))
       : null;
 
-    for (const sheet of visibleCompletedSheets) {
+    for (const sheet of visibleCompletedSheets.slice(0, completedShown)) {
       const when = new Date(sheet.completedAt);
       const key = dayKey(when);
 
@@ -529,7 +606,7 @@ export default function TripSheetPage() {
 
     // The API already returns newest first, so insertion order is date order.
     return [...groups.values()];
-  }, [visibleCompletedSheets, completedDayStart]);
+  }, [visibleCompletedSheets, completedDayStart, completedShown]);
 
   // ─── File Upload ──────────────────────────────────────────────────────
 
@@ -903,11 +980,16 @@ export default function TripSheetPage() {
     });
   };
 
+  /** The active sheets on screen: filtered, then cut to what "Show more" has opened. */
+  const shownTripSheets = visibleTripSheets.slice(0, activeShown);
+
+  // "All" means all of what is on screen — sheets still behind "Show more"
+  // are not selected by it, for the same reason a search narrows selection.
   const toggleAllTrips = () => {
-    if (selectedTrips.size === visibleTripSheets.length) {
+    if (selectedTrips.size === shownTripSheets.length) {
       setSelectedTrips(new Set());
     } else {
-      setSelectedTrips(new Set(visibleTripSheets.map((t) => t.id)));
+      setSelectedTrips(new Set(shownTripSheets.map((t) => t.id)));
     }
   };
 
@@ -922,10 +1004,62 @@ export default function TripSheetPage() {
     setSelectedCloudFiles(new Set());
   };
 
+  /** Any narrowing of the trip lists starts them from the top again. */
+  const resetTripLists = () => {
+    setActiveShown(TRIPS_PAGE_SIZE);
+    setCompletedShown(TRIPS_PAGE_SIZE);
+    setSelectedTrips(new Set());
+  };
+
   const handleTripQueryChange = (next: string) => {
     setTripQuery(next);
-    setTripPage(1);
-    setSelectedTrips(new Set());
+    resetTripLists();
+  };
+
+  const clearTripFilters = () => {
+    setDriverFilter("");
+    setActiveStatusFilter("all");
+    setCompletedStatusFilter("all");
+    setTripQuery("");
+    resetTripLists();
+  };
+
+  /**
+   * Resend a confirmation from the completed archive. Capped per delivery
+   * (ARCHIVE_RESEND_LIMIT) by the server; the result is shown on the row
+   * itself, because the page's error banner is far above the archive.
+   */
+  const handleArchiveResend = async (sheetId: string, stopNumber: number) => {
+    const key = `${sheetId}:${stopNumber}`;
+    setArchiveResend((prev) => ({ ...prev, [key]: { state: "sending" } }));
+    try {
+      const res = await fetch(`/api/trip-sheet/completed/${sheetId}/resend`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stopNumber }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setArchiveResend((prev) => ({
+          ...prev,
+          [key]: { state: "failed", message: data.error || "Failed to resend" },
+        }));
+        return;
+      }
+      setArchiveResend((prev) => ({
+        ...prev,
+        [key]: {
+          state: "sent",
+          message: `Sent to ${data.recipient}${data.attached === false ? " (signed PDF not found — sent without it)" : ""}`,
+        },
+      }));
+      fetchCompletedSheets();
+    } catch {
+      setArchiveResend((prev) => ({
+        ...prev,
+        [key]: { state: "failed", message: "Failed to connect to server" },
+      }));
+    }
   };
 
   const handleBatchDeleteTrips = async () => {
@@ -955,6 +1089,15 @@ export default function TripSheetPage() {
 
   // ─── Complete/Archive Trip Sheet Helpers ─────────────────────────────
   const handleCompleteSingle = async (tripId: string) => {
+    // Unsent confirmations are still resendable from the archive, so this is a
+    // warning, not a block: the first press says how many, the second completes.
+    const trip = tripSheets.find((t) => t.id === tripId);
+    if (trip && unsentEmails(trip.stops).total > 0 && pendingCompleteId !== tripId) {
+      setPendingCompleteId(tripId);
+      setTimeout(() => setPendingCompleteId((cur) => (cur === tripId ? null : cur)), 6000);
+      return;
+    }
+    setPendingCompleteId(null);
     setCompletingTripId(tripId);
     setError(null);
     setCompleteSuccess(null);
@@ -1221,9 +1364,20 @@ export default function TripSheetPage() {
                 </svg>
                 {cloudLoading ? "Syncing…" : "Sync Now"}
               </button>
+              <button
+                onClick={() => setShowCloudFolder((v) => !v)}
+                className="p-1.5 text-ink-muted hover:text-ink-black transition-colors"
+                title={showCloudFolder ? "Collapse folder" : "Expand folder"}
+                aria-expanded={showCloudFolder}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`transition-transform ${showCloudFolder ? "rotate-180" : ""}`}>
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
             </div>
           </div>
 
+          {showCloudFolder && (<>
           {/* Duplicate warning banner */}
           {cloudFolder.duplicates && cloudFolder.duplicates.length > 0 && (
             <div className="flex items-center gap-3 px-5 py-2.5 bg-ink-amber-dim border-b border-ink-amber/20">
@@ -1275,7 +1429,7 @@ export default function TripSheetPage() {
             </div>
             <div className="divide-y divide-ink-border">
               {visibleCloudFiles
-                .slice((cloudPage - 1) * ITEMS_PER_PAGE, cloudPage * ITEMS_PER_PAGE)
+                .slice((cloudPage - 1) * CLOUD_PER_PAGE, cloudPage * CLOUD_PER_PAGE)
                 .map((file) => (
                 <div
                   key={file.filename}
@@ -1419,12 +1573,12 @@ export default function TripSheetPage() {
             )}
 
             {/* Cloud files pagination */}
-            {visibleCloudFiles.length > ITEMS_PER_PAGE && (() => {
-              const totalCloudPages = Math.ceil(visibleCloudFiles.length / ITEMS_PER_PAGE);
+            {visibleCloudFiles.length > CLOUD_PER_PAGE && (() => {
+              const totalCloudPages = Math.ceil(visibleCloudFiles.length / CLOUD_PER_PAGE);
               return (
                 <div className="flex items-center justify-between px-5 py-2.5 border-t border-ink-border bg-ink-surface/30">
                   <p className="text-xs font-mono text-ink-muted">
-                    {(cloudPage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(cloudPage * ITEMS_PER_PAGE, visibleCloudFiles.length)} of {visibleCloudFiles.length}
+                    {(cloudPage - 1) * CLOUD_PER_PAGE + 1}–{Math.min(cloudPage * CLOUD_PER_PAGE, visibleCloudFiles.length)} of {visibleCloudFiles.length}
                   </p>
                   <div className="flex items-center gap-1">
                     <button
@@ -1465,6 +1619,7 @@ export default function TripSheetPage() {
               <span className="ml-2 opacity-60">· Auto-syncs every 30s</span>
             </p>
           </div>
+          </>)}
         </div>
       )}
 
@@ -2271,8 +2426,8 @@ export default function TripSheetPage() {
 
           {/* Search row. One box serving both tabs, so a driver's name typed
               against the live sheets survives the switch into the archive. */}
-          {showActiveTrips && (tripSearchTotal > 0 || tripTokens.length > 0) && (
-            <div className="px-4 py-2.5 border-b border-ink-border bg-ink-surface/30">
+          {showActiveTrips && (tripSearchTotal > 0 || tripTokens.length > 0 || tripFiltersActive) && (
+            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-ink-border bg-ink-surface/30 flex-wrap">
               <FilterSearch
                 value={tripQuery}
                 onChange={handleTripQueryChange}
@@ -2281,7 +2436,67 @@ export default function TripSheetPage() {
                 totalCount={tripSearchTotal}
                 noun="sheet"
                 shortcut
+                className="flex-1 min-w-[14rem]"
               />
+              <select
+                value={driverFilter}
+                onChange={(e) => {
+                  setDriverFilter(e.target.value);
+                  resetTripLists();
+                }}
+                aria-label="Filter by driver"
+                className={`h-8 px-2 text-xs font-mono rounded border bg-ink-card outline-none focus:border-ink-green ${
+                  driverFilter ? "border-ink-green text-ink-black" : "border-ink-border text-ink-muted"
+                }`}
+              >
+                <option value="">All drivers</option>
+                {tripDrivers.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+              {tripTab === "active" ? (
+                <select
+                  value={activeStatusFilter}
+                  onChange={(e) => {
+                    setActiveStatusFilter(e.target.value as typeof activeStatusFilter);
+                    resetTripLists();
+                  }}
+                  aria-label="Filter by progress"
+                  className={`h-8 px-2 text-xs font-mono rounded border bg-ink-card outline-none focus:border-ink-green ${
+                    activeStatusFilter !== "all" ? "border-ink-green text-ink-black" : "border-ink-border text-ink-muted"
+                  }`}
+                >
+                  <option value="all">Any progress</option>
+                  <option value="in_progress">Still delivering</option>
+                  <option value="ready">Ready to complete</option>
+                  <option value="unsent">Emails not sent</option>
+                </select>
+              ) : (
+                <select
+                  value={completedStatusFilter}
+                  onChange={(e) => {
+                    setCompletedStatusFilter(e.target.value as typeof completedStatusFilter);
+                    resetTripLists();
+                  }}
+                  aria-label="Filter by email status"
+                  className={`h-8 px-2 text-xs font-mono rounded border bg-ink-card outline-none focus:border-ink-green ${
+                    completedStatusFilter !== "all" ? "border-ink-green text-ink-black" : "border-ink-border text-ink-muted"
+                  }`}
+                >
+                  <option value="all">Any email status</option>
+                  <option value="unsent">Emails not sent</option>
+                </select>
+              )}
+              {(tripFiltersActive || tripTokens.length > 0) && (
+                <button
+                  onClick={clearTripFilters}
+                  className="h-8 px-2.5 text-xs font-mono text-ink-muted hover:text-ink-black transition-colors"
+                >
+                  Clear filters
+                </button>
+              )}
             </div>
           )}
 
@@ -2301,7 +2516,7 @@ export default function TripSheetPage() {
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={visibleTripSheets.length > 0 && selectedTrips.size === visibleTripSheets.length}
+                  checked={shownTripSheets.length > 0 && selectedTrips.size === shownTripSheets.length}
                   onChange={toggleAllTrips}
                   className="w-4 h-4 rounded border-ink-border text-ink-green accent-[#00C07F] cursor-pointer"
                 />
@@ -2341,15 +2556,7 @@ export default function TripSheetPage() {
                 </div>
               )}
             </div>
-            {(() => {
-              const totalTripPages = Math.ceil(visibleTripSheets.length / ITEMS_PER_PAGE);
-              const paginatedTrips = visibleTripSheets.slice(
-                (tripPage - 1) * ITEMS_PER_PAGE,
-                tripPage * ITEMS_PER_PAGE
-              );
-              return (
-                <>
-            {paginatedTrips.map((trip) => {
+            {shownTripSheets.map((trip) => {
               const signed = trip.stops.filter((s) => s.status === "SIGNED").length;
               const total = trip.stops.length;
               const pct = total > 0 ? Math.round((signed / total) * 100) : 0;
@@ -2369,11 +2576,24 @@ export default function TripSheetPage() {
               // header is where that gets said without opening it.
               const stopHits =
                 tripTokens.length > 0 ? trip.stops.filter(stopMatchesQuery).length : 0;
+              // Confirmations that have not gone out. Said on the row, before
+              // Complete is pressed, rather than discovered in the archive.
+              const unsent = unsentEmails(trip.stops);
+              const unsentTitle = [
+                unsent.failed.length && `${unsent.failed.length} failed`,
+                unsent.noEmail.length && `${unsent.noEmail.length} with no email address`,
+                unsent.waiting.length && `${unsent.waiting.length} not sent yet`,
+              ]
+                .filter(Boolean)
+                .join(", ");
+              const confirmingComplete = pendingCompleteId === trip.id;
 
               return (
                 <div
                   key={trip.id}
-                  className="bg-ink-card border border-ink-border rounded overflow-hidden"
+                  className={`bg-ink-card border rounded overflow-hidden ${
+                    unsent.total > 0 && pct === 100 ? "border-ink-amber/40" : "border-ink-border"
+                  }`}
                 >
                   {/* Trip header */}
                   <div
@@ -2397,7 +2617,7 @@ export default function TripSheetPage() {
                       </span>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-[15px] sm:text-sm font-medium text-ink-black">
                           {trip.driverName}
                         </p>
@@ -2425,21 +2645,49 @@ export default function TripSheetPage() {
                             {collectionExceptions} EXCEPTION{collectionExceptions !== 1 ? "S" : ""}
                           </span>
                         )}
+                        {unsent.total > 0 && (
+                          <span
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono font-medium rounded border ${
+                              unsent.failed.length > 0
+                                ? "bg-ink-red-dim text-ink-red border-ink-red/20"
+                                : "bg-ink-amber-dim text-ink-amber border-ink-amber/20"
+                            }`}
+                            title={`Confirmation emails not sent: ${unsentTitle}. Open the sheet to send them, or resend from Completed afterwards.`}
+                          >
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+                              <polyline points="22,6 12,13 2,6" />
+                            </svg>
+                            {unsent.total} EMAIL{unsent.total !== 1 ? "S" : ""} NOT SENT
+                          </span>
+                        )}
                         {stopHits > 0 && (
                           <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-green-dim text-ink-green border border-ink-green/20">
                             {stopHits} stop{stopHits !== 1 ? "s" : ""} match
                           </span>
                         )}
                       </div>
-                      <div className="flex items-center gap-3 mt-1">
-                        <div className="flex-1 h-1.5 bg-ink-surface rounded-full overflow-hidden max-w-[200px]">
+                      <div className="flex items-center gap-3 mt-1 min-w-0">
+                        <div className="flex-1 h-1.5 bg-ink-surface rounded-full overflow-hidden max-w-[200px] min-w-[60px]">
                           <div
                             className="h-full bg-ink-green rounded-full transition-all duration-500"
                             style={{ width: `${pct}%` }}
                           />
                         </div>
-                        <span className="text-[12px] sm:text-xs font-mono text-ink-muted">
+                        <span className="text-[12px] sm:text-xs font-mono text-ink-muted shrink-0">
                           {signed}/{total} signed
+                        </span>
+                        {/* Which sheet this is — two runs for one driver
+                            otherwise look identical until opened. */}
+                        <span
+                          className="flex items-center gap-1 text-[12px] sm:text-xs font-mono text-ink-muted truncate min-w-0"
+                          title={trip.sourceFilename}
+                        >
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                            <polyline points="14 2 14 8 20 8" />
+                          </svg>
+                          <span className="truncate">{trip.sourceFilename}</span>
                         </span>
                       </div>
                     </div>
@@ -2452,14 +2700,26 @@ export default function TripSheetPage() {
                             handleCompleteSingle(trip.id);
                           }}
                           disabled={completingTripId === trip.id}
-                          className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium bg-ink-green-dim text-ink-green border border-ink-green/20 hover:bg-ink-green hover:text-white transition-all disabled:opacity-50"
-                          title="Archive completed trip sheet"
+                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium border transition-all disabled:opacity-50 whitespace-nowrap ${
+                            confirmingComplete
+                              ? "bg-ink-amber text-white border-ink-amber"
+                              : "bg-ink-green-dim text-ink-green border-ink-green/20 hover:bg-ink-green hover:text-white"
+                          }`}
+                          title={
+                            confirmingComplete
+                              ? "Click again to complete anyway — the emails can still be resent from Completed"
+                              : unsent.total > 0
+                              ? `Archive completed trip sheet (${unsent.total} confirmation email${unsent.total !== 1 ? "s" : ""} not sent)`
+                              : "Archive completed trip sheet"
+                          }
                         >
                           {completingTripId === trip.id ? (
                             <>
                               <div className="w-3 h-3 border-2 border-ink-green/30 border-t-ink-green rounded-full animate-spin" />
                               Archiving…
                             </>
+                          ) : confirmingComplete ? (
+                            <>{unsent.total} unsent — complete anyway?</>
                           ) : (
                             <>
                               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -2744,80 +3004,28 @@ export default function TripSheetPage() {
             {visibleTripSheets.length === 0 && (
               <div className="py-8 text-center">
                 <p className="text-sm font-mono text-ink-muted">
-                  No active sheet matches “{tripQuery.trim()}”
+                  {tripTokens.length > 0
+                    ? `No active sheet matches “${tripQuery.trim()}”`
+                    : "No active sheet matches these filters"}
                 </p>
                 <p className="text-xs text-ink-muted mt-1">
                   Driver, vehicle, source file, invoice number and customer are all searched
                 </p>
                 <button
-                  onClick={() => handleTripQueryChange("")}
+                  onClick={clearTripFilters}
                   className="mt-3 px-3 py-1.5 text-xs font-mono text-ink-muted bg-ink-surface border border-ink-border rounded hover:text-ink-black hover:border-ink-black/30 transition-all"
                 >
-                  Clear search
+                  Clear filters
                 </button>
               </div>
             )}
 
-            {/* Trip sheets pagination */}
-            {totalTripPages > 1 && (
-              <div className="flex items-center justify-between px-4 py-3 bg-ink-card border border-ink-border rounded">
-                <p className="text-xs font-mono text-ink-muted">
-                  Showing {(tripPage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(tripPage * ITEMS_PER_PAGE, visibleTripSheets.length)} of {visibleTripSheets.length} trip sheets
-                </p>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setTripPage(1)}
-                    disabled={tripPage === 1}
-                    className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                  >
-                    «
-                  </button>
-                  <button
-                    onClick={() => setTripPage((p) => Math.max(1, p - 1))}
-                    disabled={tripPage === 1}
-                    className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                  >
-                    ‹ Prev
-                  </button>
-                  {Array.from({ length: totalTripPages }, (_, i) => i + 1)
-                    .filter((p) => p === 1 || p === totalTripPages || Math.abs(p - tripPage) <= 2)
-                    .map((p, idx, arr) => (
-                      <span key={p} className="flex items-center">
-                        {idx > 0 && arr[idx - 1] !== p - 1 && (
-                          <span className="px-1 text-xs text-ink-muted-light">…</span>
-                        )}
-                        <button
-                          onClick={() => setTripPage(p)}
-                          className={`w-7 h-7 text-xs font-mono rounded transition-colors ${
-                            p === tripPage
-                              ? "bg-ink-black text-white"
-                              : "text-ink-muted hover:text-ink-black hover:bg-ink-surface"
-                          }`}
-                        >
-                          {p}
-                        </button>
-                      </span>
-                    ))}
-                  <button
-                    onClick={() => setTripPage((p) => Math.min(totalTripPages, p + 1))}
-                    disabled={tripPage === totalTripPages}
-                    className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                  >
-                    Next ›
-                  </button>
-                  <button
-                    onClick={() => setTripPage(totalTripPages)}
-                    disabled={tripPage === totalTripPages}
-                    className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                  >
-                    »
-                  </button>
-                </div>
-              </div>
-            )}
-                </>
-              );
-            })()}
+            <ShowMore
+              shown={shownTripSheets.length}
+              total={visibleTripSheets.length}
+              noun="trip sheet"
+              onMore={() => setActiveShown((n) => n + TRIPS_PAGE_SIZE)}
+            />
           </div>
           )}
 
@@ -2870,10 +3078,12 @@ export default function TripSheetPage() {
 
               {visibleCompletedSheets.length === 0 ? (
                 <div className="p-8 text-center">
-                  {tripTokens.length > 0 ? (
+                  {tripTokens.length > 0 || tripFiltersActive ? (
                     <>
                       <p className="text-sm text-ink-muted font-mono">
-                        No completed sheet matches “{tripQuery.trim()}”
+                        {tripTokens.length > 0
+                          ? `No completed sheet matches “${tripQuery.trim()}”`
+                          : "No completed sheet matches these filters"}
                       </p>
                       <p className="text-xs text-ink-muted mt-1">
                         {completedRange === "today"
@@ -2914,6 +3124,7 @@ export default function TripSheetPage() {
                     const isExpanded = expandedCompleted === sheet.id;
                     const stopHits =
                       tripTokens.length > 0 ? sheet.stops.filter(stopMatchesQuery).length : 0;
+                    const unsentArchived = sheet.stops.filter(archivedStopUnsent).length;
                     return (
                       <div
                         key={sheet.id}
@@ -2955,6 +3166,14 @@ export default function TripSheetPage() {
                                   title="A collection was partial, unavailable or refused — accounts needs to look at it before raising a credit"
                                 >
                                   COLLECTION EXCEPTION
+                                </span>
+                              )}
+                              {unsentArchived > 0 && (
+                                <span
+                                  className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
+                                  title="Confirmation emails that never went out — open the sheet to resend them"
+                                >
+                                  {unsentArchived} EMAIL{unsentArchived !== 1 ? "S" : ""} NOT SENT
                                 </span>
                               )}
                               {stopHits > 0 && (
@@ -3030,6 +3249,59 @@ export default function TripSheetPage() {
                                     </span>
                                   </div>
                                 </div>
+                                {/* Resend from the archive. Capped per delivery
+                                    by the server; a collection-only stop has no
+                                    confirmation to send. */}
+                                {stop.signedAt && stop.invoiceNumber && (() => {
+                                  const key = `${sheet.id}:${stop.stopNumber}`;
+                                  const live = archiveResend[key];
+                                  const used = stop.resends ?? 0;
+                                  const left = ARCHIVE_RESEND_LIMIT - used;
+                                  return (
+                                    <div className="flex items-center gap-2 mt-1.5 pl-8 flex-wrap">
+                                      <button
+                                        onClick={() => handleArchiveResend(sheet.id, stop.stopNumber)}
+                                        disabled={left <= 0 || live?.state === "sending"}
+                                        className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono font-medium bg-ink-surface text-ink-muted border border-ink-border hover:border-ink-muted-light hover:text-ink-black transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-ink-muted disabled:hover:border-ink-border"
+                                        title={
+                                          left <= 0
+                                            ? `Already resent ${ARCHIVE_RESEND_LIMIT} times — the limit for one delivery`
+                                            : `Resend the delivery confirmation (${left} of ${ARCHIVE_RESEND_LIMIT} resends left)`
+                                        }
+                                      >
+                                        {live?.state === "sending" ? (
+                                          <>
+                                            <div className="w-3 h-3 border-2 border-ink-muted/30 border-t-ink-muted rounded-full animate-spin" />
+                                            Sending…
+                                          </>
+                                        ) : (
+                                          <>
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+                                              <polyline points="22,6 12,13 2,6" />
+                                            </svg>
+                                            Resend
+                                          </>
+                                        )}
+                                      </button>
+                                      <span className="text-[11px] font-mono text-ink-muted-light">
+                                        {used}/{ARCHIVE_RESEND_LIMIT} resent
+                                        {stop.lastResentAt
+                                          ? ` · last ${formatDate(stop.lastResentAt)}`
+                                          : ""}
+                                      </span>
+                                      {live?.message && live.state !== "sending" && (
+                                        <span
+                                          className={`text-[11px] font-mono ${
+                                            live.state === "sent" ? "text-ink-green" : "text-ink-red"
+                                          }`}
+                                        >
+                                          {live.message}
+                                        </span>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
                               </div>
                             ))}
                             {/* Collections stay reachable as backup after the
@@ -3136,6 +3408,12 @@ export default function TripSheetPage() {
                       </div>
                     </div>
                   ))}
+                  <ShowMore
+                    shown={Math.min(completedShown, visibleCompletedSheets.length)}
+                    total={visibleCompletedSheets.length}
+                    noun="completed sheet"
+                    onMore={() => setCompletedShown((n) => n + TRIPS_PAGE_SIZE)}
+                  />
                 </div>
               )}
             </div>
@@ -3222,6 +3500,26 @@ export default function TripSheetPage() {
                   </p>
                 </div>
               )}
+              {(() => {
+                const unsentCount = selectedCompletableTrips.reduce(
+                  (sum, t) => sum + unsentEmails(t.stops).total,
+                  0
+                );
+                if (unsentCount === 0) return null;
+                return (
+                  <div className="flex items-start gap-2 px-3 py-2 bg-ink-amber-dim rounded border border-ink-amber/20 mb-3">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-amber shrink-0 mt-0.5">
+                      <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+                      <polyline points="22,6 12,13 2,6" />
+                    </svg>
+                    <p className="text-[11px] font-mono text-ink-amber">
+                      {unsentCount} confirmation email{unsentCount !== 1 ? "s" : ""} not sent on these
+                      sheets. They can still be resent from Completed, up to{" "}
+                      {ARCHIVE_RESEND_LIMIT} times each.
+                    </p>
+                  </div>
+                );
+              })()}
               <div className="max-h-32 overflow-y-auto bg-ink-surface rounded p-2 mb-4">
                 {selectedCompletableTrips.map((t) => (
                   <div key={t.id} className="flex items-center gap-2 py-1">
@@ -3325,5 +3623,37 @@ function CompletedEmailPill({ status }: { status: string }) {
     >
       {pill.label}
     </span>
+  );
+}
+
+/** "Show more" footer for the trip lists: grows the list rather than paging it. */
+function ShowMore({
+  shown,
+  total,
+  noun,
+  onMore,
+}: {
+  shown: number;
+  total: number;
+  noun: string;
+  onMore: () => void;
+}) {
+  if (total <= TRIPS_PAGE_SIZE) return null;
+  const remaining = total - shown;
+  return (
+    <div className="flex items-center justify-between gap-3 pt-1">
+      <p className="text-xs font-mono text-ink-muted">
+        Showing {shown} of {total} {noun}
+        {total !== 1 ? "s" : ""}
+      </p>
+      {remaining > 0 && (
+        <button
+          onClick={onMore}
+          className="px-3 py-1.5 text-xs font-mono text-ink-black bg-ink-card border border-ink-border rounded hover:border-ink-muted-light hover:bg-ink-surface transition-all"
+        >
+          Show {Math.min(remaining, TRIPS_PAGE_SIZE)} more
+        </button>
+      )}
+    </div>
   );
 }

@@ -25,6 +25,8 @@ interface DeliveryConfirmationProps {
   invoiceNumber: string;
   driverName: string;
   deliveryAddress: string;
+  /** Who signed for it, as typed on the driver's phone. */
+  signedByName?: string;
   signedAt: string; // pre-formatted string
   signedPDFUrl: string;
   companyName: string;
@@ -36,6 +38,7 @@ export function DeliveryConfirmation({
   invoiceNumber,
   driverName,
   deliveryAddress,
+  signedByName,
   signedAt,
   signedPDFUrl,
   companyName,
@@ -92,8 +95,17 @@ export function DeliveryConfirmation({
             </Row>
             <Row style={styles.detailRow}>
               <Text style={styles.detailLabel}>Delivered to</Text>
-              <Text style={styles.detailValue}>{deliveryAddress}</Text>
+              {/* The person who signed. Left blank rather than guessed when no
+                  name was given (stops signed before the field existed). The
+                  non-breaking space keeps the row's height. */}
+              <Text style={styles.detailValue}>{signedByName || " "}</Text>
             </Row>
+            {deliveryAddress && (
+              <Row style={styles.detailRow}>
+                <Text style={styles.detailLabel}>Delivery address</Text>
+                <Text style={styles.detailValue}>{deliveryAddress}</Text>
+              </Row>
+            )}
             <Row style={styles.detailRow}>
               <Text style={styles.detailLabel}>Driver</Text>
               <Text style={styles.detailValue}>{driverName}</Text>
