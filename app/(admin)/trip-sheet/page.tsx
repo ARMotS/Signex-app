@@ -20,6 +20,30 @@ interface TripStop {
   emailError?: string | null;
   contact?: { email?: string };
   collections?: TripCollection[];
+  /** Lines of this invoice the customer refused at the door. */
+  rejectedLines?: RejectedLine[];
+}
+
+interface RejectedLine {
+  id: string;
+  description: string;
+  quantity: number | null;
+  reason: string;
+  recordedBy: string;
+  createdAt: string;
+}
+
+/** An invoice taken off a run before it was signed. */
+interface RemovedStop {
+  id: string;
+  stopNumber: number;
+  invoiceNumber: string;
+  customerName: string;
+  source: "REJECTED" | "INVOICE_DELETED" | string;
+  reason: string;
+  removedBy: string;
+  removedAt: string;
+  keptForCollections: boolean;
 }
 
 /** A collection hanging off a stop — goods coming back with the driver. */
@@ -78,6 +102,8 @@ interface TripSheet {
   uploadedBy: string;
   sourceFilename: string;
   stops: TripStop[];
+  /** Invoices taken off this run before they were signed. */
+  removedStops?: RemovedStop[];
 }
 
 interface MatchResult {
@@ -139,6 +165,8 @@ interface ArchivedStop {
   nop: number;
   signedAt: string | null;
   emailStatus: string;
+  /** Lines the customer refused — what accounts raises a credit note for. */
+  rejectedLines?: { description: string; quantity: number | null; reason: string }[];
   /** Resends from the archive that went out, out of ARCHIVE_RESEND_LIMIT. */
   resends?: number;
   lastResentAt?: string | null;
@@ -157,6 +185,17 @@ const CLOUD_PER_PAGE = 10;
  * Signed deliveries on a live trip whose confirmation has not gone out.
  * Collection-only stops (no invoice number) have no confirmation to send.
  */
+/**
+ * Whether a stop's delivery is finished. A stop with no invoice number —
+ * collection-only, or its invoice taken off the run — has nothing to sign.
+ * Mirrors isDeliveryDone in lib/trip-data.ts, which completion enforces.
+ */
+const deliveryDone = (s: TripStop) => !s.invoiceNumber || s.status === "SIGNED";
+
+/** Every delivery signed (collections are checked by the server on Complete). */
+const tripCompletable = (t: TripSheet) =>
+  (t.stops.length > 0 || (t.removedStops?.length ?? 0) > 0) && t.stops.every(deliveryDone);
+
 function unsentEmails(stops: TripStop[]) {
   const failed: TripStop[] = [];
   const noEmail: TripStop[] = [];
@@ -192,6 +231,8 @@ interface CompletedTripSheet {
   stops: ArchivedStop[];
   /** Absent on trips archived before collections existed — read as []. */
   collections?: ArchivedCollection[];
+  /** Invoices taken off the run before it closed. */
+  removedStops?: RemovedStop[];
 }
 
 interface DriverAccount {
@@ -338,6 +379,17 @@ export default function TripSheetPage() {
   // Email resend state
   const [emailSending, setEmailSending] = useState<Record<string, "sending" | "sent" | "failed">>({});
 
+  // Rejected delivery. The customer refused the whole invoice (the stop comes
+  // off the run) or one line of it (recorded, and the rest is still signed for).
+  const [rejectTarget, setRejectTarget] = useState<{ stop: TripStop; driverName: string } | null>(null);
+  const [rejectMode, setRejectMode] = useState<"whole" | "line">("whole");
+  const [rejectReason, setRejectReason] = useState("");
+  const [rejectLine, setRejectLine] = useState({ description: "", quantity: "" });
+  const [rejectSaving, setRejectSaving] = useState(false);
+  const [rejectError, setRejectError] = useState<string | null>(null);
+  const [withdrawingLine, setWithdrawingLine] = useState<string | null>(null);
+
+
   const handleResendEmail = async (stop: TripStop, driverName: string) => {
     setEmailSending((prev) => ({ ...prev, [stop.id]: "sending" }));
     try {
@@ -468,6 +520,72 @@ export default function TripSheetPage() {
 
   useLiveSync(refreshTripData);
 
+  const openReject = (stop: TripStop, driverName: string) => {
+    setRejectTarget({ stop, driverName });
+    setRejectMode("whole");
+    setRejectReason("");
+    setRejectLine({ description: "", quantity: "" });
+    setRejectError(null);
+  };
+
+  const submitReject = async () => {
+    if (!rejectTarget) return;
+    setRejectSaving(true);
+    setRejectError(null);
+    try {
+      const stopId = rejectTarget.stop.id;
+      const res =
+        rejectMode === "whole"
+          ? await fetch(`/api/trip-sheet/stops/${stopId}`, {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ reason: rejectReason }),
+            })
+          : await fetch(`/api/trip-sheet/stops/${stopId}/rejected-lines`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                description: rejectLine.description,
+                quantity: rejectLine.quantity || null,
+                reason: rejectReason,
+              }),
+            });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setRejectError(data.error || "Could not save the rejection");
+        // Signed or gone since the page loaded — show the sheet as it is now.
+        if (res.status === 404 || res.status === 409) fetchTripSheets();
+        return;
+      }
+      setRejectTarget(null);
+      fetchTripSheets();
+    } catch {
+      setRejectError("Could not save the rejection");
+    } finally {
+      setRejectSaving(false);
+    }
+  };
+
+  const withdrawRejectedLine = async (stopId: string, lineId: string) => {
+    setWithdrawingLine(lineId);
+    try {
+      const res = await fetch(`/api/trip-sheet/stops/${stopId}/rejected-lines`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lineId }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || "Could not withdraw the rejected line");
+      }
+      fetchTripSheets();
+    } catch {
+      setError("Could not withdraw the rejected line");
+    } finally {
+      setWithdrawingLine(null);
+    }
+  };
+
   // ─── Search narrowing ──────────────────────────────────────────────────
   //
   // Every list on this page arrives whole — the folder in one response, the
@@ -493,7 +611,7 @@ export default function TripSheetPage() {
     return tripSheets.filter((t) => {
       if (driverFilter && t.driverId !== driverFilter) return false;
       if (activeStatusFilter !== "all") {
-        const allSigned = t.stops.length > 0 && t.stops.every((s) => s.status === "SIGNED");
+        const allSigned = tripCompletable(t);
         if (activeStatusFilter === "ready" && !allSigned) return false;
         if (activeStatusFilter === "in_progress" && allSigned) return false;
         if (activeStatusFilter === "unsent" && unsentEmails(t.stops).total === 0) return false;
@@ -1164,7 +1282,7 @@ export default function TripSheetPage() {
 
   // Check which selected trips are fully signed (completable)
   const selectedCompletableTrips = tripSheets.filter(
-    (t) => selectedTrips.has(t.id) && t.stops.length > 0 && t.stops.every((s) => s.status === "SIGNED")
+    (t) => selectedTrips.has(t.id) && tripCompletable(t)
   );
 
   // Duplicate filename set for quick lookup
@@ -2557,9 +2675,14 @@ export default function TripSheetPage() {
               )}
             </div>
             {shownTripSheets.map((trip) => {
-              const signed = trip.stops.filter((s) => s.status === "SIGNED").length;
-              const total = trip.stops.length;
-              const pct = total > 0 ? Math.round((signed / total) * 100) : 0;
+              // Deliveries only: a collection-only stop has nothing to sign.
+              const deliveries = trip.stops.filter((s) => s.invoiceNumber);
+              const signed = deliveries.filter((s) => s.status === "SIGNED").length;
+              const total = deliveries.length;
+              const removedStops = trip.removedStops ?? [];
+              const pct = total > 0
+                ? Math.round((signed / total) * 100)
+                : tripCompletable(trip) ? 100 : 0;
               // A trip cannot be closed out until its collections have outcomes
               // too, so the dispatcher needs to see them here rather than
               // discovering them in the error when Archive is pressed.
@@ -2659,6 +2782,16 @@ export default function TripSheetPage() {
                               <polyline points="22,6 12,13 2,6" />
                             </svg>
                             {unsent.total} EMAIL{unsent.total !== 1 ? "S" : ""} NOT SENT
+                          </span>
+                        )}
+                        {removedStops.length > 0 && (
+                          <span
+                            className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-red-dim text-ink-red border border-ink-red/20"
+                            title={`Taken off this run before signing: ${removedStops
+                              .map((r) => r.invoiceNumber)
+                              .join(", ")}. Open the sheet for reasons.`}
+                          >
+                            {removedStops.length} INVOICE{removedStops.length !== 1 ? "S" : ""} REMOVED
                           </span>
                         )}
                         {stopHits > 0 && (
@@ -2808,6 +2941,39 @@ export default function TripSheetPage() {
                               {stop.nop > 0 ? stop.nop : "—"}
                             </span>
                           </div>
+                          {/* Lines the customer refused. The driver sees the
+                              same list, and it is printed on the signed PDF. */}
+                          {(stop.rejectedLines?.length ?? 0) > 0 && (
+                            <div className="mt-2 pl-8 space-y-1">
+                              {stop.rejectedLines!.map((l) => (
+                                <div key={l.id} className="flex items-center gap-2 flex-wrap text-[12px]">
+                                  <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-red-dim text-ink-red border border-ink-red/20">
+                                    LINE REJECTED
+                                  </span>
+                                  <span className="text-ink-black">
+                                    {l.quantity != null && <span className="font-mono">{l.quantity} × </span>}
+                                    {l.description}
+                                  </span>
+                                  <span className="text-ink-muted truncate max-w-[18rem]" title={`Recorded by ${l.recordedBy}`}>
+                                    {l.reason}
+                                  </span>
+                                  {stop.status !== "SIGNED" && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        withdrawRejectedLine(stop.id, l.id);
+                                      }}
+                                      disabled={withdrawingLine === l.id}
+                                      className="font-mono text-[11px] text-ink-muted hover:text-ink-red hover:underline disabled:opacity-50"
+                                      title="Recorded in error — the customer is taking this line after all"
+                                    >
+                                      {withdrawingLine === l.id ? "Withdrawing…" : "Withdraw"}
+                                    </button>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
                           {/* Collections at this stop. Listed under the
                               delivery rather than beside it, because it is one
                               visit to one address — the driver sees the same
@@ -2886,6 +3052,25 @@ export default function TripSheetPage() {
                               signature, so this button is a resend — or the
                               recovery when the automatic attempt failed. */}
                           <div className="flex items-center gap-2 mt-1.5 pl-8">
+                            {/* Opens the signed copy directly — no hunting for the
+                                invoice number on the Invoices tab. Addressed by
+                                filename, as that tab's "Signed" button is. */}
+                            {stop.status === "SIGNED" && stop.invoiceFile && (
+                              <a
+                                href={`/api/invoices/${encodeURIComponent(stop.invoiceFile)}?signed=true`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono font-medium bg-ink-green-dim text-ink-green border border-ink-green/20 hover:bg-ink-green hover:text-white transition-all"
+                                title={`Open the signed invoice (${stop.invoiceFile})`}
+                              >
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                  <polyline points="14 2 14 8 20 8" />
+                                </svg>
+                                View signed
+                              </a>
+                            )}
                             {stop.status === "SIGNED" && stop.contact?.email && (() => {
                               const live = emailSending[stop.id];
                               const isSent = live === "sent" || (!live && (stop.emailStatus === "SENT" || (!stop.emailStatus && stop.emailSentAt)));
@@ -2956,6 +3141,22 @@ export default function TripSheetPage() {
                                 No email
                               </span>
                             )}
+                            {stop.status !== "SIGNED" && stop.invoiceNumber && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openReject(stop, trip.driverName);
+                                }}
+                                className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono font-medium bg-ink-surface text-ink-muted border border-ink-border hover:border-ink-red/40 hover:text-ink-red transition-all"
+                                title="The customer refused this delivery, or part of it"
+                              >
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <circle cx="12" cy="12" r="10" />
+                                  <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                                </svg>
+                                Reject…
+                              </button>
+                            )}
                             {(stop.collections?.length ?? 0) > 0 && (
                               <span
                                 className="badge-credit"
@@ -2992,6 +3193,35 @@ export default function TripSheetPage() {
                           </div>
                         </div>
                       ))}
+                      {/* Invoices taken off this run. The stop is gone from
+                          the driver's phone; this is where the office sees
+                          that it happened, and why. */}
+                      {removedStops.length > 0 && (
+                        <div className="px-4 py-3 bg-ink-red-dim/20">
+                          <p className="text-[11px] font-mono text-ink-red uppercase tracking-wide mb-1.5">
+                            Removed from this run
+                          </p>
+                          <div className="space-y-1">
+                            {removedStops.map((r) => (
+                              <div key={r.id} className="flex items-center gap-2 flex-wrap text-[12px]">
+                                <span className="font-mono text-ink-muted">#{r.stopNumber}</span>
+                                <span className="font-mono font-medium text-ink-black line-through decoration-ink-red/60">
+                                  {r.invoiceNumber}
+                                </span>
+                                <span className="text-ink-muted">{r.customerName}</span>
+                                <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-surface text-ink-muted border border-ink-border">
+                                  {r.source === "INVOICE_DELETED" ? "INVOICE DELETED" : "REJECTED"}
+                                </span>
+                                <span className="text-ink-black">{r.reason}</span>
+                                <span className="text-ink-muted-light">
+                                  {r.removedBy} · {formatDate(r.removedAt)}
+                                  {r.keptForCollections && " · collections still on the run"}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       <div className="px-4 py-2 text-[11px] text-ink-muted bg-ink-surface/30">
                         Uploaded {formatDate(trip.uploadedAt)}
                       </div>
@@ -3249,6 +3479,20 @@ export default function TripSheetPage() {
                                     </span>
                                   </div>
                                 </div>
+                                {(stop.rejectedLines?.length ?? 0) > 0 && (
+                                  <div className="mt-1.5 pl-8 space-y-0.5">
+                                    {stop.rejectedLines!.map((l, i) => (
+                                      <p key={i} className="text-[12px]">
+                                        <span className="font-mono text-[10px] text-ink-red mr-1.5">LINE REJECTED</span>
+                                        <span className="text-ink-black">
+                                          {l.quantity != null ? `${l.quantity} × ` : ""}
+                                          {l.description}
+                                        </span>
+                                        <span className="text-ink-muted"> — {l.reason}</span>
+                                      </p>
+                                    ))}
+                                  </div>
+                                )}
                                 {/* Resend from the archive. Capped per delivery
                                     by the server; a collection-only stop has no
                                     confirmation to send. */}
@@ -3304,6 +3548,24 @@ export default function TripSheetPage() {
                                 })()}
                               </div>
                             ))}
+                            {(sheet.removedStops?.length ?? 0) > 0 && (
+                              <div className="px-4 py-2.5 bg-ink-red-dim/20">
+                                <p className="text-[11px] font-mono text-ink-red uppercase tracking-wide mb-1">
+                                  Removed before signing
+                                </p>
+                                {sheet.removedStops!.map((r) => (
+                                  <p key={r.id} className="text-[12px]">
+                                    <span className="font-mono text-ink-muted">#{r.stopNumber} </span>
+                                    <span className="font-mono font-medium text-ink-black line-through decoration-ink-red/60">
+                                      {r.invoiceNumber}
+                                    </span>
+                                    <span className="text-ink-muted"> {r.customerName} — </span>
+                                    <span className="text-ink-black">{r.reason}</span>
+                                    <span className="text-ink-muted-light"> · {r.removedBy}</span>
+                                  </p>
+                                ))}
+                              </div>
+                            )}
                             {/* Collections stay reachable as backup after the
                                 trip is closed. The Collection rows cascade away
                                 with the trip sheet, so this reads the frozen
@@ -3422,6 +3684,150 @@ export default function TripSheetPage() {
       )}
 
       {/* Trip sheets delete confirmation modal */}
+      {/* Rejected delivery: the whole invoice, or one line of it. */}
+      {rejectTarget && (() => {
+        const { stop, driverName } = rejectTarget;
+        const hasCollections = (stop.collections?.length ?? 0) > 0;
+        const canSubmit =
+          rejectReason.trim().length > 0 &&
+          (rejectMode === "whole" || rejectLine.description.trim().length > 0);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={() => !rejectSaving && setRejectTarget(null)}>
+            <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
+              <div className="px-6 py-5">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-10 h-10 rounded-full bg-ink-red-dim flex items-center justify-center shrink-0">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-red">
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+                    </svg>
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="font-mono text-sm font-medium text-ink-black truncate">
+                      Rejected delivery — {stop.invoiceNumber}
+                    </h3>
+                    <p className="text-xs text-ink-muted mt-0.5 truncate">
+                      Stop {stop.stopNumber} · {stop.customerName} · {driverName}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mb-4 space-y-2">
+                  <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">What did the customer refuse?</p>
+                  <label className={`flex items-start gap-3 px-4 py-3 rounded border cursor-pointer transition-all ${rejectMode === "whole" ? "border-ink-red bg-ink-red-dim/30" : "border-ink-border hover:border-ink-red/30"}`}>
+                    <input
+                      type="radio"
+                      name="rejectMode"
+                      checked={rejectMode === "whole"}
+                      onChange={() => setRejectMode("whole")}
+                      className="w-3.5 h-3.5 mt-0.5 accent-[#E53935] cursor-pointer"
+                    />
+                    <div>
+                      <p className="text-sm font-mono font-medium text-ink-black">The whole invoice</p>
+                      <p className="text-xs text-ink-muted mt-0.5">
+                        {hasCollections
+                          ? "The delivery comes off the run. The stop stays for its collections."
+                          : "The stop comes off the driver's run. The invoice PDF is kept."}
+                      </p>
+                    </div>
+                  </label>
+                  <label className={`flex items-start gap-3 px-4 py-3 rounded border cursor-pointer transition-all ${rejectMode === "line" ? "border-ink-black bg-ink-surface" : "border-ink-border hover:border-ink-black/30"}`}>
+                    <input
+                      type="radio"
+                      name="rejectMode"
+                      checked={rejectMode === "line"}
+                      onChange={() => setRejectMode("line")}
+                      className="w-3.5 h-3.5 mt-0.5 accent-ink-black cursor-pointer"
+                    />
+                    <div>
+                      <p className="text-sm font-mono font-medium text-ink-black">One line of it</p>
+                      <p className="text-xs text-ink-muted mt-0.5">
+                        The customer signs for the rest. The refused line is printed on the signed invoice and in the confirmation email.
+                      </p>
+                    </div>
+                  </label>
+                </div>
+
+                {rejectMode === "line" && (
+                  <div className="grid grid-cols-[1fr_5rem] gap-2 mb-3">
+                    <input
+                      value={rejectLine.description}
+                      onChange={(e) => setRejectLine((p) => ({ ...p, description: e.target.value }))}
+                      placeholder="Item or product code"
+                      maxLength={200}
+                      className="px-3 py-2 text-sm border border-ink-border rounded focus:outline-none focus:border-ink-black"
+                    />
+                    <input
+                      value={rejectLine.quantity}
+                      onChange={(e) => setRejectLine((p) => ({ ...p, quantity: e.target.value.replace(/[^0-9]/g, "") }))}
+                      placeholder="Qty"
+                      inputMode="numeric"
+                      className="px-3 py-2 text-sm font-mono border border-ink-border rounded focus:outline-none focus:border-ink-black"
+                    />
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {["Wrong item sent", "Damaged", "Not ordered", "Expired / short-dated"].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setRejectReason(preset)}
+                      className={`px-2 py-1 text-[11px] font-mono rounded border transition-colors ${
+                        rejectReason === preset
+                          ? "border-ink-black bg-ink-surface text-ink-black"
+                          : "border-ink-border text-ink-muted hover:text-ink-black"
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                  placeholder="Reason (required)"
+                  rows={2}
+                  maxLength={rejectMode === "whole" ? 500 : 300}
+                  className="w-full px-3 py-2 text-sm border border-ink-border rounded focus:outline-none focus:border-ink-black resize-none"
+                />
+
+                {rejectError && (
+                  <p className="mt-2 text-xs text-ink-red">{rejectError}</p>
+                )}
+              </div>
+              <div className="flex justify-end gap-3 px-6 py-4 bg-ink-surface/50 border-t border-ink-border">
+                <button
+                  onClick={() => setRejectTarget(null)}
+                  disabled={rejectSaving}
+                  className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={submitReject}
+                  disabled={!canSubmit || rejectSaving}
+                  className={`flex items-center gap-2 px-4 py-2 text-sm font-mono font-medium text-white rounded transition-all disabled:opacity-50 ${
+                    rejectMode === "whole" ? "bg-ink-red hover:bg-red-600" : "bg-ink-black hover:bg-black"
+                  }`}
+                >
+                  {rejectSaving ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      Saving…
+                    </>
+                  ) : rejectMode === "whole" ? (
+                    hasCollections ? "Remove Delivery" : "Remove from Trip"
+                  ) : (
+                    "Record Rejected Line"
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {showTripDeleteConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={() => setShowTripDeleteConfirm(false)}>
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>

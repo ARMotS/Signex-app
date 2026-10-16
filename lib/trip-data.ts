@@ -69,6 +69,40 @@ export interface TripStop {
   emailAttempts?: number;
   contact?: { email?: string | null };
   collections?: TripCollection[];
+  /** Lines of this invoice the customer refused — see lib/stop-removal.ts. */
+  rejectedLines?: TripRejectedLine[];
+}
+
+export interface TripRejectedLine {
+  id: string;
+  description: string;
+  quantity: number | null;
+  reason: string;
+  recordedBy: string;
+  createdAt: Date;
+}
+
+/** An invoice taken off this run before it was signed — see RemovedStop. */
+export interface TripRemovedStop {
+  id: string;
+  stopNumber: number;
+  invoiceNumber: string;
+  customerName: string;
+  source: string;
+  reason: string;
+  removedBy: string;
+  removedAt: Date;
+  keptForCollections: boolean;
+}
+
+/**
+ * Whether a stop's delivery is finished. A stop with no invoice number has
+ * nothing to deliver — a collection-only stop, or one whose invoice was taken
+ * off the run — so only its collections decide it. Mirrors isStopDone on the
+ * driver's run sheet.
+ */
+export function isDeliveryDone(stop: { invoiceNumber: string; status: string }): boolean {
+  return !stop.invoiceNumber || stop.status === "SIGNED";
 }
 
 export interface TripSheet {
@@ -81,6 +115,8 @@ export interface TripSheet {
   uploadedBy: string;
   sourceFilename: string;
   stops: TripStop[];
+  /** Only loaded for the dispatcher's views (getAllTripSheets / getTripSheet). */
+  removedStops?: TripRemovedStop[];
 }
 
 /** One frozen stop inside a CompletedTripSheet.stops snapshot. */
@@ -96,6 +132,8 @@ export interface ArchivedStop {
   /** The signed PDF's filename, for resending. Absent on older snapshots. */
   invoiceFile?: string | null;
   emailStatus: string;
+  /** Lines the customer refused. Absent on snapshots taken before rejections. */
+  rejectedLines?: { description: string; quantity: number | null; reason: string }[];
   /** Resends from the archive that went out — not part of the frozen JSON;
    *  joined in from ArchivedEmailResend by getCompletedTripSheets. */
   resends?: number;
@@ -150,6 +188,8 @@ export interface CompletedTripSheet {
   collectedCollections: number;
   stops: ArchivedStop[];
   collections: ArchivedCollection[];
+  /** Invoices taken off this run before it closed. Joined from RemovedStop. */
+  removedStops: TripRemovedStop[];
 }
 
 // ─── Trip Sheet Operations ────────────────────────────────────────────────
@@ -305,11 +345,14 @@ export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
         // guard all need them, and a stop whose collections were silently
         // absent would look finished when it is not.
         collections: { orderBy: { collectionNo: "asc" } },
+        // Lines the customer refused — the driver must not hand them over.
+        rejectedLines: { orderBy: { createdAt: "asc" } },
       },
     }),
   ]);
 
   const driverMap = new Map(drivers.map((d) => [d.id, d]));
+  const removedByTrip = await loadRemovedStops(tenantId, trips.map((t) => t.id));
   const stopsByTrip = new Map<string, typeof allStops>();
   for (const stop of allStops) {
     const existing = stopsByTrip.get(stop.tripSheetId) || [];
@@ -329,6 +372,7 @@ export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
       uploadedBy: t.uploadedBy,
       sourceFilename: t.sourceFilename,
       stops: (stopsByTrip.get(t.id) || []).map(mapStop),
+      removedStops: removedByTrip.get(t.id) ?? [],
     };
   });
 }
@@ -360,6 +404,8 @@ export async function getTripSheet(
         // guard all need them, and a stop whose collections were silently
         // absent would look finished when it is not.
         collections: { orderBy: { collectionNo: "asc" } },
+        // Lines the customer refused — the driver must not hand them over.
+        rejectedLines: { orderBy: { createdAt: "asc" } },
       },
     }),
   ]);
@@ -374,6 +420,7 @@ export async function getTripSheet(
     uploadedBy: trip.uploadedBy,
     sourceFilename: trip.sourceFilename,
     stops: stops.map(mapStop),
+    removedStops: (await loadRemovedStops(tenantId, [trip.id])).get(trip.id) ?? [],
   };
 }
 
@@ -408,6 +455,8 @@ export async function getTripSheetsForDriver(
         // guard all need them, and a stop whose collections were silently
         // absent would look finished when it is not.
         collections: { orderBy: { collectionNo: "asc" } },
+        // Lines the customer refused — the driver must not hand them over.
+        rejectedLines: { orderBy: { createdAt: "asc" } },
       },
     }),
   ]);
@@ -576,17 +625,28 @@ export async function completeTripSheet(
       return { success: false, error: "Trip sheet not found" };
     }
 
-    // Verify all stops are SIGNED
-    const stops = await db.stop.findMany({
-      where: { tripSheetId: tripId },
-      orderBy: { stopNumber: "asc" },
-    });
+    // Verify every delivery is signed. A stop with no invoice number has
+    // nothing to sign (collection-only, or its invoice was taken off the run)
+    // — it used to count as unsigned forever, so such a trip could never close.
+    const [stops, removedCount] = await Promise.all([
+      db.stop.findMany({
+        where: { tripSheetId: tripId },
+        orderBy: { stopNumber: "asc" },
+        include: { rejectedLines: { orderBy: { createdAt: "asc" } } },
+      }),
+      db.removedStop.count({ where: { tripSheetId: tripId } }),
+    ]);
 
-    const allSigned = stops.length > 0 && stops.every((s) => s.status === "SIGNED");
-    if (!allSigned) {
+    const unsigned = stops.filter((s) => !isDeliveryDone(s));
+    // Every invoice rejected and taken off still leaves a trip to close out:
+    // the removals are its record.
+    if (unsigned.length > 0 || (stops.length === 0 && removedCount === 0)) {
       return {
         success: false,
-        error: `Cannot complete: ${stops.filter((s) => s.status !== "SIGNED").length} stop(s) are not yet signed`,
+        error:
+          stops.length === 0
+            ? "Cannot complete: this trip sheet has no stops"
+            : `Cannot complete: ${unsigned.length} stop(s) are not yet signed`,
       };
     }
 
@@ -662,6 +722,15 @@ export async function completeTripSheet(
           signedByName: s.signedByName,
           invoiceFile: s.invoiceFile,
           emailStatus: s.emailStatus,
+          // Frozen with the stop: the credit note for a refused line is raised
+          // after the trip closes, and the RejectedLine rows cascade away.
+          ...(s.rejectedLines.length > 0 && {
+            rejectedLines: s.rejectedLines.map((l) => ({
+              description: l.description,
+              quantity: l.quantity,
+              reason: l.reason,
+            })),
+          }),
         })),
         // Frozen for the same reason the stops are, and carrying both file
         // references: the Collection rows cascade away with the trip sheet
@@ -704,7 +773,7 @@ export async function completeTripSheet(
       userName: trip.uploadedBy,
       details: `Trip sheet completed for driver ${driver?.name || "Unknown"} (${stops.length} stops, all signed${
         collections.length ? `; ${collections.length} collections closed out` : ""
-      })${
+      }${removedCount ? `; ${removedCount} invoice(s) removed before signing` : ""})${
         trip.sourceFilename
           ? archivedFile
             ? ` — archived ${trip.sourceFilename} to processed/`
@@ -816,6 +885,9 @@ export async function getCompletedTripSheets(
         select: { completedTripSheetId: true, stopNumber: true, sentAt: true },
       })
     : [];
+  // RemovedStop rows outlive the sheet and keep its old id, so the archive
+  // finds them by tripSheetId the same way the live view does.
+  const removedByTrip = await loadRemovedStops(tenantId, rows.map((r) => r.tripSheetId));
   const resendsByStop = new Map<string, { count: number; last: Date }>();
   for (const r of resends) {
     const key = `${r.completedTripSheetId}:${r.stopNumber}`;
@@ -859,6 +931,7 @@ export async function getCompletedTripSheets(
     collections: Array.isArray(r.collections)
       ? (r.collections as unknown as ArchivedCollection[])
       : [],
+    removedStops: removedByTrip.get(r.tripSheetId) ?? [],
   }));
 }
 
@@ -913,6 +986,7 @@ function mapStop(stop: {
   emailAttempts?: number;
   contact?: { email: string | null } | null;
   collections?: RawCollection[] | null;
+  rejectedLines?: TripRejectedLine[] | null;
 }): TripStop {
   return {
     id: stop.id,
@@ -930,7 +1004,47 @@ function mapStop(stop: {
     emailAttempts: stop.emailAttempts,
     contact: stop.contact ? { email: stop.contact.email } : undefined,
     collections: stop.collections ? stop.collections.map(mapCollection) : undefined,
+    rejectedLines: stop.rejectedLines
+      ? stop.rejectedLines.map((l) => ({
+          id: l.id,
+          description: l.description,
+          quantity: l.quantity,
+          reason: l.reason,
+          recordedBy: l.recordedBy,
+          createdAt: l.createdAt,
+        }))
+      : undefined,
   };
+}
+
+/** Invoices taken off these runs, grouped by trip sheet, oldest first. */
+async function loadRemovedStops(
+  tenantId: string,
+  tripSheetIds: string[]
+): Promise<Map<string, TripRemovedStop[]>> {
+  const byTrip = new Map<string, TripRemovedStop[]>();
+  if (tripSheetIds.length === 0) return byTrip;
+
+  const rows = await scopedPrisma(tenantId).removedStop.findMany({
+    where: { tripSheetId: { in: tripSheetIds } },
+    orderBy: { removedAt: "asc" },
+  });
+  for (const r of rows) {
+    const list = byTrip.get(r.tripSheetId) ?? [];
+    list.push({
+      id: r.id,
+      stopNumber: r.stopNumber,
+      invoiceNumber: r.invoiceNumber,
+      customerName: r.customerName,
+      source: r.source,
+      reason: r.reason,
+      removedBy: r.removedBy,
+      removedAt: r.removedAt,
+      keptForCollections: r.keptForCollections,
+    });
+    byTrip.set(r.tripSheetId, list);
+  }
+  return byTrip;
 }
 
 /** The Collection columns mapStop is handed, whichever query loaded them. */

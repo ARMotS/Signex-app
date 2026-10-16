@@ -20,6 +20,7 @@ import fs from "fs";
 import path from "path";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { readConfig } from "./config";
+import { wrapText } from "./collections";
 import {
   getOneDriveInvoiceSource,
   listOneDriveInvoiceFiles,
@@ -257,7 +258,9 @@ export async function embedSignatureOnPdf(
   tenantId: string,
   pdfBytes: Buffer,
   signatureImageBytes: Uint8Array,
-  signerName?: string
+  signerName?: string,
+  /** Lines the customer refused. Printed on an appended page — see below. */
+  rejectedLines: DeliveryException[] = []
 ): Promise<Buffer> {
   const pdfDoc = await PDFDocument.load(pdfBytes);
   const pages = pdfDoc.getPages();
@@ -287,12 +290,16 @@ export async function embedSignatureOnPdf(
   const xPos = (pos.xPercent / 100) * pageWidth;
   const yPos = (pos.yPercent / 100) * pageHeight;
 
+  // A partial delivery gets one more line in the box, pointing at the
+  // exceptions page — the customer's signature is for what was accepted.
+  const partial = rejectedLines.length > 0;
+
   // Draw a light background box for the signature area
   targetPage.drawRectangle({
     x: xPos - 15,
     y: yPos - 15,
     width: sigWidth + 30,
-    height: sigHeight + 55,
+    height: sigHeight + (partial ? 66 : 55),
     color: rgb(0.97, 0.97, 0.95),
     borderColor: rgb(0.85, 0.83, 0.80),
     borderWidth: 0.5,
@@ -354,11 +361,111 @@ export async function embedSignatureOnPdf(
     color: rgb(0.6, 0.6, 0.6),
   });
 
+  if (partial) {
+    targetPage.drawText(
+      `PARTIAL DELIVERY · ${rejectedLines.length} line${rejectedLines.length !== 1 ? "s" : ""} rejected — see last page`,
+      {
+        x: xPos - 10,
+        y: yPos + sigHeight + 32,
+        size: fontSize,
+        font,
+        color: rgb(0.75, 0.15, 0.12),
+      }
+    );
+    await appendDeliveryExceptionsPage(pdfDoc, rejectedLines, timestamp, stampName);
+  }
+
   // Set PDF metadata to mark as signed
   pdfDoc.setSubject(`Signed:${now.toISOString()}`);
 
   const modifiedPdfBytes = await pdfDoc.save();
   return Buffer.from(modifiedPdfBytes);
+}
+
+/** One refused line, as printed on the exceptions page and in the email. */
+export interface DeliveryException {
+  description: string;
+  quantity: number | null;
+  reason: string;
+}
+
+/** Helvetica encodes Latin-1 only; drawText throws on anything else. */
+function latin1(text: string): string {
+  return text.replace(/[^\x20-\x7E\xA0-\xFF]/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Append a "DELIVERY EXCEPTIONS" page listing the lines the customer refused.
+ *
+ * Appended rather than drawn over the invoice, for the same reason the
+ * collection receipt is: the invoice layout is whatever the office printed, and
+ * an overlay would eventually cover the very line items the credit note is
+ * raised against. The signature box on the invoice points here.
+ */
+async function appendDeliveryExceptionsPage(
+  pdfDoc: PDFDocument,
+  lines: DeliveryException[],
+  timestamp: string,
+  signerName?: string
+): Promise<void> {
+  const width = 595.28;
+  const height = 841.89;
+  const margin = 56;
+  const page = pdfDoc.addPage([width, height]);
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const ink = rgb(0.06, 0.06, 0.06);
+  const muted = rgb(0.45, 0.45, 0.45);
+  const rule = rgb(0.8, 0.8, 0.78);
+
+  let y = height - margin;
+  page.drawText("DELIVERY EXCEPTIONS", { x: margin, y, size: 16, font: bold, color: ink });
+  y -= 10;
+  page.drawLine({ start: { x: margin, y }, end: { x: width - margin, y }, thickness: 1, color: rule });
+  y -= 22;
+
+  const intro =
+    "The customer refused the lines below at delivery. They were not delivered and " +
+    "are not covered by the signature on this invoice.";
+  for (const l of wrapText(intro, font, 10, width - margin * 2)) {
+    page.drawText(l, { x: margin, y, size: 10, font, color: muted });
+    y -= 14;
+  }
+  y -= 10;
+
+  const qtyX = margin;
+  const itemX = margin + 50;
+  const reasonX = margin + 270;
+  page.drawText("QTY", { x: qtyX, y, size: 8, font: bold, color: muted });
+  page.drawText("ITEM", { x: itemX, y, size: 8, font: bold, color: muted });
+  page.drawText("REASON", { x: reasonX, y, size: 8, font: bold, color: muted });
+  y -= 6;
+  page.drawLine({ start: { x: margin, y }, end: { x: width - margin, y }, thickness: 0.5, color: rule });
+  y -= 14;
+
+  for (const line of lines) {
+    // Stop well clear of the footer; a run of refusals this long is not
+    // realistic, and truncating beats running off the page.
+    if (y < margin + 60) {
+      page.drawText("…", { x: margin, y, size: 10, font, color: muted });
+      break;
+    }
+    const item = wrapText(latin1(line.description) || "—", font, 10, reasonX - itemX - 10);
+    const reason = wrapText(latin1(line.reason) || "—", font, 10, width - margin - reasonX);
+    page.drawText(line.quantity != null ? String(line.quantity) : "—", { x: qtyX, y, size: 10, font, color: ink });
+    const rows = Math.max(item.length, reason.length);
+    for (let i = 0; i < rows; i++) {
+      if (item[i]) page.drawText(item[i], { x: itemX, y: y - i * 13, size: 10, font, color: ink });
+      if (reason[i]) page.drawText(reason[i], { x: reasonX, y: y - i * 13, size: 10, font, color: ink });
+    }
+    y -= rows * 13 + 8;
+  }
+
+  const name = signerName ? latin1(signerName) : "";
+  page.drawText(
+    `Acknowledged at delivery${name ? ` by ${name}` : ""} · ${timestamp}`,
+    { x: margin, y: margin, size: 8, font, color: muted }
+  );
 }
 
 /**

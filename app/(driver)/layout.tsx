@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
+import LogoMark from "@/components/LogoMark";
 
 export default function DriverLayout({
   children,
@@ -42,20 +43,7 @@ export default function DriverLayout({
         {/* Not a link: inside the app the way out is Sign out, which ends the
             session. A tap on the logo mid-delivery should do nothing. */}
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 bg-ink-black rounded flex items-center justify-center">
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="#00C07F"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-            </svg>
-          </div>
+          <LogoMark size={28} />
           <span className="font-mono text-sm font-medium text-ink-black tracking-tight">
             SIGNEX
           </span>

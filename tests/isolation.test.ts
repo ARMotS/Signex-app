@@ -2222,6 +2222,253 @@ suite("cross-ADMIN isolation", () => {
   });
 
   // ── Completed trip sheet archive ─────────────────────────────────────
+  describe("rejected deliveries", () => {
+    /** A fresh run per test, so removing a stop never eats a shared fixture. */
+    const deploy = async (
+      fx: typeof f.a,
+      stops: { invoiceNumber: string; invoiceFile?: string; collectionNo?: string }[]
+    ) => {
+      const { saveTripSheet } = await import("@/lib/trip-data");
+      return saveTripSheet(fx.tenantId, {
+        driverId: fx.driver.id,
+        driverName: fx.driver.name,
+        regNo: "REG",
+        uploadedBy: fx.admin.id,
+        sourceFilename: "rejections.csv",
+        stops: stops.map((s, i) => ({
+          stopNumber: i + 1,
+          invoiceNumber: s.invoiceNumber,
+          customerName: "Reject Co",
+          address: "1 Refusal Rd",
+          nop: 1,
+          invoiceFile: s.invoiceFile,
+          status: "PENDING",
+          collections: s.collectionNo
+            ? ([{ collectionNo: s.collectionNo, type: "CREDIT_RETURN", status: "PENDING" }] as any)
+            : undefined,
+        })),
+      });
+    };
+
+    it("ADMIN 1 removing ADMIN 2's stop gets 404 and writes nothing anywhere", async () => {
+      const { DELETE } = await import("@/app/api/trip-sheet/stops/[id]/route");
+      const tripB = await deploy(f.b, [{ invoiceNumber: "INV-R1" }]);
+      useSession(adminSession(f.a));
+
+      const res = await DELETE(
+        req(`/api/trip-sheet/stops/${tripB.stops[0].id}`, {
+          method: "DELETE",
+          body: { reason: "Wrong item sent" },
+        }),
+        params({ id: tripB.stops[0].id })
+      );
+
+      expect(res.status).toBe(404);
+      expect(await db().stop.findUnique({ where: { id: tripB.stops[0].id } })).not.toBeNull();
+      expect(await db().removedStop.count({ where: { tripSheetId: tripB.id } })).toBe(0);
+      await db().tripSheet.delete({ where: { id: tripB.id } });
+    });
+
+    it("removes the caller's own stop, records why, and shows it only in their scope", async () => {
+      const { DELETE } = await import("@/app/api/trip-sheet/stops/[id]/route");
+      const { GET } = await import("@/app/api/trip-sheet/route");
+      const trip = await deploy(f.a, [{ invoiceNumber: "INV-R2" }, { invoiceNumber: "INV-R3" }]);
+      useSession(adminSession(f.a));
+
+      const res = await DELETE(
+        req(`/api/trip-sheet/stops/${trip.stops[0].id}`, {
+          method: "DELETE",
+          body: { reason: "Customer rejected — wrong item" },
+        }),
+        params({ id: trip.stops[0].id })
+      );
+      expect(res.status).toBe(200);
+      expect(await db().stop.findUnique({ where: { id: trip.stops[0].id } })).toBeNull();
+
+      const record = await db().removedStop.findFirst({ where: { tripSheetId: trip.id } });
+      expect(record!.tenantId).toBe(f.a.tenantId);
+      expect(record!.invoiceNumber).toBe("INV-R2");
+      expect(record!.source).toBe("REJECTED");
+      expect(record!.reason).toBe("Customer rejected — wrong item");
+
+      const bodyA = await (await GET(req("/api/trip-sheet"))).json();
+      const sheetA = bodyA.tripSheets.find((t: any) => t.id === trip.id);
+      expect(sheetA.stops.map((s: any) => s.invoiceNumber)).toEqual(["INV-R3"]);
+      expect(sheetA.removedStops.map((r: any) => r.invoiceNumber)).toEqual(["INV-R2"]);
+
+      useSession(adminSession(f.b));
+      const bodyB = await (await GET(req("/api/trip-sheet"))).json();
+      expect(JSON.stringify(bodyB)).not.toContain("INV-R2");
+
+      await db().tripSheet.delete({ where: { id: trip.id } });
+      await db().removedStop.deleteMany({ where: { tripSheetId: trip.id } });
+    });
+
+    it("requires a reason, refuses a signed stop, and is closed to drivers", async () => {
+      const { DELETE } = await import("@/app/api/trip-sheet/stops/[id]/route");
+      const trip = await deploy(f.a, [{ invoiceNumber: "INV-R4" }]);
+      const stopId = trip.stops[0].id;
+      const call = (body: unknown) =>
+        DELETE(
+          req(`/api/trip-sheet/stops/${stopId}`, { method: "DELETE", body }),
+          params({ id: stopId })
+        );
+
+      useSession(driverSession(f.a));
+      expect((await call({ reason: "x" })).status).toBe(403);
+
+      useSession(adminSession(f.a));
+      expect((await call({ reason: "   " })).status).toBe(400);
+
+      await db().stop.update({ where: { id: stopId }, data: { status: "SIGNED", signedAt: new Date() } });
+      expect((await call({ reason: "Too late" })).status).toBe(409);
+      expect(await db().stop.findUnique({ where: { id: stopId } })).not.toBeNull();
+      expect(await db().removedStop.count({ where: { tripSheetId: trip.id } })).toBe(0);
+
+      await db().tripSheet.delete({ where: { id: trip.id } });
+    });
+
+    it("keeps a stop for its collections, and the trip still completes", async () => {
+      const { DELETE } = await import("@/app/api/trip-sheet/stops/[id]/route");
+      const { completeTripSheet, getCompletedTripSheets } = await import("@/lib/trip-data");
+      const trip = await deploy(f.a, [{ invoiceNumber: "INV-R5", collectionNo: "COL-R5" }]);
+      const stopId = trip.stops[0].id;
+      useSession(adminSession(f.a));
+
+      const res = await DELETE(
+        req(`/api/trip-sheet/stops/${stopId}`, { method: "DELETE", body: { reason: "Damaged" } }),
+        params({ id: stopId })
+      );
+      expect((await res.json()).outcome).toBe("delivery_removed");
+
+      const stop = await db().stop.findUnique({ where: { id: stopId } });
+      expect(stop!.invoiceNumber).toBe("");
+      expect(stop!.invoiceFile).toBeNull();
+      expect(await db().collection.count({ where: { stopId } })).toBe(1);
+
+      // The stop has nothing left to sign; only its collection decides it.
+      await db().collection.updateMany({
+        where: { stopId },
+        data: { status: "NOT_AVAILABLE", exceptionReason: "Closed" },
+      });
+      expect((await completeTripSheet(f.a.tenantId, trip.id, "Admin A")).success).toBe(true);
+
+      const archived = (await getCompletedTripSheets(f.a.tenantId)).find(
+        (c) => c.tripSheetId === trip.id
+      );
+      expect(archived!.removedStops.map((r) => r.invoiceNumber)).toEqual(["INV-R5"]);
+      expect(
+        (await getCompletedTripSheets(f.b.tenantId)).some((c) => c.tripSheetId === trip.id)
+      ).toBe(false);
+
+      await db().completedTripSheet.deleteMany({ where: { tripSheetId: trip.id } });
+      await db().removedStop.deleteMany({ where: { tripSheetId: trip.id } });
+    });
+
+    it("rejected lines are scoped, shown on the run, and frozen at completion", async () => {
+      const { POST, DELETE } = await import("@/app/api/trip-sheet/stops/[id]/rejected-lines/route");
+      const { completeTripSheet } = await import("@/lib/trip-data");
+      const tripA = await deploy(f.a, [{ invoiceNumber: "INV-R6" }]);
+      const tripB = await deploy(f.b, [{ invoiceNumber: "INV-R6" }]);
+      const line = { description: "Widget 40mm", quantity: 2, reason: "Wrong size" };
+      const post = (stopId: string, body: unknown) =>
+        POST(
+          req(`/api/trip-sheet/stops/${stopId}/rejected-lines`, { method: "POST", body }),
+          params({ id: stopId })
+        );
+
+      useSession(adminSession(f.a));
+      expect((await post(tripB.stops[0].id, line)).status).toBe(404);
+      expect(await db().rejectedLine.count({ where: { stopId: tripB.stops[0].id } })).toBe(0);
+
+      expect((await post(tripA.stops[0].id, { ...line, description: "" })).status).toBe(400);
+      const ok = await post(tripA.stops[0].id, line);
+      expect(ok.status).toBe(200);
+      const { id: lineId } = await ok.json();
+      const row = await db().rejectedLine.findUnique({ where: { id: lineId } });
+      expect(row!.tenantId).toBe(f.a.tenantId);
+
+      // ADMIN 2 cannot withdraw it by naming their own stop or A's.
+      useSession(adminSession(f.b));
+      for (const stopId of [tripA.stops[0].id, tripB.stops[0].id]) {
+        const res = await DELETE(
+          req(`/api/trip-sheet/stops/${stopId}/rejected-lines`, { method: "DELETE", body: { lineId } }),
+          params({ id: stopId })
+        );
+        expect(res.status).toBe(404);
+      }
+      expect(await db().rejectedLine.count({ where: { id: lineId } })).toBe(1);
+
+      // The driver's run carries it.
+      const { GET: runGET } = await import("@/app/api/trip-sheet/stops/route");
+      useSession(driverSession(f.a));
+      const run = await (
+        await runGET(req(`/api/trip-sheet/stops?driverId=${f.a.driver.id}`))
+      ).json();
+      const runStop = run.stops.find((s: any) => s.id === tripA.stops[0].id);
+      expect(runStop.rejectedLines.map((l: any) => l.description)).toEqual(["Widget 40mm"]);
+
+      // Signed: no more lines, and completion freezes the one there is.
+      await db().stop.update({
+        where: { id: tripA.stops[0].id },
+        data: { status: "SIGNED", signedAt: new Date() },
+      });
+      useSession(adminSession(f.a));
+      expect((await post(tripA.stops[0].id, line)).status).toBe(409);
+      expect((await completeTripSheet(f.a.tenantId, tripA.id, "Admin A")).success).toBe(true);
+      const archived = await db().completedTripSheet.findFirst({ where: { tripSheetId: tripA.id } });
+      expect((archived!.stops as any)[0].rejectedLines).toEqual([
+        { description: "Widget 40mm", quantity: 2, reason: "Wrong size" },
+      ]);
+
+      await db().completedTripSheet.deleteMany({ where: { tripSheetId: tripA.id } });
+      await db().tripSheet.delete({ where: { id: tripB.id } });
+    });
+
+    it("deleting an invoice takes only the caller's unsigned stops off their runs", async () => {
+      const { DELETE } = await import("@/app/api/invoices/route");
+      const { POST: usagePOST } = await import("@/app/api/invoices/usage/route");
+      // Same filename in both scopes, and a signed stop in A that must stay.
+      const tripA = await deploy(f.a, [
+        { invoiceNumber: "INV-R7", invoiceFile: "INV-R7.pdf" },
+        { invoiceNumber: "INV-R7", invoiceFile: "INV-R7.pdf" },
+      ]);
+      const tripB = await deploy(f.b, [{ invoiceNumber: "INV-R7", invoiceFile: "INV-R7.pdf" }]);
+      await db().stop.update({
+        where: { id: tripA.stops[1].id },
+        data: { status: "SIGNED", signedAt: new Date() },
+      });
+
+      useSession(adminSession(f.a));
+      const usage = await (
+        await usagePOST(req("/api/invoices/usage", { method: "POST", body: { filenames: ["inv-r7.pdf"] } }))
+      ).json();
+      expect(usage.usage.map((u: any) => u.stopId).sort()).toEqual(
+        [tripA.stops[0].id, tripA.stops[1].id].sort()
+      );
+
+      const res = await DELETE(
+        req("/api/invoices", {
+          method: "DELETE",
+          body: { filenames: ["INV-R7.pdf"], mode: "original_only", reason: "Customer rejected" },
+        })
+      );
+      const body = await res.json();
+      expect(body.removedStops.map((u: any) => u.stopId)).toEqual([tripA.stops[0].id]);
+      expect(body.signedStopsKept.map((u: any) => u.stopId)).toEqual([tripA.stops[1].id]);
+
+      expect(await db().stop.findUnique({ where: { id: tripA.stops[0].id } })).toBeNull();
+      expect(await db().stop.findUnique({ where: { id: tripA.stops[1].id } })).not.toBeNull();
+      expect(await db().stop.findUnique({ where: { id: tripB.stops[0].id } })).not.toBeNull();
+      const record = await db().removedStop.findFirst({ where: { tripSheetId: tripA.id } });
+      expect(record!.source).toBe("INVOICE_DELETED");
+      expect(record!.reason).toBe("Customer rejected");
+
+      await db().tripSheet.deleteMany({ where: { id: { in: [tripA.id, tripB.id] } } });
+      await db().removedStop.deleteMany({ where: { tripSheetId: tripA.id } });
+    });
+  });
+
   describe("the completed trip sheet archive", () => {
     it("a completed sheet is snapshotted into the caller's scope and no other", async () => {
       const { saveTripSheet, completeTripSheet } = await import("@/lib/trip-data");

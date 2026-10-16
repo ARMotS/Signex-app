@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import HeroShowcase from "@/components/home/HeroShowcase";
 import HeaderSignIn from "@/components/home/HeaderSignIn";
+import LogoMark from "@/components/LogoMark";
 import depotAerial from "@/public/home/depot-aerial.jpg";
 import doorstepHandover from "@/public/home/doorstep-handover.jpg";
 
@@ -16,16 +17,7 @@ import doorstepHandover from "@/public/home/doorstep-handover.jpg";
  */
 
 function Mark({ size = 36 }: { size?: number }) {
-  return (
-    <div
-      className="rounded-lg bg-ink-green flex items-center justify-center shrink-0"
-      style={{ width: size, height: size }}
-    >
-      <svg width={size / 2} height={size / 2} viewBox="0 0 24 24" fill="none" stroke="#0F0F0F" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-      </svg>
-    </div>
-  );
+  return <LogoMark size={size} />;
 }
 
 const NAV = [

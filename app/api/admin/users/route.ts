@@ -518,6 +518,8 @@ export const DELETE = withAuth(async (request: NextRequest) => {
       // cascades to Stop, so stops and sheets go before contacts and drivers.
       await tx.stop.deleteMany({ where: { tenantId } });
       await tx.tripSheet.deleteMany({ where: { tenantId } });
+      // No FK to TripSheet (it outlives the sheet), so it does not cascade.
+      await tx.removedStop.deleteMany({ where: { tenantId } });
       await tx.contact.deleteMany({ where: { tenantId } });
       await tx.driver.deleteMany({ where: { tenantId } });
       await tx.importedFile.deleteMany({ where: { tenantId } });

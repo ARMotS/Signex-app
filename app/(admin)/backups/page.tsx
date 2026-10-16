@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { FilterSearch } from "@/components/admin/FilterSearch";
+import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 
 interface BackupInvoice {
   filename: string;
@@ -15,6 +17,90 @@ interface BackupTripSheet {
 }
 
 type DatePreset = "ALL" | "7D" | "30D" | "90D" | "CUSTOM";
+
+type KindFilter = "ALL" | "INVOICES" | "TRIPS";
+type SortOrder = "NEWEST" | "OLDEST" | "NAME" | "LARGEST";
+
+/**
+ * Detailed search over the listing already in memory — text, kind, a date
+ * range and sort. It narrows what is shown; "Older than" above it still decides
+ * what the server returns.
+ */
+interface BackupSearch {
+  query: string;
+  kind: KindFilter;
+  /** yyyy-mm-dd, inclusive, in the admin's local day. Empty = open-ended. */
+  from: string;
+  to: string;
+  sort: SortOrder;
+}
+
+const EMPTY_SEARCH: BackupSearch = { query: "", kind: "ALL", from: "", to: "", sort: "NEWEST" };
+
+function applySearch<T extends { filename: string; sizeBytes: number }>(
+  rows: T[],
+  dateOf: (row: T) => string,
+  search: BackupSearch,
+  formatDate: (iso: string) => string
+): T[] {
+  const tokens = tokenizeQuery(search.query);
+  const fromMs = search.from ? new Date(`${search.from}T00:00:00`).getTime() : null;
+  const toMs = search.to ? new Date(`${search.to}T23:59:59.999`).getTime() : null;
+  const out = rows.filter((row) => {
+    const t = new Date(dateOf(row)).getTime();
+    if (fromMs !== null && t < fromMs) return false;
+    if (toMs !== null && t > toMs) return false;
+    // The formatted date is searchable too, so "oct 2026" finds a month.
+    return matchesTokens(tokens, [row.filename, formatDate(dateOf(row))]);
+  });
+  const byDate = (a: T, b: T) => new Date(dateOf(a)).getTime() - new Date(dateOf(b)).getTime();
+  switch (search.sort) {
+    case "NEWEST": return out.sort((a, b) => byDate(b, a));
+    case "OLDEST": return out.sort(byDate);
+    case "NAME": return out.sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }));
+    case "LARGEST": return out.sort((a, b) => b.sizeBytes - a.sizeBytes);
+  }
+}
+
+/** Rows per page in each backup table — the same as the trip sheet folder listing. */
+const BACKUPS_PER_PAGE = 10;
+
+/** The page actually shown: a purge can shrink a list out from under its page. */
+function clampPage(page: number, total: number): number {
+  return Math.min(page, Math.max(1, Math.ceil(total / BACKUPS_PER_PAGE)));
+}
+
+/** Footer pager, matching the trip sheet page's cloud folder pagination. */
+function Pager({ page, total, onPage }: { page: number; total: number; onPage: (p: number) => void }) {
+  if (total <= BACKUPS_PER_PAGE) return null;
+  const totalPages = Math.ceil(total / BACKUPS_PER_PAGE);
+  return (
+    <div className="flex items-center justify-between px-5 py-2.5 border-t border-ink-border bg-ink-surface/30">
+      <p className="text-xs font-mono text-ink-muted">
+        {(page - 1) * BACKUPS_PER_PAGE + 1}–{Math.min(page * BACKUPS_PER_PAGE, total)} of {total}
+      </p>
+      <div className="flex items-center gap-1">
+        <button
+          onClick={() => onPage(Math.max(1, page - 1))}
+          disabled={page === 1}
+          className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+        >
+          ‹ Prev
+        </button>
+        <span className="text-xs font-mono text-ink-muted">
+          {page}/{totalPages}
+        </span>
+        <button
+          onClick={() => onPage(Math.min(totalPages, page + 1))}
+          disabled={page === totalPages}
+          className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+        >
+          Next ›
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function BackupsPage() {
   const [invoices, setInvoices] = useState<BackupInvoice[]>([]);
@@ -35,6 +121,18 @@ export default function BackupsPage() {
 
   const [invoicesOpen, setInvoicesOpen] = useState(true);
   const [tripsOpen, setTripsOpen] = useState(true);
+
+  const [invoicePage, setInvoicePage] = useState(1);
+  const [tripPage, setTripPage] = useState(1);
+
+  const [search, setSearch] = useState<BackupSearch>(EMPTY_SEARCH);
+  const [searchOpen, setSearchOpen] = useState(false);
+  /** Every search change starts both tables back on page 1. */
+  const updateSearch = (patch: Partial<BackupSearch>) => {
+    setSearch((s) => ({ ...s, ...patch }));
+    setInvoicePage(1);
+    setTripPage(1);
+  };
 
   const getBeforeDate = useCallback((): string | null => {
     const now = new Date();
@@ -70,6 +168,8 @@ export default function BackupsPage() {
   useEffect(() => {
     setSelectedInvoices(new Set());
     setSelectedTrips(new Set());
+    setInvoicePage(1);
+    setTripPage(1);
   }, [datePreset, customDate]);
 
   const formatSize = (b: number) => {
@@ -89,15 +189,47 @@ export default function BackupsPage() {
   const toggleTrip = (filename: string) => {
     setSelectedTrips((prev) => { const n = new Set(prev); n.has(filename) ? n.delete(filename) : n.add(filename); return n; });
   };
+  const filteredInvoices = search.kind === "TRIPS" ? [] : applySearch(invoices, (i) => i.signedAt, search, formatDate);
+  const filteredTrips = search.kind === "INVOICES" ? [] : applySearch(tripSheets, (t) => t.processedAt, search, formatDate);
+  const searchActive =
+    search.query.trim() !== "" || search.kind !== "ALL" || search.from !== "" || search.to !== "";
+  const advancedActive = search.kind !== "ALL" || search.from !== "" || search.to !== "" || search.sort !== "NEWEST";
+  const totalMatches = filteredInvoices.length + filteredTrips.length;
+
+  const shownInvoicePage = clampPage(invoicePage, filteredInvoices.length);
+  const shownTripPage = clampPage(tripPage, filteredTrips.length);
+  const pageInvoices = filteredInvoices.slice((shownInvoicePage - 1) * BACKUPS_PER_PAGE, shownInvoicePage * BACKUPS_PER_PAGE);
+  const pageTrips = filteredTrips.slice((shownTripPage - 1) * BACKUPS_PER_PAGE, shownTripPage * BACKUPS_PER_PAGE);
+
+  // The header checkbox covers the rows on screen only, so a purge never takes
+  // rows the admin has not seen. "Select All" in the page header covers the rest.
+  const allPageInvoicesSelected = pageInvoices.length > 0 && pageInvoices.every((i) => selectedInvoices.has(i.filename));
+  const allPageTripsSelected = pageTrips.length > 0 && pageTrips.every((t) => selectedTrips.has(t.filename));
   const toggleAllInvoices = () => {
-    setSelectedInvoices((prev) => prev.size === invoices.length ? new Set() : new Set(invoices.map((i) => i.filename)));
+    setSelectedInvoices((prev) => {
+      const n = new Set(prev);
+      for (const i of pageInvoices) {
+        if (allPageInvoicesSelected) n.delete(i.filename);
+        else n.add(i.filename);
+      }
+      return n;
+    });
   };
   const toggleAllTrips = () => {
-    setSelectedTrips((prev) => prev.size === tripSheets.length ? new Set() : new Set(tripSheets.map((t) => t.filename)));
+    setSelectedTrips((prev) => {
+      const n = new Set(prev);
+      for (const t of pageTrips) {
+        if (allPageTripsSelected) n.delete(t.filename);
+        else n.add(t.filename);
+      }
+      return n;
+    });
   };
+  // With a search applied this selects the matches only — what the admin sees
+  // listed is what goes into the download or the purge.
   const selectAll = () => {
-    setSelectedInvoices(new Set(invoices.map((i) => i.filename)));
-    setSelectedTrips(new Set(tripSheets.map((t) => t.filename)));
+    setSelectedInvoices(new Set(filteredInvoices.map((i) => i.filename)));
+    setSelectedTrips(new Set(filteredTrips.map((t) => t.filename)));
   };
 
   const handleDownload = async (mode: "invoices" | "trips" | "both") => {
@@ -178,7 +310,7 @@ export default function BackupsPage() {
         {totalSelected > 0 && (
           <button onClick={selectAll}
             className="px-3 py-1.5 text-xs font-mono text-ink-muted hover:text-ink-black transition-colors">
-            Select All ({invoices.length + tripSheets.length})
+            {searchActive ? `Select all ${totalMatches} matching` : `Select All (${invoices.length + tripSheets.length})`}
           </button>
         )}
       </div>
@@ -199,6 +331,98 @@ export default function BackupsPage() {
             className="px-3 py-1.5 text-xs font-mono bg-ink-card border border-ink-border rounded text-ink-black focus:outline-none focus:border-ink-green" />
         )}
       </div>
+
+      {/* Detailed search — narrows the listing above without another fetch */}
+      {!loading && !error && (invoices.length > 0 || tripSheets.length > 0) && (
+        <div className="mb-6 bg-ink-card border border-ink-border rounded p-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <FilterSearch
+              value={search.query}
+              onChange={(query) => updateSearch({ query })}
+              placeholder="Search filename, invoice no. or date…"
+              matchCount={totalMatches}
+              totalCount={invoices.length + tripSheets.length}
+              noun="file"
+              shortcut
+              className="flex-1 min-w-[220px]"
+            />
+            <button
+              type="button"
+              onClick={() => setSearchOpen((o) => !o)}
+              aria-expanded={searchOpen}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono rounded border transition-colors ${
+                advancedActive
+                  ? "border-ink-green/30 bg-ink-green-dim text-ink-green"
+                  : "border-ink-border text-ink-muted hover:text-ink-black"
+              }`}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="4" y1="6" x2="20" y2="6" /><line x1="7" y1="12" x2="17" y2="12" /><line x1="10" y1="18" x2="14" y2="18" />
+              </svg>
+              Filters{advancedActive ? " · on" : ""}
+            </button>
+            {(searchActive || search.sort !== "NEWEST") && (
+              <button
+                type="button"
+                onClick={() => updateSearch(EMPTY_SEARCH)}
+                className="px-2 py-1.5 text-xs font-mono text-ink-muted hover:text-ink-black transition-colors"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+
+          {searchOpen && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-3 pt-3 border-t border-ink-border">
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] font-mono text-ink-muted uppercase tracking-wide">Type</span>
+                <select
+                  value={search.kind}
+                  onChange={(e) => updateSearch({ kind: e.target.value as KindFilter })}
+                  className="px-2 py-1.5 text-xs font-mono bg-ink-card border border-ink-border rounded text-ink-black focus:outline-none focus:border-ink-green"
+                >
+                  <option value="ALL">All files</option>
+                  <option value="INVOICES">Signed invoices</option>
+                  <option value="TRIPS">Completed trip sheets</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] font-mono text-ink-muted uppercase tracking-wide">Signed / processed from</span>
+                <input
+                  type="date"
+                  value={search.from}
+                  max={search.to || undefined}
+                  onChange={(e) => updateSearch({ from: e.target.value })}
+                  className="px-2 py-1.5 text-xs font-mono bg-ink-card border border-ink-border rounded text-ink-black focus:outline-none focus:border-ink-green"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] font-mono text-ink-muted uppercase tracking-wide">To</span>
+                <input
+                  type="date"
+                  value={search.to}
+                  min={search.from || undefined}
+                  onChange={(e) => updateSearch({ to: e.target.value })}
+                  className="px-2 py-1.5 text-xs font-mono bg-ink-card border border-ink-border rounded text-ink-black focus:outline-none focus:border-ink-green"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] font-mono text-ink-muted uppercase tracking-wide">Sort by</span>
+                <select
+                  value={search.sort}
+                  onChange={(e) => updateSearch({ sort: e.target.value as SortOrder })}
+                  className="px-2 py-1.5 text-xs font-mono bg-ink-card border border-ink-border rounded text-ink-black focus:outline-none focus:border-ink-green"
+                >
+                  <option value="NEWEST">Newest first</option>
+                  <option value="OLDEST">Oldest first</option>
+                  <option value="NAME">Filename (A–Z)</option>
+                  <option value="LARGEST">Largest first</option>
+                </select>
+              </label>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Success message */}
       {purgeResult && (
@@ -239,14 +463,25 @@ export default function BackupsPage() {
 
       {!loading && !error && (invoices.length > 0 || tripSheets.length > 0) && (
         <div className="space-y-4">
+          {totalMatches === 0 && (
+            <div className="bg-ink-card border-2 border-dashed border-ink-border rounded p-10 text-center">
+              <p className="font-mono text-sm font-medium text-ink-black mb-1">No files match this search</p>
+              <button onClick={() => updateSearch(EMPTY_SEARCH)} className="text-xs font-mono text-ink-green hover:underline">
+                Reset search
+              </button>
+            </div>
+          )}
+
           {/* ── Signed Invoices Section ─────────────────────────────── */}
-          {invoices.length > 0 && (
+          {filteredInvoices.length > 0 && (
             <div className="bg-ink-card border border-ink-border rounded overflow-hidden">
               <button onClick={() => setInvoicesOpen(!invoicesOpen)}
                 className="flex items-center gap-3 w-full px-5 py-3.5 text-left hover:bg-ink-surface/50 transition-colors">
                 <Chevron open={invoicesOpen} />
                 <span className="font-mono text-sm font-medium text-ink-black">Signed Invoices</span>
-                <span className="ml-auto text-xs font-mono text-ink-muted">{invoices.length} files · {formatSize(invoices.reduce((s, i) => s + i.sizeBytes, 0))}</span>
+                <span className="ml-auto text-xs font-mono text-ink-muted">
+                  {searchActive && filteredInvoices.length !== invoices.length ? `${filteredInvoices.length} of ${invoices.length}` : invoices.length} files · {formatSize(filteredInvoices.reduce((s, i) => s + i.sizeBytes, 0))}
+                </span>
                 {selectedInvoices.size > 0 && (
                   <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-green-dim text-ink-green">{selectedInvoices.size} selected</span>
                 )}
@@ -258,7 +493,7 @@ export default function BackupsPage() {
                     <thead>
                       <tr className="border-b border-ink-border">
                         <th className="text-left px-5 py-2.5 w-10">
-                          <input type="checkbox" checked={invoices.length > 0 && selectedInvoices.size === invoices.length} onChange={toggleAllInvoices}
+                          <input type="checkbox" checked={allPageInvoicesSelected} onChange={toggleAllInvoices}
                             className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F] cursor-pointer" />
                         </th>
                         <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Filename</th>
@@ -267,7 +502,7 @@ export default function BackupsPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-ink-border">
-                      {invoices.map((inv) => (
+                      {pageInvoices.map((inv) => (
                         <tr key={inv.filename}
                           className={`hover:bg-ink-surface/50 transition-colors cursor-pointer ${selectedInvoices.has(inv.filename) ? "bg-ink-green-dim/20" : ""}`}
                           onClick={() => toggleInvoice(inv.filename)}>
@@ -282,19 +517,22 @@ export default function BackupsPage() {
                       ))}
                     </tbody>
                   </table>
+                  <Pager page={shownInvoicePage} total={filteredInvoices.length} onPage={setInvoicePage} />
                 </div>
               )}
             </div>
           )}
 
           {/* ── Completed Trip Sheets Section ──────────────────────── */}
-          {tripSheets.length > 0 && (
+          {filteredTrips.length > 0 && (
             <div className="bg-ink-card border border-ink-border rounded overflow-hidden">
               <button onClick={() => setTripsOpen(!tripsOpen)}
                 className="flex items-center gap-3 w-full px-5 py-3.5 text-left hover:bg-ink-surface/50 transition-colors">
                 <Chevron open={tripsOpen} />
                 <span className="font-mono text-sm font-medium text-ink-black">Completed Trip Sheets</span>
-                <span className="ml-auto text-xs font-mono text-ink-muted">{tripSheets.length} files · {formatSize(tripSheets.reduce((s, t) => s + t.sizeBytes, 0))}</span>
+                <span className="ml-auto text-xs font-mono text-ink-muted">
+                  {searchActive && filteredTrips.length !== tripSheets.length ? `${filteredTrips.length} of ${tripSheets.length}` : tripSheets.length} files · {formatSize(filteredTrips.reduce((s, t) => s + t.sizeBytes, 0))}
+                </span>
                 {selectedTrips.size > 0 && (
                   <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-green-dim text-ink-green">{selectedTrips.size} selected</span>
                 )}
@@ -306,7 +544,7 @@ export default function BackupsPage() {
                     <thead>
                       <tr className="border-b border-ink-border">
                         <th className="text-left px-5 py-2.5 w-10">
-                          <input type="checkbox" checked={tripSheets.length > 0 && selectedTrips.size === tripSheets.length} onChange={toggleAllTrips}
+                          <input type="checkbox" checked={allPageTripsSelected} onChange={toggleAllTrips}
                             className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F] cursor-pointer" />
                         </th>
                         <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Filename</th>
@@ -315,7 +553,7 @@ export default function BackupsPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-ink-border">
-                      {tripSheets.map((ts) => (
+                      {pageTrips.map((ts) => (
                         <tr key={ts.filename}
                           className={`hover:bg-ink-surface/50 transition-colors cursor-pointer ${selectedTrips.has(ts.filename) ? "bg-ink-green-dim/20" : ""}`}
                           onClick={() => toggleTrip(ts.filename)}>
@@ -330,6 +568,7 @@ export default function BackupsPage() {
                       ))}
                     </tbody>
                   </table>
+                  <Pager page={shownTripPage} total={filteredTrips.length} onPage={setTripPage} />
                 </div>
               )}
             </div>
