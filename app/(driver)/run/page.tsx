@@ -78,6 +78,19 @@ interface DriverTripSheet {
   regNo: string;
   uploadedAt: string;
   stops: TripStop[];
+  /** Invoices the office took off this run — the customer refused them. */
+  removedStops?: RemovedStop[];
+  /** Stops the office gave to another driver. */
+  reallocatedOut?: { id: string; invoiceNumber: string; customerName: string; toDriverName: string }[];
+}
+
+interface RemovedStop {
+  id: string;
+  stopNumber: number;
+  invoiceNumber: string;
+  customerName: string;
+  reason: string;
+  keptForCollections: boolean;
 }
 
 export default function RunPage() {
@@ -165,6 +178,17 @@ export default function RunPage() {
   const outstandingCollections = stops
     .flatMap((s) => s.collections ?? [])
     .filter((c) => !isCollectionDone(c)).length;
+  // Only the active runs — the same sheets `stops` is drawn from.
+  const removed = tripSheets
+    .filter((t) => t.status === "ACTIVE")
+    .flatMap((t) => t.removedStops ?? []);
+  const movedAway = tripSheets
+    .filter((t) => t.status === "ACTIVE")
+    .flatMap((t) => t.reallocatedOut ?? []);
+  // Everything still on the run is done, and the rest was taken off or handed
+  // to another driver by the office: nothing left, so the driver heads back.
+  const runDone =
+    (stops.length > 0 || removed.length > 0 || movedAway.length > 0) && signed === total;
 
   return (
     <div className="flex-1 flex flex-col px-4 py-4">
@@ -187,7 +211,10 @@ export default function RunPage() {
           />
         </div>
         <p className="text-xs text-ink-muted mt-2 font-mono">
-          {total > 0 ? `${pct}% complete` : "No deliveries assigned"}
+          {total > 0 ? `${pct}% complete` : removed.length + movedAway.length > 0 ? "Nothing left to deliver" : "No deliveries assigned"}
+          {removed.length > 0 && (
+            <span className="ml-2 text-ink-red">· {removed.length} removed by the office</span>
+          )}
           {outstandingCollections > 0 && (
             <span className="ml-2 text-ink-violet">
               · {outstandingCollections} to collect
@@ -211,8 +238,57 @@ export default function RunPage() {
         </div>
       )}
 
+      {/* Run finished. Said outright, because a run whose last stops were
+          rejected by the office otherwise just looks shorter than it was. */}
+      {!loading && !error && runDone && (
+        <div className="bg-ink-green-dim border border-ink-green/20 rounded p-4 mb-4 text-center">
+          <p className="font-mono text-sm font-medium text-ink-green">Run complete — return to base</p>
+          <p className="text-xs text-ink-muted mt-1">
+            {removed.length > 0
+              ? `Every remaining stop is done. ${removed.length} invoice${removed.length !== 1 ? "s were" : " was"} rejected and taken off by the office — bring ${removed.length !== 1 ? "those goods" : "the goods"} back.`
+              : movedAway.length > 0
+              ? `Every remaining stop is done. ${movedAway.length} stop${movedAway.length !== 1 ? "s were" : " was"} moved to another driver.`
+              : "Every stop is done."}
+          </p>
+        </div>
+      )}
+
+      {/* Stops the office took off. Kept visible so the driver knows the
+          goods come back, rather than wondering where two stops went. */}
+      {!loading && !error && removed.length > 0 && (
+        <div className="bg-ink-red-dim border border-ink-red/20 rounded p-3 mb-4">
+          <p className="text-[10px] font-mono uppercase tracking-wide text-ink-red mb-1.5">
+            Removed by the office — do not deliver
+          </p>
+          {removed.map((r) => (
+            <p key={r.id} className="text-xs text-ink-black py-0.5">
+              <span className="font-mono">{r.invoiceNumber}</span>
+              <span className="text-ink-muted"> · {r.customerName} — {r.reason}</span>
+              {r.keptForCollections && (
+                <span className="text-ink-violet"> (collection still on your run)</span>
+              )}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {/* Stops the office handed to another driver. */}
+      {!loading && !error && movedAway.length > 0 && (
+        <div className="bg-ink-surface border border-ink-border rounded p-3 mb-4">
+          <p className="text-[10px] font-mono uppercase tracking-wide text-ink-muted mb-1.5">
+            Moved to another driver — not yours to deliver
+          </p>
+          {movedAway.map((r) => (
+            <p key={r.id} className="text-xs text-ink-black py-0.5">
+              <span className="font-mono">{r.invoiceNumber || "Collection"}</span>
+              <span className="text-ink-muted"> · {r.customerName} → {r.toDriverName}</span>
+            </p>
+          ))}
+        </div>
+      )}
+
       {/* Empty state */}
-      {!loading && !error && stops.length === 0 && (
+      {!loading && !error && stops.length === 0 && removed.length === 0 && movedAway.length === 0 && (
         <div className="bg-ink-card border-2 border-dashed border-ink-border rounded p-10 text-center flex-1 flex flex-col items-center justify-center">
           <div className="text-4xl mb-4">📦</div>
           <p className="font-mono text-sm font-medium text-ink-black mb-2">

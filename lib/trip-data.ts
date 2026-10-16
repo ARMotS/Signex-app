@@ -95,6 +95,22 @@ export interface TripRemovedStop {
   keptForCollections: boolean;
 }
 
+/** A stop moved between drivers' runs — see ReallocatedStop. */
+export interface TripReallocation {
+  id: string;
+  fromTripSheetId: string;
+  toTripSheetId: string;
+  fromDriverName: string;
+  toDriverName: string;
+  fromStopNumber: number;
+  toStopNumber: number;
+  invoiceNumber: string;
+  customerName: string;
+  reason: string | null;
+  reallocatedBy: string;
+  reallocatedAt: Date;
+}
+
 /**
  * Whether a stop's delivery is finished. A stop with no invoice number has
  * nothing to deliver — a collection-only stop, or one whose invoice was taken
@@ -115,8 +131,12 @@ export interface TripSheet {
   uploadedBy: string;
   sourceFilename: string;
   stops: TripStop[];
-  /** Only loaded for the dispatcher's views (getAllTripSheets / getTripSheet). */
+  /** Invoices the office took off this run before they were signed. */
   removedStops?: TripRemovedStop[];
+  /** Stops moved off this run to another driver. */
+  reallocatedOut?: TripReallocation[];
+  /** Stops this run received from another driver's run. */
+  reallocatedIn?: TripReallocation[];
 }
 
 /** One frozen stop inside a CompletedTripSheet.stops snapshot. */
@@ -190,6 +210,10 @@ export interface CompletedTripSheet {
   collections: ArchivedCollection[];
   /** Invoices taken off this run before it closed. Joined from RemovedStop. */
   removedStops: TripRemovedStop[];
+  /** Stops handed to another driver before it closed. */
+  reallocatedOut: TripReallocation[];
+  /** Stops it took over from another driver's run. */
+  reallocatedIn: TripReallocation[];
 }
 
 // ─── Trip Sheet Operations ────────────────────────────────────────────────
@@ -352,7 +376,10 @@ export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
   ]);
 
   const driverMap = new Map(drivers.map((d) => [d.id, d]));
-  const removedByTrip = await loadRemovedStops(tenantId, trips.map((t) => t.id));
+  const [removedByTrip, realloc] = await Promise.all([
+    loadRemovedStops(tenantId, trips.map((t) => t.id)),
+    loadReallocations(tenantId, trips.map((t) => t.id)),
+  ]);
   const stopsByTrip = new Map<string, typeof allStops>();
   for (const stop of allStops) {
     const existing = stopsByTrip.get(stop.tripSheetId) || [];
@@ -373,6 +400,8 @@ export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
       sourceFilename: t.sourceFilename,
       stops: (stopsByTrip.get(t.id) || []).map(mapStop),
       removedStops: removedByTrip.get(t.id) ?? [],
+      reallocatedOut: realloc.out.get(t.id) ?? [],
+      reallocatedIn: realloc.inbound.get(t.id) ?? [],
     };
   });
 }
@@ -421,6 +450,10 @@ export async function getTripSheet(
     sourceFilename: trip.sourceFilename,
     stops: stops.map(mapStop),
     removedStops: (await loadRemovedStops(tenantId, [trip.id])).get(trip.id) ?? [],
+    ...(await loadReallocations(tenantId, [trip.id]).then((r) => ({
+      reallocatedOut: r.out.get(trip.id) ?? [],
+      reallocatedIn: r.inbound.get(trip.id) ?? [],
+    }))),
   };
 }
 
@@ -468,6 +501,14 @@ export async function getTripSheetsForDriver(
     stopsByTrip.set(stop.tripSheetId, existing);
   }
 
+  // The driver is told which stops the office took off and why — otherwise
+  // they simply vanish, and a run whose rest was rejected looks unfinished
+  // rather than done. Keyed to this driver's own trip ids.
+  const [removedByTrip, realloc] = await Promise.all([
+    loadRemovedStops(tenantId, trips.map((t) => t.id)),
+    loadReallocations(tenantId, trips.map((t) => t.id)),
+  ]);
+
   return trips.map((t) => ({
     id: t.id,
     driverId: t.driverId,
@@ -478,6 +519,9 @@ export async function getTripSheetsForDriver(
     uploadedBy: t.uploadedBy,
     sourceFilename: t.sourceFilename,
     stops: (stopsByTrip.get(t.id) || []).map(mapStop),
+    removedStops: removedByTrip.get(t.id) ?? [],
+    reallocatedOut: realloc.out.get(t.id) ?? [],
+    reallocatedIn: realloc.inbound.get(t.id) ?? [],
   }));
 }
 
@@ -628,19 +672,20 @@ export async function completeTripSheet(
     // Verify every delivery is signed. A stop with no invoice number has
     // nothing to sign (collection-only, or its invoice was taken off the run)
     // — it used to count as unsigned forever, so such a trip could never close.
-    const [stops, removedCount] = await Promise.all([
+    const [stops, removedCount, reallocatedCount] = await Promise.all([
       db.stop.findMany({
         where: { tripSheetId: tripId },
         orderBy: { stopNumber: "asc" },
         include: { rejectedLines: { orderBy: { createdAt: "asc" } } },
       }),
       db.removedStop.count({ where: { tripSheetId: tripId } }),
+      db.reallocatedStop.count({ where: { fromTripSheetId: tripId } }),
     ]);
 
     const unsigned = stops.filter((s) => !isDeliveryDone(s));
-    // Every invoice rejected and taken off still leaves a trip to close out:
-    // the removals are its record.
-    if (unsigned.length > 0 || (stops.length === 0 && removedCount === 0)) {
+    // A run emptied by rejections or by handing its stops to another driver
+    // still has a trip to close out: those records are its history.
+    if (unsigned.length > 0 || (stops.length === 0 && removedCount + reallocatedCount === 0)) {
       return {
         success: false,
         error:
@@ -773,7 +818,9 @@ export async function completeTripSheet(
       userName: trip.uploadedBy,
       details: `Trip sheet completed for driver ${driver?.name || "Unknown"} (${stops.length} stops, all signed${
         collections.length ? `; ${collections.length} collections closed out` : ""
-      }${removedCount ? `; ${removedCount} invoice(s) removed before signing` : ""})${
+      }${removedCount ? `; ${removedCount} invoice(s) removed before signing` : ""}${
+        reallocatedCount ? `; ${reallocatedCount} stop(s) reallocated to another driver` : ""
+      })${
         trip.sourceFilename
           ? archivedFile
             ? ` — archived ${trip.sourceFilename} to processed/`
@@ -887,7 +934,10 @@ export async function getCompletedTripSheets(
     : [];
   // RemovedStop rows outlive the sheet and keep its old id, so the archive
   // finds them by tripSheetId the same way the live view does.
-  const removedByTrip = await loadRemovedStops(tenantId, rows.map((r) => r.tripSheetId));
+  const [removedByTrip, realloc] = await Promise.all([
+    loadRemovedStops(tenantId, rows.map((r) => r.tripSheetId)),
+    loadReallocations(tenantId, rows.map((r) => r.tripSheetId)),
+  ]);
   const resendsByStop = new Map<string, { count: number; last: Date }>();
   for (const r of resends) {
     const key = `${r.completedTripSheetId}:${r.stopNumber}`;
@@ -932,6 +982,8 @@ export async function getCompletedTripSheets(
       ? (r.collections as unknown as ArchivedCollection[])
       : [],
     removedStops: removedByTrip.get(r.tripSheetId) ?? [],
+    reallocatedOut: realloc.out.get(r.tripSheetId) ?? [],
+    reallocatedIn: realloc.inbound.get(r.tripSheetId) ?? [],
   }));
 }
 
@@ -1015,6 +1067,50 @@ function mapStop(stop: {
         }))
       : undefined,
   };
+}
+
+/**
+ * Reallocations touching these runs, from both ends: `out` keyed by the run
+ * the stops left, `inbound` by the run that received them. One query.
+ */
+async function loadReallocations(
+  tenantId: string,
+  tripSheetIds: string[]
+): Promise<{ out: Map<string, TripReallocation[]>; inbound: Map<string, TripReallocation[]> }> {
+  const out = new Map<string, TripReallocation[]>();
+  const inbound = new Map<string, TripReallocation[]>();
+  if (tripSheetIds.length === 0) return { out, inbound };
+
+  const rows = await scopedPrisma(tenantId).reallocatedStop.findMany({
+    where: {
+      OR: [{ fromTripSheetId: { in: tripSheetIds } }, { toTripSheetId: { in: tripSheetIds } }],
+    },
+    orderBy: [{ reallocatedAt: "asc" }, { toStopNumber: "asc" }],
+  });
+  const ids = new Set(tripSheetIds);
+  for (const r of rows) {
+    const item: TripReallocation = {
+      id: r.id,
+      fromTripSheetId: r.fromTripSheetId,
+      toTripSheetId: r.toTripSheetId,
+      fromDriverName: r.fromDriverName,
+      toDriverName: r.toDriverName,
+      fromStopNumber: r.fromStopNumber,
+      toStopNumber: r.toStopNumber,
+      invoiceNumber: r.invoiceNumber,
+      customerName: r.customerName,
+      reason: r.reason,
+      reallocatedBy: r.reallocatedBy,
+      reallocatedAt: r.reallocatedAt,
+    };
+    if (ids.has(r.fromTripSheetId)) {
+      out.set(r.fromTripSheetId, [...(out.get(r.fromTripSheetId) ?? []), item]);
+    }
+    if (ids.has(r.toTripSheetId)) {
+      inbound.set(r.toTripSheetId, [...(inbound.get(r.toTripSheetId) ?? []), item]);
+    }
+  }
+  return { out, inbound };
 }
 
 /** Invoices taken off these runs, grouped by trip sheet, oldest first. */

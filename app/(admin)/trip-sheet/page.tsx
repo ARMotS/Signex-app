@@ -104,6 +104,24 @@ interface TripSheet {
   stops: TripStop[];
   /** Invoices taken off this run before they were signed. */
   removedStops?: RemovedStop[];
+  /** Stops handed to another driver. */
+  reallocatedOut?: Reallocation[];
+  /** Stops taken over from another driver's run. */
+  reallocatedIn?: Reallocation[];
+}
+
+/** A stop moved between drivers' runs. */
+interface Reallocation {
+  id: string;
+  fromDriverName: string;
+  toDriverName: string;
+  fromStopNumber: number;
+  toStopNumber: number;
+  invoiceNumber: string;
+  customerName: string;
+  reason: string | null;
+  reallocatedBy: string;
+  reallocatedAt: string;
 }
 
 interface MatchResult {
@@ -194,7 +212,10 @@ const deliveryDone = (s: TripStop) => !s.invoiceNumber || s.status === "SIGNED";
 
 /** Every delivery signed (collections are checked by the server on Complete). */
 const tripCompletable = (t: TripSheet) =>
-  (t.stops.length > 0 || (t.removedStops?.length ?? 0) > 0) && t.stops.every(deliveryDone);
+  (t.stops.length > 0 ||
+    (t.removedStops?.length ?? 0) > 0 ||
+    (t.reallocatedOut?.length ?? 0) > 0) &&
+  t.stops.every(deliveryDone);
 
 function unsentEmails(stops: TripStop[]) {
   const failed: TripStop[] = [];
@@ -233,6 +254,8 @@ interface CompletedTripSheet {
   collections?: ArchivedCollection[];
   /** Invoices taken off the run before it closed. */
   removedStops?: RemovedStop[];
+  reallocatedOut?: Reallocation[];
+  reallocatedIn?: Reallocation[];
 }
 
 interface DriverAccount {
@@ -583,6 +606,61 @@ export default function TripSheetPage() {
       setError("Could not withdraw the rejected line");
     } finally {
       setWithdrawingLine(null);
+    }
+  };
+
+  // Reallocation: unsigned stops from one driver's active run to another
+  // driver — yesterday's unfinished run, or a driver who is absent today.
+  const [reallocTrip, setReallocTrip] = useState<TripSheet | null>(null);
+  const [reallocDriverId, setReallocDriverId] = useState("");
+  const [reallocStopIds, setReallocStopIds] = useState<Set<string>>(new Set());
+  const [reallocReason, setReallocReason] = useState("");
+  const [reallocRegNo, setReallocRegNo] = useState("");
+  const [reallocSaving, setReallocSaving] = useState(false);
+  const [reallocError, setReallocError] = useState<string | null>(null);
+
+  const openRealloc = (trip: TripSheet) => {
+    setReallocTrip(trip);
+    setReallocDriverId("");
+    // Everything still to do is ticked: the common case is the whole run.
+    setReallocStopIds(new Set(trip.stops.filter((s) => s.status !== "SIGNED").map((s) => s.id)));
+    setReallocReason("");
+    setReallocRegNo(trip.regNo || "");
+    setReallocError(null);
+  };
+
+  const submitRealloc = async () => {
+    if (!reallocTrip) return;
+    setReallocSaving(true);
+    setReallocError(null);
+    try {
+      const res = await fetch("/api/trip-sheet/reallocate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tripSheetId: reallocTrip.id,
+          stopIds: Array.from(reallocStopIds),
+          toDriverId: reallocDriverId,
+          reason: reallocReason,
+          regNo: reallocRegNo,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setReallocError(data.error || "Could not reallocate");
+        if (res.status === 404 || res.status === 409) fetchTripSheets();
+        return;
+      }
+      setCompleteSuccess(
+        `${data.moved} stop${data.moved !== 1 ? "s" : ""} reallocated from ${reallocTrip.driverName} to ${data.toDriverName}`
+      );
+      setTimeout(() => setCompleteSuccess(null), 5000);
+      setReallocTrip(null);
+      fetchTripSheets();
+    } catch {
+      setReallocError("Could not reallocate");
+    } finally {
+      setReallocSaving(false);
     }
   };
 
@@ -2680,6 +2758,11 @@ export default function TripSheetPage() {
               const signed = deliveries.filter((s) => s.status === "SIGNED").length;
               const total = deliveries.length;
               const removedStops = trip.removedStops ?? [];
+              const reallocatedOut = trip.reallocatedOut ?? [];
+              const reallocatedIn = trip.reallocatedIn ?? [];
+              const reallocTargets = [...new Set(reallocatedOut.map((r) => r.toDriverName))];
+              const reallocSources = [...new Set(reallocatedIn.map((r) => r.fromDriverName))];
+              const canReallocate = trip.stops.some((s) => s.status !== "SIGNED");
               const pct = total > 0
                 ? Math.round((signed / total) * 100)
                 : tripCompletable(trip) ? 100 : 0;
@@ -2784,6 +2867,22 @@ export default function TripSheetPage() {
                             {unsent.total} EMAIL{unsent.total !== 1 ? "S" : ""} NOT SENT
                           </span>
                         )}
+                        {reallocatedOut.length > 0 && (
+                          <span
+                            className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-surface text-ink-black border border-ink-border"
+                            title={`Handed to another driver: ${reallocatedOut.map((r) => r.invoiceNumber || `stop ${r.fromStopNumber}`).join(", ")}`}
+                          >
+                            {reallocatedOut.length} REALLOCATED → {reallocTargets.join(", ").toUpperCase()}
+                          </span>
+                        )}
+                        {reallocatedIn.length > 0 && (
+                          <span
+                            className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-surface text-ink-black border border-ink-border"
+                            title={`Taken over from ${reallocSources.join(", ")}`}
+                          >
+                            FROM {reallocSources.join(", ").toUpperCase()}
+                          </span>
+                        )}
                         {removedStops.length > 0 && (
                           <span
                             className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-red-dim text-ink-red border border-ink-red/20"
@@ -2809,6 +2908,12 @@ export default function TripSheetPage() {
                         </div>
                         <span className="text-[12px] sm:text-xs font-mono text-ink-muted shrink-0">
                           {signed}/{total} signed
+                          {removedStops.length > 0 && (
+                            <span className="text-ink-red"> · {removedStops.length} removed</span>
+                          )}
+                          {reallocatedOut.length > 0 && (
+                            <span> · {reallocatedOut.length} reallocated</span>
+                          )}
                         </span>
                         {/* Which sheet this is — two runs for one driver
                             otherwise look identical until opened. */}
@@ -2825,6 +2930,24 @@ export default function TripSheetPage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
+                      {canReallocate && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openRealloc(trip);
+                          }}
+                          className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium border bg-ink-surface text-ink-muted border-ink-border hover:text-ink-black hover:border-ink-muted-light transition-all whitespace-nowrap"
+                          title="Give unsigned stops on this run to another driver"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="17 1 21 5 17 9" />
+                            <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+                            <polyline points="7 23 3 19 7 15" />
+                            <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+                          </svg>
+                          Reallocate…
+                        </button>
+                      )}
                       {/* Complete/Archive button — only for fully signed trips */}
                       {pct === 100 && (
                         <button
@@ -3193,6 +3316,37 @@ export default function TripSheetPage() {
                           </div>
                         </div>
                       ))}
+                      {/* Reallocations, both ways. The stops themselves now
+                          live on the other run; this says where they went. */}
+                      {(reallocatedOut.length > 0 || reallocatedIn.length > 0) && (
+                        <div className="px-4 py-3 bg-ink-surface/40">
+                          {reallocatedOut.length > 0 && (
+                            <>
+                              <p className="text-[11px] font-mono text-ink-muted uppercase tracking-wide mb-1.5">
+                                Reallocated to another driver
+                              </p>
+                              {reallocatedOut.map((r) => (
+                                <p key={r.id} className="text-[12px] py-0.5">
+                                  <span className="font-mono text-ink-muted">#{r.fromStopNumber} </span>
+                                  <span className="font-mono font-medium text-ink-black">{r.invoiceNumber || "Collection"}</span>
+                                  <span className="text-ink-muted"> {r.customerName} → </span>
+                                  <span className="text-ink-black font-medium">{r.toDriverName}</span>
+                                  <span className="text-ink-muted-light">
+                                    {r.reason ? ` — ${r.reason}` : ""} · {r.reallocatedBy} · {formatDate(r.reallocatedAt)}
+                                  </span>
+                                </p>
+                              ))}
+                            </>
+                          )}
+                          {reallocatedIn.length > 0 && (
+                            <p className={`text-[12px] text-ink-muted ${reallocatedOut.length > 0 ? "mt-2" : ""}`}>
+                              {reallocatedIn.length} stop{reallocatedIn.length !== 1 ? "s" : ""} taken over from{" "}
+                              <span className="text-ink-black font-medium">{reallocSources.join(", ")}</span>
+                              {reallocatedIn[0].reason ? ` — ${reallocatedIn[0].reason}` : ""} · {formatDate(reallocatedIn[0].reallocatedAt)}
+                            </p>
+                          )}
+                        </div>
+                      )}
                       {/* Invoices taken off this run. The stop is gone from
                           the driver's phone; this is where the office sees
                           that it happened, and why. */}
@@ -3548,6 +3702,28 @@ export default function TripSheetPage() {
                                 })()}
                               </div>
                             ))}
+                            {(sheet.reallocatedOut?.length ?? 0) > 0 && (
+                              <div className="px-4 py-2.5 bg-ink-surface/40">
+                                <p className="text-[11px] font-mono text-ink-muted uppercase tracking-wide mb-1">
+                                  Reallocated to another driver
+                                </p>
+                                {sheet.reallocatedOut!.map((r) => (
+                                  <p key={r.id} className="text-[12px]">
+                                    <span className="font-mono text-ink-muted">#{r.fromStopNumber} </span>
+                                    <span className="font-mono font-medium text-ink-black">{r.invoiceNumber || "Collection"}</span>
+                                    <span className="text-ink-muted"> {r.customerName} → </span>
+                                    <span className="text-ink-black">{r.toDriverName}</span>
+                                    {r.reason && <span className="text-ink-muted-light"> — {r.reason}</span>}
+                                  </p>
+                                ))}
+                              </div>
+                            )}
+                            {(sheet.reallocatedIn?.length ?? 0) > 0 && (
+                              <p className="px-4 py-2 text-[12px] text-ink-muted bg-ink-surface/40">
+                                {sheet.reallocatedIn!.length} stop{sheet.reallocatedIn!.length !== 1 ? "s" : ""} taken over from{" "}
+                                {[...new Set(sheet.reallocatedIn!.map((r) => r.fromDriverName))].join(", ")}
+                              </p>
+                            )}
                             {(sheet.removedStops?.length ?? 0) > 0 && (
                               <div className="px-4 py-2.5 bg-ink-red-dim/20">
                                 <p className="text-[11px] font-mono text-ink-red uppercase tracking-wide mb-1">
@@ -3684,6 +3860,132 @@ export default function TripSheetPage() {
       )}
 
       {/* Trip sheets delete confirmation modal */}
+      {/* Reallocate unsigned stops to another driver. */}
+      {reallocTrip && (() => {
+        const trip = reallocTrip;
+        const movable = trip.stops.filter((s) => s.status !== "SIGNED");
+        const signedCount = trip.stops.length - movable.length;
+        const targets = drivers.filter((d) => d.id !== trip.driverId);
+        const allTicked = movable.length > 0 && movable.every((s) => reallocStopIds.has(s.id));
+        const canSubmit = !!reallocDriverId && reallocStopIds.size > 0;
+        const target = targets.find((d) => d.id === reallocDriverId);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={() => !reallocSaving && setReallocTrip(null)}>
+            <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+              <div className="px-6 py-5 overflow-y-auto">
+                <h3 className="font-mono text-sm font-medium text-ink-black">
+                  Reallocate {trip.driverName}&apos;s run
+                </h3>
+                <p className="text-xs text-ink-muted mt-0.5 truncate">
+                  {trip.sourceFilename}
+                  {signedCount > 0 && ` · ${signedCount} signed stop${signedCount !== 1 ? "s" : ""} stay with ${trip.driverName}`}
+                </p>
+
+                <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mt-4 mb-1">
+                  Give to
+                </label>
+                <select
+                  value={reallocDriverId}
+                  onChange={(e) => setReallocDriverId(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-ink-border rounded bg-white focus:outline-none focus:border-ink-black"
+                >
+                  <option value="">Choose a driver…</option>
+                  {targets.map((d) => (
+                    <option key={d.id} value={d.id}>{d.name}</option>
+                  ))}
+                </select>
+                {targets.length === 0 && (
+                  <p className="mt-1 text-xs text-ink-amber">No other active drivers. Add one on the Drivers page.</p>
+                )}
+
+                <div className="flex items-center justify-between mt-4 mb-1">
+                  <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
+                    Stops to move ({reallocStopIds.size} of {movable.length})
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setReallocStopIds(allTicked ? new Set() : new Set(movable.map((s) => s.id)))}
+                    className="text-[11px] font-mono text-ink-muted hover:text-ink-black"
+                  >
+                    {allTicked ? "Clear" : "Select all"}
+                  </button>
+                </div>
+                <div className="max-h-48 overflow-y-auto border border-ink-border rounded divide-y divide-ink-border">
+                  {movable.map((s) => (
+                    <label key={s.id} className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-ink-surface/50">
+                      <input
+                        type="checkbox"
+                        checked={reallocStopIds.has(s.id)}
+                        onChange={() =>
+                          setReallocStopIds((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(s.id)) next.delete(s.id);
+                            else next.add(s.id);
+                            return next;
+                          })
+                        }
+                        className="w-3.5 h-3.5 accent-ink-black cursor-pointer"
+                      />
+                      <span className="font-mono text-xs text-ink-muted w-6">#{s.stopNumber}</span>
+                      <span className="font-mono text-xs font-medium text-ink-black">{s.invoiceNumber || "Collection"}</span>
+                      <span className="text-xs text-ink-muted truncate">{s.customerName}</span>
+                    </label>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-[1fr_7rem] gap-2 mt-4">
+                  <input
+                    value={reallocReason}
+                    onChange={(e) => setReallocReason(e.target.value)}
+                    maxLength={300}
+                    placeholder="Reason (optional), e.g. Driver absent"
+                    className="px-3 py-2 text-sm border border-ink-border rounded focus:outline-none focus:border-ink-black"
+                  />
+                  <input
+                    value={reallocRegNo}
+                    onChange={(e) => setReallocRegNo(e.target.value)}
+                    maxLength={20}
+                    placeholder="Reg No"
+                    title="Vehicle for the new run — leave as is if the same truck"
+                    className="px-3 py-2 text-sm font-mono border border-ink-border rounded focus:outline-none focus:border-ink-black"
+                  />
+                </div>
+
+                <p className="mt-3 text-[11px] text-ink-muted">
+                  The stops come off {trip.driverName}&apos;s phone and appear on{" "}
+                  {target ? `${target.name}'s` : "the new driver's"} as a new run.{" "}
+                  {trip.driverName}&apos;s run can then be completed once what stays on it is signed.
+                </p>
+                {reallocError && <p className="mt-2 text-xs text-ink-red">{reallocError}</p>}
+              </div>
+              <div className="flex justify-end gap-3 px-6 py-4 bg-ink-surface/50 border-t border-ink-border">
+                <button
+                  onClick={() => setReallocTrip(null)}
+                  disabled={reallocSaving}
+                  className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={submitRealloc}
+                  disabled={!canSubmit || reallocSaving}
+                  className="flex items-center gap-2 px-4 py-2 text-sm font-mono font-medium text-white bg-ink-black rounded hover:bg-black transition-all disabled:opacity-50"
+                >
+                  {reallocSaving ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      Moving…
+                    </>
+                  ) : (
+                    `Move ${reallocStopIds.size} Stop${reallocStopIds.size !== 1 ? "s" : ""}${target ? ` to ${target.name}` : ""}`
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Rejected delivery: the whole invoice, or one line of it. */}
       {rejectTarget && (() => {
         const { stop, driverName } = rejectTarget;
