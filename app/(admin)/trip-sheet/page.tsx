@@ -89,6 +89,23 @@ const COLLECTION_STATUS_LABEL: Record<string, string> = {
   REFUSED: "Refused",
 };
 
+/**
+ * One status palette for the expanded trip view, shared by invoice and
+ * collection chips and by the key above them. Colour says how far along a
+ * thing is; the chip's text says what it is (INV-123 vs CR · C001). The two
+ * "done" colours differ so a signed invoice and a collected collection are
+ * never confused: green is only ever a signed invoice, violet a collection.
+ */
+const invoiceChipClass = (status: string) =>
+  status === "SIGNED" ? "badge-signed" : status === "IN_PROGRESS" ? "badge-progress" : "badge-idle";
+
+const collectionChipClass = (status: string) =>
+  status === "COLLECTED" || status === "PARTIAL"
+    ? "badge-credit"
+    : status === "NOT_AVAILABLE" || status === "REFUSED"
+    ? "badge-pending"
+    : "badge-idle";
+
 /** The three outcomes accounts has to look at before raising a credit. */
 const COLLECTION_EXCEPTIONS = new Set(["PARTIAL", "NOT_AVAILABLE", "REFUSED"]);
 
@@ -3048,12 +3065,14 @@ export default function TripSheetPage() {
                         <div>Customer</div>
                         <div className="text-right">NOP</div>
                       </div>
-                      {/* Colour key: one colour per kind of paperwork, used
-                          by every chip in the stop rows below. */}
-                      <div className="flex items-center gap-3 px-4 py-1.5 text-[10px] font-mono text-ink-muted bg-ink-surface/30">
-                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-green" />Invoice</span>
-                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-violet" />Credit return (CR)</span>
-                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-blue" />Uplift (UPL)</span>
+                      {/* Colour key: colour is status, for invoices and
+                          collections alike — see invoiceChipClass. */}
+                      <div className="flex items-center gap-x-3 gap-y-1 flex-wrap px-4 py-1.5 text-[10px] font-mono text-ink-muted bg-ink-surface/30">
+                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-muted-light" />Pending</span>
+                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-amber" />Active</span>
+                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-green" />Invoice signed</span>
+                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-violet" />Collected</span>
+                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-red" />Not collected</span>
                       </div>
                       {trip.stops.map((stop) => (
                         <div
@@ -3071,7 +3090,12 @@ export default function TripSheetPage() {
                             </span>
                             <span className="min-w-0">
                               {stop.invoiceNumber ? (
-                                <span className="badge-signed badge-sm max-w-full" title={`Invoice ${stop.invoiceNumber}`}>
+                                <span
+                                  className={`${invoiceChipClass(stop.status)} badge-sm max-w-full`}
+                                  title={`Invoice ${stop.invoiceNumber} — ${
+                                    stop.status === "SIGNED" ? "signed" : stop.status === "IN_PROGRESS" ? "active" : "pending"
+                                  }`}
+                                >
                                   <span className="truncate">{stop.invoiceNumber}</span>
                                 </span>
                               ) : (
@@ -3129,13 +3153,13 @@ export default function TripSheetPage() {
                                   key={c.id}
                                   className="flex items-center gap-2 flex-wrap text-[12px]"
                                 >
-                                  {/* Type and number in one chip, coloured by type
-                                      to match the key above. */}
+                                  {/* Type and number in one chip, coloured by
+                                      status to match the key above. */}
                                   <span
-                                    className={`badge-sm ${
-                                      c.type === "CREDIT_RETURN" ? "badge-credit" : "badge-uplift"
+                                    className={`badge-sm ${collectionChipClass(c.status)}`}
+                                    title={`${c.type === "CREDIT_RETURN" ? "Credit return" : "Non-credit uplift"} — ${
+                                      COLLECTION_STATUS_LABEL[c.status] ?? c.status
                                     }`}
-                                    title={c.type === "CREDIT_RETURN" ? "Credit return" : "Non-credit uplift"}
                                   >
                                     <span className="font-semibold">{c.type === "CREDIT_RETURN" ? "CR" : "UPL"}</span>
                                     <span className="opacity-50">·</span>
@@ -3151,16 +3175,9 @@ export default function TripSheetPage() {
                                       {c.collectedQty ?? 0} of {c.expectedQty ?? "—"}
                                     </span>
                                   )}
-                                  <span
-                                    className={`inline-flex items-center gap-1 text-[11px] font-mono ${
-                                      c.status === "COLLECTED"
-                                        ? "text-ink-green"
-                                        : COLLECTION_EXCEPTIONS.has(c.status)
-                                        ? "text-ink-amber"
-                                        : "text-ink-red"
-                                    }`}
-                                  >
-                                    <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                                  {/* Said in words as well, so it never rests on
+                                      colour alone. */}
+                                  <span className="text-[11px] font-mono text-ink-muted">
                                     {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
                                   </span>
                                   {c.exceptionReason && (
@@ -3306,30 +3323,20 @@ export default function TripSheetPage() {
                             )}
                             {/* No "N collections" pill: the collections are
                                 listed just above, each with its own chip. */}
-                            <span
-                              className={`badge-sm ${
-                                stop.status === "SIGNED"
-                                  ? "badge-signed"
+                            {/* The invoice's status, in the same palette as its
+                                chip. A collection-only stop has no invoice to
+                                sign, so it gets no pill rather than a
+                                permanent "Pending". */}
+                            {stop.invoiceNumber && (
+                              <span className={`badge-sm ${invoiceChipClass(stop.status)}`}>
+                                <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                                {stop.status === "SIGNED"
+                                  ? "Signed"
                                   : stop.status === "IN_PROGRESS"
-                                  ? "badge-progress"
-                                  : "badge-pending"
-                              }`}
-                            >
-                              <span
-                                className={`w-1.5 h-1.5 rounded-full ${
-                                  stop.status === "SIGNED"
-                                    ? "bg-ink-green"
-                                    : stop.status === "IN_PROGRESS"
-                                    ? "bg-ink-amber"
-                                    : "bg-ink-red"
-                                }`}
-                              />
-                              {stop.status === "SIGNED"
-                                ? "Signed"
-                                : stop.status === "IN_PROGRESS"
-                                ? "Active"
-                                : "Pending"}
-                            </span>
+                                  ? "Active"
+                                  : "Pending"}
+                              </span>
+                            )}
                           </div>
                         </div>
                       ))}
