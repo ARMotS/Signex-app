@@ -54,6 +54,7 @@ model Tenant {
   collections   Collection[]
   removedStops  RemovedStop[]
   rejectedLines RejectedLine[]
+  reallocatedStops ReallocatedStop[]
 }
 
 model User {
@@ -675,4 +676,37 @@ model RejectedLine {
 
   @@index([tenantId])
   @@index([stopId])
+}
+
+/// A stop moved from one driver's live run to another's — the first driver
+/// did not finish yesterday, or is absent today. The Stop row itself moves
+/// (its tripSheetId changes, with its collections and rejected lines); this is
+/// the record that it did, read from both ends: the original run shows what
+/// left it and to whom, the receiving run shows where its stops came from.
+///
+/// Like RemovedStop, deliberately no FK to either TripSheet: both are deleted
+/// when completed, and this record must outlive them. The original run can be
+/// completed once whatever is left on it is signed, even if nothing is.
+model ReallocatedStop {
+  id              String   @id @default(cuid())
+  fromTripSheetId String
+  toTripSheetId   String
+  fromDriverId    String
+  fromDriverName  String
+  toDriverId      String
+  toDriverName    String
+  /// The stop's number on the original run, and on the new one.
+  fromStopNumber  Int
+  toStopNumber    Int
+  /// Blank for a collection-only stop.
+  invoiceNumber   String
+  customerName    String
+  reason          String?
+  reallocatedBy   String
+  reallocatedAt   DateTime @default(now())
+  tenantId        String   @default("")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, fromTripSheetId])
+  @@index([tenantId, toTripSheetId])
 }

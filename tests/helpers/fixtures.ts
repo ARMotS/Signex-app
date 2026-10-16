@@ -63,6 +63,7 @@ export async function resetDatabase() {
   await p.collection.deleteMany();
   await p.rejectedLine.deleteMany();
   await p.removedStop.deleteMany();
+  await p.reallocatedStop.deleteMany();
   await p.stop.deleteMany();
   await p.tripSheet.deleteMany();
   await p.completedTripSheet.deleteMany();

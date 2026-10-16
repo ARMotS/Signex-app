@@ -2365,6 +2365,46 @@ suite("cross-ADMIN isolation", () => {
       await db().removedStop.deleteMany({ where: { tripSheetId: trip.id } });
     });
 
+    it("3 signed + 2 rejected completes, and the driver is told the run is done", async () => {
+      const { DELETE } = await import("@/app/api/trip-sheet/stops/[id]/route");
+      const { PATCH } = await import("@/app/api/trip-sheet/route");
+      const { GET: runGET } = await import("@/app/api/trip-sheet/stops/route");
+      const trip = await deploy(
+        f.a,
+        ["INV-T1", "INV-T2", "INV-T3", "INV-T4", "INV-T5"].map((invoiceNumber) => ({ invoiceNumber }))
+      );
+      await db().stop.updateMany({
+        where: { id: { in: trip.stops.slice(0, 3).map((s) => s.id) } },
+        data: { status: "SIGNED", signedAt: new Date(), emailStatus: "SENT" },
+      });
+
+      useSession(adminSession(f.a));
+      for (const stop of trip.stops.slice(3)) {
+        const res = await DELETE(
+          req(`/api/trip-sheet/stops/${stop.id}`, { method: "DELETE", body: { reason: "Wrong item sent" } }),
+          params({ id: stop.id })
+        );
+        expect(res.status).toBe(200);
+      }
+
+      // The driver's run carries the removals, so the phone can say why two
+      // stops vanished and that the run is finished.
+      useSession(driverSession(f.a));
+      const run = await (await runGET(req(`/api/trip-sheet/stops?driverId=${f.a.driver.id}`))).json();
+      const sheet = run.tripSheets.find((t: any) => t.id === trip.id);
+      expect(sheet.stops).toHaveLength(3);
+      expect(sheet.removedStops.map((r: any) => r.invoiceNumber)).toEqual(["INV-T4", "INV-T5"]);
+
+      useSession(adminSession(f.a));
+      const done = await PATCH(req("/api/trip-sheet", { method: "PATCH", body: { id: trip.id } }));
+      expect(done.status).toBe(200);
+      const archived = await db().completedTripSheet.findFirst({ where: { tripSheetId: trip.id } });
+      expect(archived!.signedStops).toBe(3);
+
+      await db().completedTripSheet.deleteMany({ where: { tripSheetId: trip.id } });
+      await db().removedStop.deleteMany({ where: { tripSheetId: trip.id } });
+    });
+
     it("rejected lines are scoped, shown on the run, and frozen at completion", async () => {
       const { POST, DELETE } = await import("@/app/api/trip-sheet/stops/[id]/rejected-lines/route");
       const { completeTripSheet } = await import("@/lib/trip-data");
@@ -2466,6 +2506,165 @@ suite("cross-ADMIN isolation", () => {
 
       await db().tripSheet.deleteMany({ where: { id: { in: [tripA.id, tripB.id] } } });
       await db().removedStop.deleteMany({ where: { tripSheetId: tripA.id } });
+    });
+  });
+
+  describe("reallocating stops to another driver", () => {
+    const deploy = async (fx: typeof f.a, invoices: string[], withCollectionOn?: string) => {
+      const { saveTripSheet } = await import("@/lib/trip-data");
+      return saveTripSheet(fx.tenantId, {
+        driverId: fx.driver.id,
+        driverName: fx.driver.name,
+        regNo: "REG-OLD",
+        uploadedBy: fx.admin.id,
+        sourceFilename: "yesterday.csv",
+        stops: invoices.map((invoiceNumber, i) => ({
+          stopNumber: i + 1,
+          invoiceNumber,
+          customerName: `Customer ${invoiceNumber}`,
+          address: "1 Depot Rd",
+          nop: 1,
+          status: "PENDING",
+          collections:
+            invoiceNumber === withCollectionOn
+              ? ([{ collectionNo: `COL-${invoiceNumber}`, type: "CREDIT_RETURN", status: "PENDING" }] as any)
+              : undefined,
+        })),
+      });
+    };
+    const reallocate = async (body: unknown) => {
+      const { POST } = await import("@/app/api/trip-sheet/reallocate/route");
+      return POST(req("/api/trip-sheet/reallocate", { method: "POST", body }));
+    };
+    let relief: { id: string; name: string };
+
+    beforeAll(async () => {
+      relief = await db().driver.create({
+        data: { name: "Relief Driver", tenantId: f.a.tenantId },
+        select: { id: true, name: true },
+      });
+    });
+
+    afterAll(async () => {
+      await db().tripSheet.deleteMany({ where: { driverId: relief.id } });
+      await db().driver.delete({ where: { id: relief.id } });
+    });
+
+    it("refuses another scope's trip or driver with 404 and moves nothing", async () => {
+      const tripA = await deploy(f.a, ["INV-M1"]);
+      const tripB = await deploy(f.b, ["INV-M1"]);
+      useSession(adminSession(f.a));
+
+      // A's trip to B's driver.
+      expect(
+        (await reallocate({ tripSheetId: tripA.id, stopIds: [tripA.stops[0].id], toDriverId: f.b.driver.id })).status
+      ).toBe(404);
+      // B's trip (and B's stop) to A's own relief driver.
+      expect(
+        (await reallocate({ tripSheetId: tripB.id, stopIds: [tripB.stops[0].id], toDriverId: relief.id })).status
+      ).toBe(404);
+      // A's trip naming B's stop.
+      expect(
+        (await reallocate({ tripSheetId: tripA.id, stopIds: [tripB.stops[0].id], toDriverId: relief.id })).status
+      ).toBe(404);
+
+      expect((await db().stop.findUnique({ where: { id: tripA.stops[0].id } }))!.tripSheetId).toBe(tripA.id);
+      expect((await db().stop.findUnique({ where: { id: tripB.stops[0].id } }))!.tripSheetId).toBe(tripB.id);
+      expect(await db().reallocatedStop.count()).toBe(0);
+
+      await db().tripSheet.deleteMany({ where: { id: { in: [tripA.id, tripB.id] } } });
+    });
+
+    it("moves unsigned stops to a new run for the other driver; the old run then completes", async () => {
+      const { PATCH } = await import("@/app/api/trip-sheet/route");
+      const { GET: runGET } = await import("@/app/api/trip-sheet/stops/route");
+      const trip = await deploy(f.a, ["INV-M2", "INV-M3", "INV-M4"], "INV-M4");
+      await db().stop.update({
+        where: { id: trip.stops[0].id },
+        data: { status: "SIGNED", signedAt: new Date(), emailStatus: "SENT" },
+      });
+      await db().stop.update({ where: { id: trip.stops[1].id }, data: { status: "IN_PROGRESS" } });
+      useSession(adminSession(f.a));
+
+      // A signed stop in the selection refuses the whole request.
+      const refused = await reallocate({
+        tripSheetId: trip.id,
+        stopIds: trip.stops.map((s) => s.id),
+        toDriverId: relief.id,
+      });
+      expect(refused.status).toBe(409);
+      expect(await db().tripSheet.count({ where: { driverId: relief.id } })).toBe(0);
+
+      expect(
+        (await reallocate({ tripSheetId: trip.id, stopIds: [trip.stops[1].id], toDriverId: f.a.driver.id })).status
+      ).toBe(400);
+
+      const res = await reallocate({
+        tripSheetId: trip.id,
+        stopIds: [trip.stops[1].id, trip.stops[2].id],
+        toDriverId: relief.id,
+        reason: "Driver absent",
+        regNo: "ca 123 456",
+      });
+      expect(res.status).toBe(200);
+      const { toTripSheetId } = await res.json();
+
+      const newTrip = await db().tripSheet.findUnique({ where: { id: toTripSheetId } });
+      expect(newTrip!.driverId).toBe(relief.id);
+      expect(newTrip!.tenantId).toBe(f.a.tenantId);
+      expect(newTrip!.regNo).toBe("CA 123 456");
+      const moved = await db().stop.findMany({ where: { tripSheetId: toTripSheetId }, orderBy: { stopNumber: "asc" } });
+      expect(moved.map((s) => [s.invoiceNumber, s.stopNumber, s.status])).toEqual([
+        ["INV-M3", 1, "PENDING"],
+        ["INV-M4", 2, "PENDING"],
+      ]);
+      // The collection followed its stop.
+      expect((await db().collection.findFirst({ where: { stopId: trip.stops[2].id } }))!.tripSheetId).toBe(toTripSheetId);
+
+      // The relief driver's phone has them; the original driver's does not.
+      useSession({ ...driverSession(f.a), id: relief.id, name: relief.name });
+      const reliefRun = await (await runGET(req(`/api/trip-sheet/stops?driverId=${relief.id}`))).json();
+      expect(reliefRun.stops.map((s: any) => s.invoiceNumber).sort()).toEqual(["INV-M3", "INV-M4"]);
+      useSession(driverSession(f.a));
+      const ownRun = await (await runGET(req(`/api/trip-sheet/stops?driverId=${f.a.driver.id}`))).json();
+      const ownSheet = ownRun.tripSheets.find((t: any) => t.id === trip.id);
+      expect(ownSheet.stops.map((s: any) => s.invoiceNumber)).toEqual(["INV-M2"]);
+      expect(ownSheet.reallocatedOut.map((r: any) => r.toDriverName)).toEqual([relief.name, relief.name]);
+
+      // ADMIN 2 sees neither the new run nor the records.
+      const { GET } = await import("@/app/api/trip-sheet/route");
+      useSession(adminSession(f.b));
+      const bodyB = await (await GET(req("/api/trip-sheet"))).json();
+      expect(JSON.stringify(bodyB)).not.toContain("INV-M3");
+      expect(JSON.stringify(bodyB)).not.toContain("Relief Driver");
+
+      // The original run — only its signed stop left — completes.
+      useSession(adminSession(f.a));
+      const done = await PATCH(req("/api/trip-sheet", { method: "PATCH", body: { id: trip.id } }));
+      expect(done.status).toBe(200);
+
+      await db().completedTripSheet.deleteMany({ where: { tripSheetId: trip.id } });
+      await db().tripSheet.deleteMany({ where: { id: toTripSheetId } });
+      await db().reallocatedStop.deleteMany({ where: { fromTripSheetId: trip.id } });
+    });
+
+    it("a run whose every stop was reallocated can still be completed", async () => {
+      const { completeTripSheet } = await import("@/lib/trip-data");
+      const trip = await deploy(f.a, ["INV-M5", "INV-M6"]);
+      useSession(adminSession(f.a));
+
+      const res = await reallocate({
+        tripSheetId: trip.id,
+        stopIds: trip.stops.map((s) => s.id),
+        toDriverId: relief.id,
+      });
+      const { toTripSheetId } = await res.json();
+      expect(await db().stop.count({ where: { tripSheetId: trip.id } })).toBe(0);
+      expect((await completeTripSheet(f.a.tenantId, trip.id, "Admin A")).success).toBe(true);
+
+      await db().completedTripSheet.deleteMany({ where: { tripSheetId: trip.id } });
+      await db().tripSheet.deleteMany({ where: { id: toTripSheetId } });
+      await db().reallocatedStop.deleteMany({ where: { fromTripSheetId: trip.id } });
     });
   });
 
