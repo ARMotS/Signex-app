@@ -38,6 +38,8 @@ interface TripStop {
   signedAt?: string;
   tripSheetDate?: string;
   collections?: TripCollection[];
+  /** Lines the customer refused — the office recorded them; do not hand over. */
+  rejectedLines?: { id: string; description: string; quantity: number | null; reason: string }[];
 }
 
 const COLLECTION_STATUS_LABEL: Record<TripCollection["status"], string> = {
@@ -309,6 +311,21 @@ export default function RunPage() {
                         <span className="text-[10px] font-mono text-ink-green">Signed</span>
                       )}
                     </div>
+
+                    {(stop.rejectedLines?.length ?? 0) > 0 && (
+                      <div className="mt-2 px-2.5 py-2 rounded bg-ink-red-dim border border-ink-red/20">
+                        <p className="text-[10px] font-mono uppercase tracking-wide text-ink-red mb-1">
+                          Refused — do not hand over
+                        </p>
+                        {stop.rejectedLines!.map((l) => (
+                          <p key={l.id} className="text-xs text-ink-black">
+                            {l.quantity != null ? `${l.quantity} × ` : ""}
+                            {l.description}
+                            <span className="text-ink-muted"> — {l.reason}</span>
+                          </p>
+                        ))}
+                      </div>
+                    )}
 
                     {stop.status !== "SIGNED" && (
                       <div className="flex items-center gap-2 mt-2 flex-wrap">

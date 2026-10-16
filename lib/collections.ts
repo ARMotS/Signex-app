@@ -898,7 +898,7 @@ export async function buildSignedCollectionPdf(
 }
 
 /** Greedy word wrap against an embedded font's real metrics. */
-function wrapText(
+export function wrapText(
   text: string,
   font: { widthOfTextAtSize: (t: string, s: number) => number },
   size: number,

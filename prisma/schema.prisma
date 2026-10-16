@@ -52,6 +52,8 @@ model Tenant {
   importedFiles ImportedFile[]
   auditLogs     AuditLog[]
   collections   Collection[]
+  removedStops  RemovedStop[]
+  rejectedLines RejectedLine[]
 }
 
 model User {
@@ -252,6 +254,7 @@ model Stop {
   tenantId      String     @default("")
   tenant        Tenant     @relation(fields: [tenantId], references: [id])
   collections   Collection[]
+  rejectedLines RejectedLine[]
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
 
@@ -606,4 +609,70 @@ model Contact {
   @@index([tenantId, companyName])
   @@index([tenantId, email])
   @@index([deletedAt])
+}
+
+/// An invoice taken off a live trip sheet before it was signed — the customer
+/// rejected the delivery (wrong item sent), or the dispatcher deleted the
+/// invoice PDF from the Invoices page while it was still on a run.
+///
+/// Frozen, like CompletedTripSheet: the Stop row is gone (or, if the stop also
+/// carried collections, stripped of its delivery), so this is the only record
+/// that the invoice was ever on the run and why it came off. Deliberately no
+/// foreign key to TripSheet — the record must outlive the sheet, which is
+/// deleted when it is completed. The trip sheet page and the completed archive
+/// both find these by tripSheetId.
+model RemovedStop {
+  id                 String   @id @default(cuid())
+  tripSheetId        String
+  driverId           String
+  driverName         String
+  stopNumber         Int
+  invoiceNumber      String
+  customerName       String
+  address            String   @default("")
+  nop                Int      @default(0)
+  invoiceFile        String?
+  /// The stop's status when it came off (PENDING / IN_PROGRESS). Never SIGNED:
+  /// a signed delivery cannot be removed.
+  statusAtRemoval    String
+  /// REJECTED (taken off on the Trip Sheet page) or INVOICE_DELETED (its PDF
+  /// was deleted on the Invoices page).
+  source             String
+  reason             String   @db.Text
+  removedBy          String
+  /// True when the stop stayed on the run for its collections and only the
+  /// delivery came off.
+  keptForCollections Boolean  @default(false)
+  removedAt          DateTime @default(now())
+  tenantId           String   @default("")
+  tenant             Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, tripSheetId])
+  @@index([tenantId, removedAt])
+}
+
+/// One line of an invoice the customer refused at the door while accepting the
+/// rest. Signex holds invoices as PDFs, not line items, so this is the
+/// dispatcher's description of the line — what accounts raises the credit note
+/// against. It is shown to the driver, printed on a "Delivery exceptions" page
+/// appended to the signed PDF, and listed in the confirmation email.
+///
+/// Composite FK to [tenantId, id] on Stop: a rejected line cannot hang off
+/// another scope's stop, and it goes with its stop.
+model RejectedLine {
+  id          String   @id @default(cuid())
+  stopId      String
+  description String
+  /// Units refused. Null when no count was given.
+  quantity    Int?
+  reason      String
+  recordedBy  String
+  createdAt   DateTime @default(now())
+  tenantId    String   @default("")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+
+  stop Stop @relation(fields: [tenantId, stopId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([tenantId])
+  @@index([stopId])
 }

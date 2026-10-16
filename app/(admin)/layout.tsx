@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
 import ScopeSwitcher, { ScopeBanner } from "@/components/admin/ScopeSwitcher";
+import LogoMark from "@/components/LogoMark";
 
 const navItems = [
   {
@@ -148,20 +149,7 @@ export default function AdminLayout({
             which ends the session; a logo leading to the public home page would
             leave a signed-in session behind it. */}
         <div className="flex items-center gap-2 px-5 py-5 border-b border-white/5 shrink-0">
-          <div className="w-7 h-7 bg-ink-green/10 rounded flex items-center justify-center">
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="#00C07F"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-            </svg>
-          </div>
+          <LogoMark size={28} />
           <span className="font-mono text-sm font-medium tracking-tight text-sidebar-text-active">
             SIGNEX
           </span>
@@ -266,20 +254,7 @@ export default function AdminLayout({
         <header className="md:hidden flex items-center justify-between px-4 py-3 bg-ink-card border-b border-ink-border">
           {/* Not a link — see the sidebar logo. */}
           <div className="flex items-center gap-2">
-            <div className="w-7 h-7 bg-ink-black rounded flex items-center justify-center">
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="#00C07F"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-              </svg>
-            </div>
+            <LogoMark size={28} />
             <span className="font-mono text-sm font-medium text-ink-black">
               SIGNEX
             </span>

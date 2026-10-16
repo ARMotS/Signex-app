@@ -99,6 +99,10 @@ export async function sendStopDeliveryConfirmation(
       include: {
         contact: true,
         tripSheet: { select: { driverId: true } },
+        rejectedLines: {
+          orderBy: { createdAt: "asc" },
+          select: { description: true, quantity: true, reason: true },
+        },
       },
     });
 
@@ -169,6 +173,7 @@ export async function sendStopDeliveryConfirmation(
       signedAt: stop.signedAt ?? new Date(),
       signedPDFUrl: "",
       companyName: process.env.COMPANY_NAME ?? "Signex",
+      rejectedLines: stop.rejectedLines,
       pdfAttachment,
     });
 

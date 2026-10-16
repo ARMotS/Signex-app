@@ -939,7 +939,11 @@ export default function SettingsPage() {
                   Select OneDrive Folder
                 </h3>
                 <p className="text-xs text-ink-muted mt-0.5">
-                  Choose the folder containing your {onedriveBrowserTarget === "invoices" ? "PDF invoices" : "trip sheet files"}
+                  Choose the folder containing your {onedriveBrowserTarget === "invoices"
+                    ? "PDF invoices"
+                    : onedriveBrowserTarget === "collections"
+                      ? "collection files"
+                      : "trip sheet files"}
                 </p>
               </div>
               <button
@@ -1875,7 +1879,11 @@ export default function SettingsPage() {
                   Browse Folders
                 </h3>
                 <p className="text-xs text-ink-muted mt-0.5">
-                  Navigate to the folder containing your {browserTarget === "tripsheets" ? "CSV/Excel trip sheets" : "invoice PDFs"}
+                  Navigate to the folder containing your {browserTarget === "tripsheets"
+                    ? "CSV/Excel trip sheets"
+                    : browserTarget === "collections"
+                      ? "collection files"
+                      : "invoice PDFs"}
                 </p>
               </div>
               <button

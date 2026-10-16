@@ -8,6 +8,8 @@
  * stale against demo data. Everything here is decorative.
  */
 
+import LogoMark from "@/components/LogoMark";
+
 const SIGNATURE_PATH =
   "M14 58 C 18 30, 26 14, 30 30 C 33 44, 27 62, 24 66 C 34 40, 42 24, 46 40 C 48 50, 46 60, 52 56 C 58 52, 60 38, 66 40 C 72 42, 66 58, 74 56 C 82 54, 84 40, 90 42 C 96 44, 92 58, 100 56 C 108 54, 112 44, 118 46 C 126 48, 122 60, 132 56 C 144 52, 150 42, 166 40";
 
@@ -26,11 +28,7 @@ function AppBar({ right }: { right: string }) {
   return (
     <div className="flex items-center justify-between px-3 pt-7 pb-2 bg-white border-b border-ink-border">
       <div className="flex items-center gap-1.5">
-        <div className="w-4 h-4 rounded bg-ink-black flex items-center justify-center">
-          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="3" strokeLinecap="round">
-            <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-          </svg>
-        </div>
+        <LogoMark size={16} />
         <span className="text-[9px] font-semibold text-ink-black">Signex</span>
       </div>
       <span className="text-[7px] font-medium text-ink-green bg-ink-green-dim rounded px-1.5 py-0.5">{right}</span>

@@ -8,6 +8,7 @@ import { scheduleDeliveryConfirmation } from "@/lib/delivery-notify";
 import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { driverOwnsInvoiceFile } from "@/lib/driver-access";
+import { getRejectedLines } from "@/lib/stop-removal";
 
 /**
  * Signing does real work: embedding the signature, writing the signed PDF back
@@ -188,13 +189,18 @@ export const PUT = withAuth(async (
   const base64Data = signatureImage.replace(/^data:image\/png;base64,/, "");
   const signatureBytes = Uint8Array.from(Buffer.from(base64Data, "base64"));
 
+  // Lines the customer refused go on the signed PDF, so the paper says what
+  // the signature covers. stopId is already confirmed in scope above.
+  const rejectedLines = stopId ? await getRejectedLines(ctx.tenantId, stopId) : [];
+
   let signedPdfBuffer: Buffer;
   try {
     signedPdfBuffer = await embedSignatureOnPdf(
       ctx.tenantId,
       originalPdf,
       signatureBytes,
-      stampName
+      stampName,
+      rejectedLines
     );
   } catch (err) {
     console.error("Failed to embed signature on PDF:", err);

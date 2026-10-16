@@ -30,6 +30,8 @@ interface DeliveryConfirmationProps {
   signedAt: string; // pre-formatted string
   signedPDFUrl: string;
   companyName: string;
+  /** Lines the customer refused at the door. Empty for a full delivery. */
+  rejectedLines?: { description: string; quantity: number | null; reason: string }[];
 }
 
 export function DeliveryConfirmation({
@@ -42,6 +44,7 @@ export function DeliveryConfirmation({
   signedAt,
   signedPDFUrl,
   companyName,
+  rejectedLines = [],
 }: DeliveryConfirmationProps) {
   const greeting = contactPerson ? `Hi ${contactPerson},` : `Dear ${customerName},`;
 
@@ -115,6 +118,23 @@ export function DeliveryConfirmation({
               <Text style={styles.detailValue}>{signedAt}</Text>
             </Row>
 
+            {/* A partial delivery says so plainly: the customer is about to
+                be invoiced, and needs to know a credit is coming for these. */}
+            {rejectedLines.length > 0 && (
+              <>
+                <Hr style={styles.divider} />
+                <Text style={styles.exceptionsHeading}>
+                  Not delivered — refused at delivery
+                </Text>
+                {rejectedLines.map((line, i) => (
+                  <Text key={i} style={styles.exceptionLine}>
+                    {line.quantity != null ? `${line.quantity} × ` : ""}
+                    {line.description} — {line.reason}
+                  </Text>
+                ))}
+              </>
+            )}
+
             <Hr style={styles.divider} />
 
             {/* CTA */}
@@ -147,6 +167,17 @@ export default DeliveryConfirmation;
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
 const styles = {
+  exceptionsHeading: {
+    fontSize: "13px",
+    fontWeight: 600,
+    color: "#B3261E",
+    margin: "0 0 6px",
+  },
+  exceptionLine: {
+    fontSize: "13px",
+    color: "#1A1A1A",
+    margin: "0 0 4px",
+  },
   body: {
     backgroundColor: "#f4f4f5",
     margin: 0,

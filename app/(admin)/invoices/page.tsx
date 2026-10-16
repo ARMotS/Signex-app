@@ -21,6 +21,17 @@ interface DuplicateGroup {
   filenames: string[];
 }
 
+/** A live stop that uses an invoice — see findInvoiceTripUsage. */
+interface TripUsage {
+  filename: string;
+  stopId: string;
+  driverName: string;
+  stopNumber: number;
+  invoiceNumber: string;
+  customerName: string;
+  status: string;
+}
+
 interface InvoiceData {
   folder: string;
   count: number;
@@ -46,6 +57,14 @@ export default function InvoicesPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteMode, setDeleteMode] = useState<"original_only" | "both">("both");
   const [syncing, setSyncing] = useState(false);
+
+  // Which live trip sheets use the selected invoices — read when the delete
+  // dialog opens, so the warning names the drivers and stops it will affect.
+  const [tripUsage, setTripUsage] = useState<TripUsage[] | null>(null);
+  const [tripUsageFailed, setTripUsageFailed] = useState(false);
+  const [deleteReason, setDeleteReason] = useState("");
+  /** What the last delete took off live runs, shown once it is done. */
+  const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
 
   // Upload — files land in the same folder this page lists, so a PDF added
   // here is immediately available to match against a trip sheet.
@@ -225,6 +244,35 @@ export default function InvoicesPage() {
     setSelectedInvoices(dupeFiles);
   };
 
+  const openDeleteConfirm = async () => {
+    setShowDeleteConfirm(true);
+    setTripUsage(null);
+    setTripUsageFailed(false);
+    setDeleteReason("");
+    setDeleteNotice(null);
+    try {
+      const res = await fetch("/api/invoices/usage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filenames: Array.from(selectedInvoices) }),
+      });
+      if (!res.ok) throw new Error();
+      const json = await res.json();
+      setTripUsage(json.usage ?? []);
+    } catch {
+      // The server removes affected stops either way; the warning just could
+      // not name them.
+      setTripUsageFailed(true);
+      setTripUsage([]);
+    }
+  };
+
+  const closeDeleteConfirm = () => {
+    setShowDeleteConfirm(false);
+    setDeleteMode("both");
+    setTripUsage(null);
+  };
+
   const handleBatchDeleteInvoices = async () => {
     if (selectedInvoices.size === 0) return;
     setDeletingInvoices(true);
@@ -233,12 +281,24 @@ export default function InvoicesPage() {
       const res = await fetch("/api/invoices", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filenames: Array.from(selectedInvoices), mode: deleteMode }),
+        body: JSON.stringify({
+          filenames: Array.from(selectedInvoices),
+          mode: deleteMode,
+          reason: deleteReason,
+        }),
       });
       const result = await res.json();
       if (!res.ok) {
         setError(result.error || "Failed to delete invoices");
       } else {
+        const removed: TripUsage[] = result.removedStops ?? [];
+        if (removed.length > 0) {
+          setDeleteNotice(
+            `Removed from active trip sheets: ${removed
+              .map((u) => `${u.invoiceNumber} (${u.driverName}, stop ${u.stopNumber})`)
+              .join(", ")}`
+          );
+        }
         setSelectedInvoices(new Set());
         syncInvoices();
       }
@@ -246,10 +306,12 @@ export default function InvoicesPage() {
       setError("Failed to delete invoices");
     } finally {
       setDeletingInvoices(false);
-      setShowDeleteConfirm(false);
-      setDeleteMode("both");
+      closeDeleteConfirm();
     }
   };
+
+  const usageUnsigned = (tripUsage ?? []).filter((u) => u.status !== "SIGNED");
+  const usageSigned = (tripUsage ?? []).filter((u) => u.status === "SIGNED");
 
   // Duplicate filename set for quick lookup
   const duplicateFilenames = new Set<string>();
@@ -419,6 +481,21 @@ export default function InvoicesPage() {
       )}
 
       {/* Error state */}
+      {deleteNotice && (
+        <div className="flex items-start justify-between gap-3 bg-ink-amber-dim border border-ink-amber/20 rounded px-4 py-3">
+          <p className="text-xs font-mono text-ink-amber">
+            {deleteNotice}. The drivers&apos; runs have been updated —{" "}
+            <Link href="/trip-sheet" className="underline">see Trip Sheets</Link>.
+          </p>
+          <button
+            onClick={() => setDeleteNotice(null)}
+            className="text-xs font-mono text-ink-muted hover:text-ink-black shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {error && (
         <div className="bg-ink-red-dim border border-ink-red/20 rounded p-6 text-center">
           <p className="text-sm font-mono text-ink-red mb-2">{error}</p>
@@ -618,7 +695,7 @@ export default function InvoicesPage() {
                   Clear
                 </button>
                 <button
-                  onClick={() => setShowDeleteConfirm(true)}
+                  onClick={openDeleteConfirm}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-medium text-white bg-ink-red rounded hover:bg-red-600 transition-all"
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -693,8 +770,8 @@ export default function InvoicesPage() {
 
       {/* Delete confirmation modal */}
       {showDeleteConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={() => { setShowDeleteConfirm(false); setDeleteMode("both"); }}>
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={closeDeleteConfirm}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="px-6 py-5">
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-10 h-10 rounded-full bg-ink-red-dim flex items-center justify-center">
@@ -740,6 +817,56 @@ export default function InvoicesPage() {
                 </label>
               </div>
 
+              {/* Trip sheet impact. Checked before anything is deleted, because
+                  a deleted invoice takes its stop off a driver's run. */}
+              {tripUsage === null ? (
+                <div className="flex items-center gap-2 mb-4 px-3 py-2.5 rounded bg-ink-surface">
+                  <div className="w-3.5 h-3.5 border-2 border-ink-border border-t-ink-muted rounded-full animate-spin" />
+                  <p className="text-xs font-mono text-ink-muted">Checking active trip sheets…</p>
+                </div>
+              ) : (
+                <>
+                  {tripUsageFailed && (
+                    <p className="mb-4 px-3 py-2.5 rounded bg-ink-amber-dim text-xs text-ink-amber">
+                      Could not check active trip sheets. Any unsigned stop using these invoices will still be taken off its run.
+                    </p>
+                  )}
+                  {usageUnsigned.length > 0 && (
+                    <div className="mb-4 rounded border border-ink-red/30 bg-ink-red-dim/30 p-3">
+                      <p className="text-xs font-medium text-ink-red mb-1.5">
+                        {usageUnsigned.length} invoice{usageUnsigned.length !== 1 ? "s are" : " is"} on an active trip sheet.
+                        Deleting will take {usageUnsigned.length !== 1 ? "these stops" : "this stop"} off the driver&apos;s run:
+                      </p>
+                      <div className="max-h-28 overflow-y-auto space-y-0.5 mb-2">
+                        {usageUnsigned.map((u) => (
+                          <p key={u.stopId} className="text-xs font-mono text-ink-black truncate">
+                            {u.invoiceNumber} — {u.driverName}, stop {u.stopNumber} · {u.customerName}
+                            {u.status === "IN_PROGRESS" && <span className="text-ink-amber"> (driver is there now)</span>}
+                          </p>
+                        ))}
+                      </div>
+                      <input
+                        value={deleteReason}
+                        onChange={(e) => setDeleteReason(e.target.value)}
+                        maxLength={500}
+                        placeholder="Reason, e.g. Customer rejected — wrong item sent"
+                        className="w-full px-2.5 py-1.5 text-xs border border-ink-border rounded bg-white focus:outline-none focus:border-ink-black"
+                      />
+                      <p className="mt-1.5 text-[11px] text-ink-muted">
+                        Only one line of the invoice refused? Cancel, and use Reject… on the stop in Trip Sheets instead.
+                      </p>
+                    </div>
+                  )}
+                  {usageSigned.length > 0 && deleteMode === "both" && (
+                    <p className="mb-4 px-3 py-2.5 rounded bg-ink-amber-dim text-xs text-ink-amber">
+                      {usageSigned.length} of these {usageSigned.length !== 1 ? "were" : "was"} signed on a trip that is still open
+                      ({usageSigned.map((u) => u.invoiceNumber).join(", ")}). Deleting the signed copy destroys the proof of
+                      delivery — choose &quot;Original only&quot; to keep it.
+                    </p>
+                  )}
+                </>
+              )}
+
               <p className="text-sm text-ink-muted mb-1">
                 The following files will be <span className="font-medium text-ink-red">permanently removed</span>:
               </p>
@@ -751,14 +878,14 @@ export default function InvoicesPage() {
             </div>
             <div className="flex justify-end gap-3 px-6 py-4 bg-ink-surface/50 border-t border-ink-border">
               <button
-                onClick={() => { setShowDeleteConfirm(false); setDeleteMode("both"); }}
+                onClick={closeDeleteConfirm}
                 className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleBatchDeleteInvoices}
-                disabled={deletingInvoices}
+                disabled={deletingInvoices || tripUsage === null}
                 className="flex items-center gap-2 px-4 py-2 text-sm font-mono font-medium text-white bg-ink-red rounded hover:bg-red-600 transition-all disabled:opacity-50"
               >
                 {deletingInvoices ? (
@@ -766,6 +893,8 @@ export default function InvoicesPage() {
                     <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                     Deleting…
                   </>
+                ) : usageUnsigned.length > 0 ? (
+                  `Delete & Remove ${usageUnsigned.length} Stop${usageUnsigned.length !== 1 ? "s" : ""}`
                 ) : (
                   deleteMode === "original_only" ? "Delete Originals" : "Delete All Copies"
                 )}

@@ -39,6 +39,8 @@ export interface DeliveryConfirmationParams {
   signedAt: Date;
   signedPDFUrl: string;
   companyName: string;
+  /** Lines the customer refused at the door — listed in the email. */
+  rejectedLines?: { description: string; quantity: number | null; reason: string }[];
   pdfAttachment?: {
     filename: string;
     content: Buffer;
@@ -72,7 +74,9 @@ export async function sendDeliveryConfirmation(
     const info = await transporter.sendMail({
       from: `${fromName} <${fromEmail}>`,
       to: params.customerEmail,
-      subject: `Delivery confirmed — ${params.invoiceNumber}`,
+      subject: params.rejectedLines?.length
+        ? `Partial delivery confirmed — ${params.invoiceNumber}`
+        : `Delivery confirmed — ${params.invoiceNumber}`,
       html,
       ...(params.pdfAttachment && {
         attachments: [
