@@ -210,6 +210,14 @@ const CLOUD_PER_PAGE = 10;
  */
 const deliveryDone = (s: TripStop) => !s.invoiceNumber || s.status === "SIGNED";
 
+/**
+ * Whether a stop can be reallocated: not signed, and no collection on it given
+ * an outcome yet — collected goods are on the original driver's truck. Mirrors
+ * the server's rule in lib/stop-reallocation.ts.
+ */
+const canMoveStop = (s: TripStop) =>
+  s.status !== "SIGNED" && (s.collections ?? []).every((c) => c.status === "PENDING");
+
 /** Every delivery signed (collections are checked by the server on Complete). */
 const tripCompletable = (t: TripSheet) =>
   (t.stops.length > 0 ||
@@ -575,7 +583,7 @@ export default function TripSheetPage() {
             });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setRejectError(data.error || "Could not save the rejection");
+        setRejectError(data.error || "Could not remove it from the route");
         // Signed or gone since the page loaded — show the sheet as it is now.
         if (res.status === 404 || res.status === 409) fetchTripSheets();
         return;
@@ -583,7 +591,7 @@ export default function TripSheetPage() {
       setRejectTarget(null);
       fetchTripSheets();
     } catch {
-      setRejectError("Could not save the rejection");
+      setRejectError("Could not remove it from the route");
     } finally {
       setRejectSaving(false);
     }
@@ -599,11 +607,11 @@ export default function TripSheetPage() {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(data.error || "Could not withdraw the rejected line");
+        setError(data.error || "Could not put the line back");
       }
       fetchTripSheets();
     } catch {
-      setError("Could not withdraw the rejected line");
+      setError("Could not put the line back");
     } finally {
       setWithdrawingLine(null);
     }
@@ -623,7 +631,7 @@ export default function TripSheetPage() {
     setReallocTrip(trip);
     setReallocDriverId("");
     // Everything still to do is ticked: the common case is the whole run.
-    setReallocStopIds(new Set(trip.stops.filter((s) => s.status !== "SIGNED").map((s) => s.id)));
+    setReallocStopIds(new Set(trip.stops.filter(canMoveStop).map((s) => s.id)));
     setReallocReason("");
     setReallocRegNo(trip.regNo || "");
     setReallocError(null);
@@ -2762,7 +2770,7 @@ export default function TripSheetPage() {
               const reallocatedIn = trip.reallocatedIn ?? [];
               const reallocTargets = [...new Set(reallocatedOut.map((r) => r.toDriverName))];
               const reallocSources = [...new Set(reallocatedIn.map((r) => r.fromDriverName))];
-              const canReallocate = trip.stops.some((s) => s.status !== "SIGNED");
+              const canReallocate = trip.stops.some(canMoveStop);
               const pct = total > 0
                 ? Math.round((signed / total) * 100)
                 : tripCompletable(trip) ? 100 : 0;
@@ -3040,6 +3048,13 @@ export default function TripSheetPage() {
                         <div>Customer</div>
                         <div className="text-right">NOP</div>
                       </div>
+                      {/* Colour key: one colour per kind of paperwork, used
+                          by every chip in the stop rows below. */}
+                      <div className="flex items-center gap-3 px-4 py-1.5 text-[10px] font-mono text-ink-muted bg-ink-surface/30">
+                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-green" />Invoice</span>
+                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-violet" />Credit return (CR)</span>
+                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-blue" />Uplift (UPL)</span>
+                      </div>
                       {trip.stops.map((stop) => (
                         <div
                           key={stop.id}
@@ -3054,8 +3069,14 @@ export default function TripSheetPage() {
                             <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">
                               {stop.stopNumber}
                             </span>
-                            <span className="font-mono text-[13px] font-medium text-ink-black truncate">
-                              {stop.invoiceNumber}
+                            <span className="min-w-0">
+                              {stop.invoiceNumber ? (
+                                <span className="badge-signed badge-sm max-w-full" title={`Invoice ${stop.invoiceNumber}`}>
+                                  <span className="truncate">{stop.invoiceNumber}</span>
+                                </span>
+                              ) : (
+                                <span className="text-[11px] font-mono text-ink-muted-light">Collection only</span>
+                              )}
                             </span>
                             <span className="text-[13px] text-ink-muted truncate">
                               {stop.customerName}
@@ -3071,7 +3092,7 @@ export default function TripSheetPage() {
                               {stop.rejectedLines!.map((l) => (
                                 <div key={l.id} className="flex items-center gap-2 flex-wrap text-[12px]">
                                   <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-red-dim text-ink-red border border-ink-red/20">
-                                    LINE REJECTED
+                                    LINE REMOVED
                                   </span>
                                   <span className="text-ink-black">
                                     {l.quantity != null && <span className="font-mono">{l.quantity} × </span>}
@@ -3088,9 +3109,9 @@ export default function TripSheetPage() {
                                       }}
                                       disabled={withdrawingLine === l.id}
                                       className="font-mono text-[11px] text-ink-muted hover:text-ink-red hover:underline disabled:opacity-50"
-                                      title="Recorded in error — the customer is taking this line after all"
+                                      title="Put this line back on the delivery"
                                     >
-                                      {withdrawingLine === l.id ? "Withdrawing…" : "Withdraw"}
+                                      {withdrawingLine === l.id ? "Putting back…" : "Put back"}
                                     </button>
                                   )}
                                 </div>
@@ -3108,14 +3129,16 @@ export default function TripSheetPage() {
                                   key={c.id}
                                   className="flex items-center gap-2 flex-wrap text-[12px]"
                                 >
+                                  {/* Type and number in one chip, coloured by type
+                                      to match the key above. */}
                                   <span
-                                    className={
+                                    className={`badge-sm ${
                                       c.type === "CREDIT_RETURN" ? "badge-credit" : "badge-uplift"
-                                    }
+                                    }`}
+                                    title={c.type === "CREDIT_RETURN" ? "Credit return" : "Non-credit uplift"}
                                   >
-                                    {c.type === "CREDIT_RETURN" ? "Credit Return" : "Uplift"}
-                                  </span>
-                                  <span className="font-mono text-ink-black">
+                                    <span className="font-semibold">{c.type === "CREDIT_RETURN" ? "CR" : "UPL"}</span>
+                                    <span className="opacity-50">·</span>
                                     {c.collectionNo}
                                   </span>
                                   {c.originalInvoiceNo && (
@@ -3129,14 +3152,15 @@ export default function TripSheetPage() {
                                     </span>
                                   )}
                                   <span
-                                    className={
+                                    className={`inline-flex items-center gap-1 text-[11px] font-mono ${
                                       c.status === "COLLECTED"
-                                        ? "badge-signed"
+                                        ? "text-ink-green"
                                         : COLLECTION_EXCEPTIONS.has(c.status)
-                                        ? "badge-progress"
-                                        : "badge-pending"
-                                    }
+                                        ? "text-ink-amber"
+                                        : "text-ink-red"
+                                    }`}
                                   >
+                                    <span className="w-1.5 h-1.5 rounded-full bg-current" />
                                     {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
                                   </span>
                                   {c.exceptionReason && (
@@ -3271,32 +3295,25 @@ export default function TripSheetPage() {
                                   openReject(stop, trip.driverName);
                                 }}
                                 className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono font-medium bg-ink-surface text-ink-muted border border-ink-border hover:border-ink-red/40 hover:text-ink-red transition-all"
-                                title="The customer refused this delivery, or part of it"
+                                title="Take this invoice off the route, or remove one line of it"
                               >
                                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                   <circle cx="12" cy="12" r="10" />
                                   <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
                                 </svg>
-                                Reject…
+                                Remove…
                               </button>
                             )}
-                            {(stop.collections?.length ?? 0) > 0 && (
-                              <span
-                                className="badge-credit"
-                                title="This stop also has goods coming back"
-                              >
-                                {stop.collections!.length} collection
-                                {stop.collections!.length !== 1 ? "s" : ""}
-                              </span>
-                            )}
+                            {/* No "N collections" pill: the collections are
+                                listed just above, each with its own chip. */}
                             <span
-                              className={
+                              className={`badge-sm ${
                                 stop.status === "SIGNED"
                                   ? "badge-signed"
                                   : stop.status === "IN_PROGRESS"
                                   ? "badge-progress"
                                   : "badge-pending"
-                              }
+                              }`}
                             >
                               <span
                                 className={`w-1.5 h-1.5 rounded-full ${
@@ -3364,7 +3381,7 @@ export default function TripSheetPage() {
                                 </span>
                                 <span className="text-ink-muted">{r.customerName}</span>
                                 <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-surface text-ink-muted border border-ink-border">
-                                  {r.source === "INVOICE_DELETED" ? "INVOICE DELETED" : "REJECTED"}
+                                  {r.source === "INVOICE_DELETED" ? "INVOICE DELETED" : "REMOVED"}
                                 </span>
                                 <span className="text-ink-black">{r.reason}</span>
                                 <span className="text-ink-muted-light">
@@ -3637,7 +3654,7 @@ export default function TripSheetPage() {
                                   <div className="mt-1.5 pl-8 space-y-0.5">
                                     {stop.rejectedLines!.map((l, i) => (
                                       <p key={i} className="text-[12px]">
-                                        <span className="font-mono text-[10px] text-ink-red mr-1.5">LINE REJECTED</span>
+                                        <span className="font-mono text-[10px] text-ink-red mr-1.5">LINE REMOVED</span>
                                         <span className="text-ink-black">
                                           {l.quantity != null ? `${l.quantity} × ` : ""}
                                           {l.description}
@@ -3863,8 +3880,10 @@ export default function TripSheetPage() {
       {/* Reallocate unsigned stops to another driver. */}
       {reallocTrip && (() => {
         const trip = reallocTrip;
-        const movable = trip.stops.filter((s) => s.status !== "SIGNED");
-        const signedCount = trip.stops.length - movable.length;
+        const movable = trip.stops.filter(canMoveStop);
+        const signedCount = trip.stops.filter((s) => s.status === "SIGNED").length;
+        // Unsigned, but a collection there already has an outcome.
+        const heldByCollection = trip.stops.filter((s) => s.status !== "SIGNED" && !canMoveStop(s));
         const targets = drivers.filter((d) => d.id !== trip.driverId);
         const allTicked = movable.length > 0 && movable.every((s) => reallocStopIds.has(s.id));
         const canSubmit = !!reallocDriverId && reallocStopIds.size > 0;
@@ -3896,6 +3915,12 @@ export default function TripSheetPage() {
                 </select>
                 {targets.length === 0 && (
                   <p className="mt-1 text-xs text-ink-amber">No other active drivers. Add one on the Drivers page.</p>
+                )}
+                {heldByCollection.length > 0 && (
+                  <p className="mt-3 text-xs text-ink-muted">
+                    {heldByCollection.length} stop{heldByCollection.length !== 1 ? "s" : ""} with a collection already done
+                    {heldByCollection.length !== 1 ? " stay" : " stays"} with {trip.driverName}. The goods are on their truck.
+                  </p>
                 )}
 
                 <div className="flex items-center justify-between mt-4 mb-1">
@@ -3930,6 +3955,19 @@ export default function TripSheetPage() {
                       <span className="font-mono text-xs font-medium text-ink-black">{s.invoiceNumber || "Collection"}</span>
                       <span className="text-xs text-ink-muted truncate">{s.customerName}</span>
                     </label>
+                  ))}
+                  {heldByCollection.map((s) => (
+                    <div
+                      key={s.id}
+                      className="flex items-center gap-3 px-3 py-2 opacity-60 cursor-not-allowed"
+                      title={`A collection here already has an outcome — the goods and receipt stay with ${trip.driverName}`}
+                    >
+                      <input type="checkbox" disabled className="w-3.5 h-3.5" />
+                      <span className="font-mono text-xs text-ink-muted w-6">#{s.stopNumber}</span>
+                      <span className="font-mono text-xs font-medium text-ink-black">{s.invoiceNumber || "Collection"}</span>
+                      <span className="text-xs text-ink-muted truncate">{s.customerName}</span>
+                      <span className="ml-auto text-[10px] font-mono text-ink-violet whitespace-nowrap">COLLECTED — STAYS</span>
+                    </div>
                   ))}
                 </div>
 
@@ -4006,7 +4044,7 @@ export default function TripSheetPage() {
                   </div>
                   <div className="min-w-0">
                     <h3 className="font-mono text-sm font-medium text-ink-black truncate">
-                      Rejected delivery — {stop.invoiceNumber}
+                      Remove from route — {stop.invoiceNumber}
                     </h3>
                     <p className="text-xs text-ink-muted mt-0.5 truncate">
                       Stop {stop.stopNumber} · {stop.customerName} · {driverName}
@@ -4015,7 +4053,7 @@ export default function TripSheetPage() {
                 </div>
 
                 <div className="mb-4 space-y-2">
-                  <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">What did the customer refuse?</p>
+                  <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">What comes off the route?</p>
                   <label className={`flex items-start gap-3 px-4 py-3 rounded border cursor-pointer transition-all ${rejectMode === "whole" ? "border-ink-red bg-ink-red-dim/30" : "border-ink-border hover:border-ink-red/30"}`}>
                     <input
                       type="radio"
@@ -4028,8 +4066,8 @@ export default function TripSheetPage() {
                       <p className="text-sm font-mono font-medium text-ink-black">The whole invoice</p>
                       <p className="text-xs text-ink-muted mt-0.5">
                         {hasCollections
-                          ? "The delivery comes off the run. The stop stays for its collections."
-                          : "The stop comes off the driver's run. The invoice PDF is kept."}
+                          ? "The delivery comes off the route. The stop stays for its collections."
+                          : "The stop comes off the driver's route. The invoice PDF is kept."}
                       </p>
                     </div>
                   </label>
@@ -4044,7 +4082,7 @@ export default function TripSheetPage() {
                     <div>
                       <p className="text-sm font-mono font-medium text-ink-black">One line of it</p>
                       <p className="text-xs text-ink-muted mt-0.5">
-                        The customer signs for the rest. The refused line is printed on the signed invoice and in the confirmation email.
+                        The customer signs for the rest. The removed line is printed on the signed invoice and in the confirmation email.
                       </p>
                     </div>
                   </label>
@@ -4070,7 +4108,7 @@ export default function TripSheetPage() {
                 )}
 
                 <div className="flex flex-wrap gap-1.5 mb-2">
-                  {["Wrong item sent", "Damaged", "Not ordered", "Expired / short-dated"].map((preset) => (
+                  {["Skipped — deliver later", "Customer closed", "Wrong item sent", "Damaged", "Not ordered"].map((preset) => (
                     <button
                       key={preset}
                       type="button"
@@ -4119,9 +4157,9 @@ export default function TripSheetPage() {
                       Saving…
                     </>
                   ) : rejectMode === "whole" ? (
-                    hasCollections ? "Remove Delivery" : "Remove from Trip"
+                    hasCollections ? "Remove Delivery" : "Remove from Route"
                   ) : (
-                    "Record Rejected Line"
+                    "Remove Line"
                   )}
                 </button>
               </div>

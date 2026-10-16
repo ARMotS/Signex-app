@@ -23,6 +23,8 @@
  * is left on it is signed — even if nothing is.
  *
  * Signed stops never move: they were delivered by the driver they are on.
+ * Neither does a stop with a collection that already has an outcome — the
+ * goods (or the "not there" / "refused") are that driver's, not the next one's.
  */
 
 import { scopedPrisma } from "./db-scoped";
@@ -32,6 +34,9 @@ export const REALLOCATION_REASON_MAX = 300;
 
 /** Thrown inside the transaction to roll it back with a reason. */
 class ReallocationConflict extends Error {}
+
+/** A collection got an outcome while the move was in flight. */
+class CollectionConflict extends Error {}
 
 export type ReallocateResult =
   | {
@@ -46,7 +51,9 @@ export type ReallocateResult =
   | { outcome: "driver_inactive" }
   | { outcome: "nothing_selected" }
   /** A selected stop was signed (possibly a moment ago) — nothing was moved. */
-  | { outcome: "signed"; invoiceNumbers: string[] };
+  | { outcome: "signed"; invoiceNumbers: string[] }
+  /** A selected stop has a collection already given an outcome — nothing moved. */
+  | { outcome: "collected"; collectionNos: string[] };
 
 export function normalizeReallocationReason(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -92,7 +99,14 @@ export async function reallocateStops(
   const stops = await db.stop.findMany({
     where: { id: { in: stopIds }, tripSheetId: trip.id },
     orderBy: { stopNumber: "asc" },
-    select: { id: true, stopNumber: true, invoiceNumber: true, customerName: true, status: true },
+    select: {
+      id: true,
+      stopNumber: true,
+      invoiceNumber: true,
+      customerName: true,
+      status: true,
+      collections: { select: { collectionNo: true, status: true } },
+    },
   });
   // Every id must be a stop on THIS run. One that is not — another run's,
   // another scope's, or already moved — fails the whole request rather than
@@ -103,6 +117,17 @@ export async function reallocateStops(
   if (signed.length > 0) {
     return { outcome: "signed", invoiceNumbers: signed.map((s) => s.invoiceNumber) };
   }
+
+  // A collection with an outcome is the original driver's work: COLLECTED or
+  // PARTIAL goods are on their truck, NOT_AVAILABLE / REFUSED is what they
+  // found at the door, and the signed receipt is filed against their run.
+  // Moving the stop would put all of that on another driver's run. Only a
+  // stop whose collections are all still PENDING can move.
+  const done = stops.flatMap((s) => s.collections.filter((c) => c.status !== "PENDING"));
+  if (done.length > 0) {
+    return { outcome: "collected", collectionNos: done.map((c) => c.collectionNo) };
+  }
+  const pendingCollections = stops.reduce((n, s) => n + s.collections.length, 0);
 
   let toTripSheetId: string;
   try {
@@ -135,10 +160,15 @@ export async function reallocateStops(
       // Collections carry their own tripSheetId (composite FK to the run); it
       // must follow the stop, or the receiving driver's sync cursor and the
       // original run's completion guard would both read them in the wrong place.
-      await tx.collection.updateMany({
-        where: { stopId: { in: stops.map((s) => s.id) } },
+      // Only still-PENDING ones: if a driver recorded an outcome since the
+      // check above, the count falls short and the whole move rolls back.
+      const movedCollections = await tx.collection.updateMany({
+        where: { stopId: { in: stops.map((s) => s.id) }, status: "PENDING" },
         data: { tripSheetId: created.id },
       });
+      if (movedCollections.count !== pendingCollections) {
+        throw new CollectionConflict();
+      }
 
       await tx.reallocatedStop.createMany({
         data: stops.map((stop, i) => ({
@@ -162,6 +192,13 @@ export async function reallocateStops(
   } catch (err) {
     if (err instanceof ReallocationConflict) {
       return { outcome: "signed", invoiceNumbers: [err.message] };
+    }
+    if (err instanceof CollectionConflict) {
+      const now = await db.collection.findMany({
+        where: { stopId: { in: stops.map((s) => s.id) }, status: { not: "PENDING" } },
+        select: { collectionNo: true },
+      });
+      return { outcome: "collected", collectionNos: now.map((c) => c.collectionNo) };
     }
     throw err;
   }

@@ -363,7 +363,7 @@ export async function embedSignatureOnPdf(
 
   if (partial) {
     targetPage.drawText(
-      `PARTIAL DELIVERY · ${rejectedLines.length} line${rejectedLines.length !== 1 ? "s" : ""} rejected — see last page`,
+      `PARTIAL DELIVERY · ${rejectedLines.length} line${rejectedLines.length !== 1 ? "s" : ""} removed — see last page`,
       {
         x: xPos - 10,
         y: yPos + sigHeight + 32,
@@ -425,7 +425,7 @@ async function appendDeliveryExceptionsPage(
   y -= 22;
 
   const intro =
-    "The customer refused the lines below at delivery. They were not delivered and " +
+    "The lines below were removed from this delivery. They were not delivered and " +
     "are not covered by the signature on this invoice.";
   for (const l of wrapText(intro, font, 10, width - margin * 2)) {
     page.drawText(l, { x: margin, y, size: 10, font, color: muted });

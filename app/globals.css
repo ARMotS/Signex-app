@@ -169,6 +169,16 @@ body {
   color: var(--ink-blue);
 }
 
+/* Compact size for dense lists (the expanded trip sheet). Pairs with any
+   badge-* class above; the colour still says what kind of thing it is. */
+.badge-sm {
+  gap: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  line-height: 16px;
+}
+
 /* ─── Scrollbar Styling ────────────────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 6px;

@@ -2648,6 +2648,38 @@ suite("cross-ADMIN isolation", () => {
       await db().reallocatedStop.deleteMany({ where: { fromTripSheetId: trip.id } });
     });
 
+    it("a stop whose collection already has an outcome stays with its driver", async () => {
+      const trip = await deploy(f.a, ["INV-M7", "INV-M8"], "INV-M8");
+      useSession(adminSession(f.a));
+
+      for (const status of ["COLLECTED", "NOT_AVAILABLE"] as const) {
+        await db().collection.updateMany({
+          where: { stopId: trip.stops[1].id },
+          data: { status, exceptionReason: status === "COLLECTED" ? null : "Closed" },
+        });
+        const res = await reallocate({
+          tripSheetId: trip.id,
+          stopIds: trip.stops.map((s) => s.id),
+          toDriverId: relief.id,
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe("COLLECTION_DONE");
+      }
+
+      // Nothing moved — not even the stop with no collection on it.
+      expect(await db().stop.count({ where: { tripSheetId: trip.id } })).toBe(2);
+      expect(await db().tripSheet.count({ where: { driverId: relief.id } })).toBe(0);
+      expect(await db().reallocatedStop.count({ where: { fromTripSheetId: trip.id } })).toBe(0);
+
+      // The other stop on its own still moves.
+      const ok = await reallocate({ tripSheetId: trip.id, stopIds: [trip.stops[0].id], toDriverId: relief.id });
+      expect(ok.status).toBe(200);
+      const { toTripSheetId } = await ok.json();
+
+      await db().tripSheet.deleteMany({ where: { id: { in: [trip.id, toTripSheetId] } } });
+      await db().reallocatedStop.deleteMany({ where: { fromTripSheetId: trip.id } });
+    });
+
     it("a run whose every stop was reallocated can still be completed", async () => {
       const { completeTripSheet } = await import("@/lib/trip-data");
       const trip = await deploy(f.a, ["INV-M5", "INV-M6"]);

@@ -259,7 +259,7 @@ export default function SignInvoicePage() {
       {(stop?.rejectedLines?.length ?? 0) > 0 && (
         <div className="bg-ink-red-dim border-b border-ink-red/20 px-4 py-2.5">
           <p className="text-[11px] font-mono uppercase tracking-wide text-ink-red mb-1">
-            Partial delivery — refused, not delivered
+            Partial delivery — these lines are not being delivered
           </p>
           {stop!.rejectedLines!.map((l) => (
             <p key={l.id} className="text-xs text-ink-black">
