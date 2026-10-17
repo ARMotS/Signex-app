@@ -97,6 +97,11 @@ export async function buildSyncCursor(
       // column records who COLLECTED and is null until someone has, so keying
       // on it would leave every outstanding collection out of the driver's own
       // cursor — the exact rows they are polling for.
+      //
+      // Archived collections (detached when their trip completed) still count
+      // in the office's cursor; completion moves it anyway, because detaching
+      // bumps their updatedAt. A driver's cursor drops them, through the same
+      // relation filter, exactly as when they used to be deleted.
       where: driverId ? { tripSheet: { driverId } } : {},
       _max: { updatedAt: true },
       _count: true,

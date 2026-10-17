@@ -520,11 +520,20 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     if (hasData && deleteScopeData) {
       // Order matters: Stop is Restrict-referenced to Contact, and TripSheet
       // cascades to Stop, so stops and sheets go before contacts and drivers.
+      // Collections first and explicitly: an archived one (its trip already
+      // completed) is attached to nothing that would cascade it, and it
+      // Restrict-references both the Driver and the Invoice deleted below.
+      await tx.collection.deleteMany({ where: { tenantId } });
       await tx.stop.deleteMany({ where: { tenantId } });
       await tx.tripSheet.deleteMany({ where: { tenantId } });
       // No FK to TripSheet (it outlives the sheet), so it does not cascade.
       await tx.removedStop.deleteMany({ where: { tenantId } });
       await tx.reallocatedStop.deleteMany({ where: { tenantId } });
+      // The completed-trip archive (its resend records cascade with it). It
+      // was never purged, so a workspace that had ever closed out a trip could
+      // not be deleted at all — the Tenant delete hit its foreign key and the
+      // whole purge rolled back as a 500.
+      await tx.completedTripSheet.deleteMany({ where: { tenantId } });
       // After the trip sheets: their collections (gone with them) were the
       // only rows that reference an invoice.
       await tx.invoice.deleteMany({ where: { tenantId } });

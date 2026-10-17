@@ -38,6 +38,7 @@ import {
   downloadSignedCollectionByName,
   uploadSignedCollectionToOneDrive,
   getCollectionItemByName,
+  deleteFileById,
 } from "./microsoft-graph";
 
 /** Default fallback folder (relative to project root), as invoices does. */
@@ -47,9 +48,10 @@ const DEFAULT_FOLDER = path.join(process.cwd(), "collections");
  * Subfolders of the collections folder.
  *
  * Pending holds documents the office has produced and the driver has not yet
- * actioned. Signed holds the stamped output and is permanent — nothing is
- * deleted or moved out of it when a trip is closed, because it is the physical
- * record behind a credit note.
+ * actioned; an original is removed once a completed trip has fully superseded
+ * it (removeSettledOriginals). Signed holds the stamped output and is
+ * permanent — nothing is deleted or moved out of it when a trip is closed,
+ * because it is the physical record behind a credit note.
  */
 export const PENDING_SUBFOLDER = "Pending";
 export const SIGNED_SUBFOLDER = "Signed";
@@ -554,6 +556,73 @@ export async function getCollectionDocumentId(
   } catch {
     return undefined;
   }
+}
+
+// ─── Settled originals ────────────────────────────────────────────────────
+
+/**
+ * Remove the office's original collection sheets that a completed trip has
+ * fully superseded. Run after the trip is archived; best-effort and silent on
+ * failure — a leftover original costs nothing, a wrongly removed one is lost.
+ *
+ * An original is removed only when ALL of these hold:
+ *   • the collection was COLLECTED — a PARTIAL or NOT_AVAILABLE one may be
+ *     rebooked on a later trip under the same number, against the same sheet;
+ *   • its signed PDF is filed AND contains the original's pages
+ *     (signedIncludesSource — false when the original could not be read at
+ *     signing, so the receipt page stands alone);
+ *   • no collection still on a live trip points at the same document.
+ *
+ * The file is resolved by NAME in Pending/ and then the folder root, never by
+ * a stored item id and never in Signed/, which nothing ever deletes from.
+ */
+export async function removeSettledOriginals(
+  tenantId: string,
+  collectionIds: string[]
+): Promise<{ removed: string[] }> {
+  const removed: string[] = [];
+  if (collectionIds.length === 0) return { removed };
+  const db = scopedPrisma(tenantId);
+
+  const settled = await db.collection.findMany({
+    where: {
+      id: { in: collectionIds },
+      status: "COLLECTED",
+      signedIncludesSource: true,
+      signedFilePath: { not: null },
+      sourceFilePath: { not: null },
+    },
+    select: { sourceFilePath: true },
+  });
+
+  for (const filename of new Set(settled.map((c) => c.sourceFilePath!))) {
+    try {
+      const stillNeeded = await db.collection.count({
+        where: { sourceFilePath: filename, tripSheetId: { not: null } },
+      });
+      if (stillNeeded > 0) continue;
+
+      const onedrive = await getOneDriveCollectionsSource(tenantId);
+      if (onedrive) {
+        const item = await getCollectionItemByName(tenantId, filename);
+        if (!item?.id) continue;
+        await deleteFileById(tenantId, item.id);
+      } else {
+        const folderPath = await getCollectionsFolderPath(tenantId);
+        const target = [
+          resolveWithinFolder(folderPath, PENDING_SUBFOLDER, filename),
+          resolveWithinFolder(folderPath, filename),
+        ].find((p) => fs.existsSync(p) && fs.statSync(p).isFile());
+        if (!target) continue;
+        fs.unlinkSync(target);
+      }
+      removed.push(filename);
+    } catch (err) {
+      console.error(`Could not remove the settled original ${filename}:`, err);
+    }
+  }
+
+  return { removed };
 }
 
 // ─── Outcome validation ───────────────────────────────────────────────────
