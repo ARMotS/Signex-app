@@ -10,7 +10,8 @@ import { describe, it, expect } from "vitest";
 import {
   buildInvoiceLookup,
   matchInvoiceFile,
-  normalizeInvoiceNumber,
+  normalizeInvoiceNo,
+  invoiceMatchKeys,
   isPlaceholderCell,
 } from "@/lib/trip-parser";
 
@@ -50,17 +51,17 @@ describe("matching a sheet's invoice number to a PDF", () => {
   );
 
   it("reads only a plausible year as a 4-digit suffix", () => {
-    expect(normalizeInvoiceNumber("IV-1010-2026")).toBe("1010");
-    expect(normalizeInvoiceNumber("IV-1010-1999")).toBe("1010");
+    expect(normalizeInvoiceNo("IV-1010-2026")).toBe("1010");
+    expect(normalizeInvoiceNo("IV-1010-1999")).toBe("1010");
     // Not a year: still part of the invoice number.
-    expect(normalizeInvoiceNumber("IV-1010-5678")).toBe("10105678");
+    expect(normalizeInvoiceNo("IV-1010-5678")).toBe("10105678");
     expect(matchInvoiceFile(buildInvoiceLookup(files("IV-1010-5678.pdf")), "1010")).toBeUndefined();
   });
 
   it("ignores the trailing -N for assignment", () => {
-    expect(normalizeInvoiceNumber("IV-365-4")).toBe("365");
-    expect(normalizeInvoiceNumber("INV-365-4.pdf")).toBe("365");
-    expect(normalizeInvoiceNumber("IV-633291")).toBe("633291");
+    expect(normalizeInvoiceNo("IV-365-4")).toBe("365");
+    expect(normalizeInvoiceNo("INV-365-4.pdf")).toBe("365");
+    expect(normalizeInvoiceNo("IV-633291")).toBe("633291");
   });
 
   it("still prefers an exact name when two files differ only in the suffix", () => {
@@ -81,7 +82,9 @@ describe("matching a sheet's invoice number to a PDF", () => {
   });
 
   it("does not strip a prefix that is not followed by digits", () => {
-    expect(normalizeInvoiceNumber("SIGMA-12")).toBe("SIGMA12");
+    // The exact key keeps the letters; the normalized number is digits only.
+    expect(invoiceMatchKeys("SIGMA-12")[0]).toBe("SIGMA12");
+    expect(normalizeInvoiceNo("SIGMA-12")).toBe("12");
   });
 });
 

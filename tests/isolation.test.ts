@@ -939,6 +939,19 @@ suite("cross-ADMIN isolation", () => {
       });
       for (const c of inA) expect(c.tenantId).toBe(f.a.tenantId);
 
+      // The invoice it is credited against is anchored in the registry — as a
+      // stub, since the (stubbed) folder holds no PDF — in A's scope only.
+      if (res.status === 200) {
+        const anchor = await db().invoice.findFirst({
+          where: { tenantId: f.a.tenantId, invoiceNoNormalized: "9100" },
+        });
+        expect(anchor).toMatchObject({ isStub: true, pdfFilename: null, customerName: "Acme Trading" });
+        expect(inA[0]?.invoiceId).toBe(anchor!.id);
+        expect(
+          await db().invoice.count({ where: { tenantId: f.b.tenantId, invoiceNoNormalized: "9100" } })
+        ).toBe(0);
+      }
+
       // Clean up so later counts stay predictable.
       await db().collection.deleteMany({ where: { collectionNo: "COL-9100" } });
       await db().tripSheet.deleteMany({
@@ -3476,6 +3489,86 @@ suite("cross-ADMIN isolation", () => {
 
       expect((await POST(formReq("/api/invoices/upload", form))).status).toBe(400);
       expect(graphCalls.filter((c) => c.url.includes("/content"))).toHaveLength(0);
+    });
+  });
+
+  // ── Invoice registry ────────────────────────────────────────────────
+  describe("invoice registry", () => {
+    it("an upload registers the invoice in the uploader's scope only", async () => {
+      const { POST } = await import("@/app/api/invoices/upload/route");
+      useSession(adminSession(f.a));
+
+      const form = new FormData();
+      form.append("file", pdfFile("scan.pdf"));
+      form.append("invoiceNumber", "INV-2026-7001");
+      form.append("overwrite", "true");
+      expect((await POST(formReq("/api/invoices/upload", form))).status).toBe(200);
+
+      const inA = await db().invoice.findFirst({
+        where: { tenantId: f.a.tenantId, invoiceNoNormalized: "7001" },
+      });
+      expect(inA).toMatchObject({ pdfFilename: "INV-2026-7001.pdf", isStub: false });
+      expect(
+        await db().invoice.count({ where: { tenantId: f.b.tenantId, invoiceNoNormalized: "7001" } })
+      ).toBe(0);
+    });
+
+    it("the same invoice number is a separate record per scope", async () => {
+      const { ensureInvoices } = await import("@/lib/invoice-registry");
+      const a = await ensureInvoices(f.a.tenantId, [{ invoiceNo: "IV-8800" }], null);
+      const b = await ensureInvoices(f.b.tenantId, [{ invoiceNo: "IV-8800" }], null);
+
+      expect(a.get("8800")).toBeDefined();
+      expect(b.get("8800")).toBeDefined();
+      expect(a.get("8800")).not.toBe(b.get("8800"));
+    });
+
+    it("ADMIN 2 correcting ADMIN 1's invoice by id gets 404 and changes nothing", async () => {
+      const { PATCH } = await import("@/app/api/invoice-records/[id]/route");
+      const { ensureInvoices } = await import("@/lib/invoice-registry");
+      const id = (await ensureInvoices(f.a.tenantId, [{ invoiceNo: "IV-8801", customerName: "Acme Trading" }], null)).get("8801")!;
+
+      useSession(adminSession(f.b));
+      const res = await PATCH(
+        req(`/api/invoice-records/${id}`, { method: "PATCH", body: { customerName: "Hijacked" } }),
+        params({ id })
+      );
+      expect(res.status).toBe(404);
+      expect((await db().invoice.findUnique({ where: { id } }))?.customerName).toBe("Acme Trading");
+    });
+
+    it("lets the owner correct it, marks the date MANUAL, and is closed to drivers", async () => {
+      const { PATCH } = await import("@/app/api/invoice-records/[id]/route");
+      const { ensureInvoices } = await import("@/lib/invoice-registry");
+      const id = (await ensureInvoices(f.a.tenantId, [{ invoiceNo: "IV-8802" }], null)).get("8802")!;
+
+      useSession(driverSession(f.a));
+      expect(
+        (await PATCH(req(`/api/invoice-records/${id}`, { method: "PATCH", body: { invoiceDate: "2026-10-14" } }), params({ id }))).status
+      ).toBe(403);
+
+      useSession(adminSession(f.a));
+      const res = await PATCH(
+        req(`/api/invoice-records/${id}`, { method: "PATCH", body: { invoiceDate: "14/10/2026" } }),
+        params({ id })
+      );
+      expect(res.status).toBe(200);
+      const row = await db().invoice.findUnique({ where: { id } });
+      expect(row?.invoiceDate?.toISOString().slice(0, 10)).toBe("2026-10-14");
+      expect(row?.headerSource).toBe("MANUAL");
+    });
+
+    it("a driver's stops carry only their own scope's invoice dates", async () => {
+      // B registers the SAME invoice number as A's fixture stop, with a date.
+      const { ensureInvoices } = await import("@/lib/invoice-registry");
+      const bId = (await ensureInvoices(f.b.tenantId, [{ invoiceNo: f.b.stop.invoiceNumber }], null)).values().next().value!;
+      await db().invoice.update({ where: { id: bId }, data: { invoiceDate: new Date("2026-01-02") } });
+
+      const { GET } = await import("@/app/api/trip-sheet/stops/route");
+      useSession(driverSession(f.a));
+      const body = await (await GET(req(`/api/trip-sheet/stops?driverId=${f.a.driver.id}`))).json();
+
+      for (const stop of body.stops) expect(stop.invoiceDate).not.toBe("2026-01-02");
     });
   });
 });

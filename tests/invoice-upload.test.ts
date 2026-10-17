@@ -14,7 +14,7 @@ import {
   invoiceFilenameForNumber,
   looksLikePdf,
 } from "@/lib/invoices";
-import { collectMissingInvoices, normalizeInvoiceNumber } from "@/lib/trip-parser";
+import { collectMissingInvoices, normalizeInvoiceNo } from "@/lib/trip-parser";
 import type { MatchResult } from "@/lib/trip-parser";
 
 describe("sanitizeInvoiceFilename", () => {
@@ -63,7 +63,7 @@ describe("invoiceFilenameForNumber", () => {
     // listInvoiceFiles derives an invoice number from the filename stem, which
     // is what the parser then normalizes.
     const derived = filename!.replace(/\.pdf$/i, "").toUpperCase();
-    expect(normalizeInvoiceNumber(derived)).toBe(normalizeInvoiceNumber(raw));
+    expect(normalizeInvoiceNo(derived)).toBe(normalizeInvoiceNo(raw));
   });
 
   it("rejects an invoice number that sanitizes to nothing", () => {

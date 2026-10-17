@@ -461,7 +461,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
           id: true,
           slug: true,
           _count: {
-            select: { drivers: true, contacts: true, tripSheets: true },
+            select: { drivers: true, contacts: true, tripSheets: true, invoices: true },
           },
         },
       },
@@ -493,8 +493,12 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     drivers: 0,
     contacts: 0,
     tripSheets: 0,
+    invoices: 0,
   };
-  const hasData = counts.drivers + counts.contacts + counts.tripSheets > 0;
+  // Invoices count: the registry fills as soon as the Invoices page is
+  // opened, and a workspace holding only those would otherwise skip the purge
+  // and fail on the Tenant delete's foreign key.
+  const hasData = counts.drivers + counts.contacts + counts.tripSheets + counts.invoices > 0;
 
   if (hasData && !deleteScopeData) {
     return NextResponse.json(
@@ -521,6 +525,9 @@ export const DELETE = withAuth(async (request: NextRequest) => {
       // No FK to TripSheet (it outlives the sheet), so it does not cascade.
       await tx.removedStop.deleteMany({ where: { tenantId } });
       await tx.reallocatedStop.deleteMany({ where: { tenantId } });
+      // After the trip sheets: their collections (gone with them) were the
+      // only rows that reference an invoice.
+      await tx.invoice.deleteMany({ where: { tenantId } });
       await tx.contact.deleteMany({ where: { tenantId } });
       await tx.driver.deleteMany({ where: { tenantId } });
       await tx.importedFile.deleteMany({ where: { tenantId } });

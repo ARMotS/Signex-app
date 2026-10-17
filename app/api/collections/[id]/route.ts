@@ -11,6 +11,8 @@ import {
   isTerminalStatus,
 } from "@/lib/collections";
 import { logAudit } from "@/lib/audit";
+import { readInvoiceNoPattern } from "@/lib/config";
+import { normalizedInvoiceNoOrNull } from "@/lib/invoice-number";
 import { RECEIPT_STATUSES, sendCollectionReceiptEmail } from "@/lib/collection-notify";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
@@ -312,6 +314,11 @@ export const PATCH = withAuth(async (
     return NextResponse.json({ error: typing.error }, { status: 400 });
   }
 
+  const originalInvoiceNo =
+    body.originalInvoiceNo !== undefined
+      ? String(body.originalInvoiceNo ?? "").trim() || null
+      : undefined;
+
   const updated = await ctx.db.collection.update({
     where: { id },
     data: {
@@ -320,8 +327,12 @@ export const PATCH = withAuth(async (
       // an uplift is re-typed.
       upliftSubtype: type === "NON_CREDIT_UPLIFT" ? upliftSubtype : null,
       notes,
-      ...(body.originalInvoiceNo !== undefined && {
-        originalInvoiceNo: String(body.originalInvoiceNo).trim() || null,
+      ...(originalInvoiceNo !== undefined && {
+        originalInvoiceNo,
+        invoiceNoNormalized: normalizedInvoiceNoOrNull(
+          originalInvoiceNo,
+          await readInvoiceNoPattern(ctx.tenantId)
+        ),
       }),
       ...(body.expectedQty !== undefined && {
         expectedQty:

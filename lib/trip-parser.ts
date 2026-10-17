@@ -8,8 +8,10 @@
  *   3. REGNO      — vehicle registration (used for matching as priority)
  *   4. Customer   — customer name (displayed on driver app)
  *   5. INVOICENO  — invoice number (matched to PDF files)
- *   6. COLLECTNO  — collection number (matched to collection documents)
- *   7. NOP        — number of parcels (displayed on driver app)
+ *   6. COLLECTNO  — collection number (matched to collection documents);
+ *                   also written COLLECTIONNO, "Collection No", "Coll No"
+ *   7. NOP        — number of parcels: to deliver on an invoice row, to
+ *                   collect on a collection row
  *
  * A row may carry an invoice, a collection, or both. Sheets written before
  * collections existed have no COLLECTNO column at all and parse unchanged —
@@ -27,6 +29,12 @@ import {
 } from "./collections";
 import { listDrivers } from "./accounts";
 import { scopedPrisma } from "./db-scoped";
+import { readInvoiceNoPattern } from "./config";
+import {
+  buildInvoiceLookup,
+  matchInvoiceFile,
+  type InvoiceNoPattern,
+} from "./invoice-number";
 import type { TripCollection, TripStop } from "./trip-data";
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -273,103 +281,14 @@ function cellValue(raw: unknown): string {
   return isPlaceholderCell(value) ? "" : value;
 }
 
-/**
- * Prefixes written in front of the number, on the sheet or in the filename:
- * IV-365, INV-365, INVOICE-365, INVOICE 365, Invoice # 365, Invoice No. 365,
- * Tax Invoice 365, SI-365, SINV365. Only stripped when digits follow, so an
- * alphanumeric invoice number that merely starts with these letters survives.
- */
-const INVOICE_PREFIX =
-  /^(?:TAX\s*INVOICE|INVOICE|INV|IV|SINV|SI)\s*(?:NO\.?|NUMBER|NUM\.?)?\s*[#:]?[\s\-_.#:]*(?=\d)/;
-
-/** Marks a duplicated file rather than a different invoice: "IV-365-4 (1)", "INV-365 copy". */
-const COPY_SUFFIX = /(?:\s*\(\d+\)|[\s_\-]*COPY(?:\s*\d+)?)$/;
-
-/**
- * NNN followed by a short trailing number — the 365 in IV-365-4 — or by a
- * year: the 1010 in IV-1010-2026. Only a plausible year (19xx/20xx) counts as
- * a 4-digit suffix; any other 4-digit tail stays part of the number.
- */
-const BASE_WITH_SUFFIX = /^(\d+)[\s\-_./]+(?:\d{1,3}|(?:19|20)\d{2})$/;
-
-const SEPARATORS = /[\s\-_./]/g;
-
-/**
- * The keys an invoice number is matched on, strongest first. The same function
- * runs on the INVOICENO cell and on the PDF's filename stem, so the two only
- * have to agree on one key:
- *
- *   0. exact     — prefix and separators removed      IV-365-4 → 3654
- *   1. base      — trailing -N or -YYYY dropped       IV-365-4 → 365, IV-1010-2026 → 1010
- *   2. digits    — every non-digit removed            ABC/365  → 365
- *   3. unpadded  — leading zeros dropped              IV-000365 → 365
- *
- * The trailing -N on IV-365-4 is a page/copy counter, not part of the invoice
- * number, so the sheet may write IV-365-4, INV-365-4, INVOICE 365 or just 365
- * and still find IV-365-4.pdf. Exact keys are tried first, so two files that
- * differ only in that counter each still match their own exact number.
- */
-export function invoiceMatchKeys(raw: string): [string, string | null, string | null, string | null] {
-  let value = String(raw ?? "").trim().toUpperCase();
-  value = value.replace(/\.PDF$/, "").trim();
-  value = value.replace(COPY_SUFFIX, "").trim();
-  value = value.replace(INVOICE_PREFIX, "").trim();
-
-  const exact = value.replace(SEPARATORS, "");
-  const baseMatch = value.match(BASE_WITH_SUFFIX);
-  const base = baseMatch ? baseMatch[1] : null;
-  const digits = exact.replace(/\D/g, "") || null;
-  const unpadded = (base ?? digits)?.replace(/^0+(?=\d)/, "") ?? null;
-
-  return [exact, base, digits, unpadded];
-}
-
-/**
- * Normalize an invoice number to the value deliveries are assigned on: the
- * prefix-free number, without the trailing -N of an IV-365-4 style name.
- * "Invoice # 001" → "001", "INV-2041" → "2041", "IV-365-4" → "365".
- */
-export function normalizeInvoiceNumber(raw: string): string {
-  const [exact, base] = invoiceMatchKeys(raw);
-  return base ?? exact;
-}
-
-/**
- * Index files by every match key. Each tier is registered for all files before
- * the next, so an exact key is never shadowed by another file's looser one.
- *
- * @param maxTier Highest key tier to use (see invoiceMatchKeys).
- */
-export function buildInvoiceLookup(
-  files: { filename: string; invoiceNumber: string }[],
-  maxTier = 3
-): Map<string, string> {
-  const lookup = new Map<string, string>();
-  const keyed = files.map((f) => ({ filename: f.filename, keys: invoiceMatchKeys(f.invoiceNumber) }));
-
-  for (let tier = 0; tier <= maxTier; tier++) {
-    for (const { filename, keys } of keyed) {
-      const key = keys[tier];
-      if (key && !lookup.has(key)) lookup.set(key, filename);
-    }
-  }
-  return lookup;
-}
-
-/** The filename a sheet's invoice number resolves to, trying its keys strongest first. */
-export function matchInvoiceFile(
-  lookup: Map<string, string>,
-  invoiceNumber: string,
-  maxTier = 3
-): string | undefined {
-  const keys = invoiceMatchKeys(invoiceNumber);
-  for (let tier = 0; tier <= maxTier; tier++) {
-    const key = keys[tier];
-    const hit = key ? lookup.get(key) : undefined;
-    if (hit) return hit;
-  }
-  return undefined;
-}
+// The matching itself lives in lib/invoice-number.ts, which has no imports so
+// the Settings page can preview a tenant pattern with the same code.
+export {
+  invoiceMatchKeys,
+  normalizeInvoiceNo,
+  buildInvoiceLookup,
+  matchInvoiceFile,
+} from "./invoice-number";
 
 // ─── Collection Type ──────────────────────────────────────────────────────
 
@@ -536,12 +455,20 @@ export async function parseTripSheet(
       // originalInvoiceNo (an explicit ORIGINALINVOICENO column still wins)
       // and the row is from here on a collection-only row: it needs no
       // invoice PDF to deploy and is not checked as an already-signed delivery.
+      //
+      // NOP on a collection row is the number of packages to collect, not to
+      // deliver. It becomes the collection's expected quantity (an explicit
+      // COLLECTQTY still wins) and is not counted as parcels on the stop —
+      // otherwise the driver's run sheet listed goods going back as goods to
+      // hand over.
       .map((row) =>
-        row.collectionNo && row.invoiceNumber
+        row.collectionNo
           ? {
               ...row,
               originalInvoiceNo: row.originalInvoiceNo || row.invoiceNumber,
               invoiceNumber: "",
+              collectQty: row.collectQty ?? (row.nop || null),
+              nop: 0,
             }
           : row
       );
@@ -549,16 +476,19 @@ export async function parseTripSheet(
     // 4. Get this scope's existing invoices, collection documents and drivers.
     //    All three are scoped, and the two folder listings go over Graph, so
     //    they are fetched together rather than one after the other.
-    const [invoiceFiles, collectionFolder, drivers] = await Promise.all([
+    const [invoiceFiles, collectionFolder, drivers, pattern] = await Promise.all([
       listInvoiceFiles(tenantId),
       listCollectionFolder(tenantId),
       listDrivers(tenantId),
+      readInvoiceNoPattern(tenantId),
     ]);
 
     const collectionLookup = buildCollectionLookup(collectionFolder.documents);
 
-    // Invoice lookup: every match key → filename (see invoiceMatchKeys)
-    const invoiceLookup = buildInvoiceLookup(invoiceFiles);
+    // Invoice lookup: every match key → filename (see invoiceMatchKeys). The
+    // tenant's pattern runs on both sides — the filenames here and each
+    // INVOICENO cell below.
+    const invoiceLookup = buildInvoiceLookup(invoiceFiles, 3, pattern);
 
     // Build driver lookup by name
     const driverByName = new Map<string, { id: string; name: string }>();
@@ -670,6 +600,12 @@ export async function parseTripSheet(
           // ORIGINALINVOICENO, else the INVOICENO on the collection's own row
           // (moved here when the rows were parsed).
           originalInvoiceNo: row.originalInvoiceNo || null,
+          // Exact and base keys only, as the already-signed check: this
+          // decides which invoice a credit is anchored to, so a loose match
+          // onto another invoice's PDF would be worse than none.
+          originalInvoiceFile: row.originalInvoiceNo
+            ? matchInvoiceFile(invoiceLookup, row.originalInvoiceNo, 1, pattern) ?? null
+            : null,
           status: "PENDING",
           exceptionReason: null,
           expectedQty: row.collectQty,
@@ -684,7 +620,7 @@ export async function parseTripSheet(
         let matchedFile: string | undefined;
 
         if (row.invoiceNumber) {
-          matchedFile = matchInvoiceFile(invoiceLookup, row.invoiceNumber);
+          matchedFile = matchInvoiceFile(invoiceLookup, row.invoiceNumber, 3, pattern);
 
           if (matchedFile) {
             totalMatched++;
@@ -789,7 +725,8 @@ export async function parseTripSheet(
     const alreadySigned = await detectAlreadySignedInvoices(
       tenantId,
       allInvoiceNumbers,
-      invoiceFiles
+      invoiceFiles,
+      pattern
     );
 
     return {
@@ -831,7 +768,8 @@ export async function parseTripSheet(
 async function detectAlreadySignedInvoices(
   tenantId: string,
   invoiceNumbers: string[],
-  invoiceFiles: { filename: string; invoiceNumber: string; isSigned: boolean; signedAt?: string }[]
+  invoiceFiles: { filename: string; invoiceNumber: string; isSigned: boolean; signedAt?: string }[],
+  pattern: InvoiceNoPattern
 ): Promise<AlreadySignedInvoice[]> {
   if (invoiceNumbers.length === 0) return [];
 
@@ -873,11 +811,11 @@ async function detectAlreadySignedInvoices(
   // preview skips these invoices by default, so the digits-only fallbacks that
   // are fine for finding a PDF are too loose for declaring one already signed.
   const signedFiles = invoiceFiles.filter((f) => f.isSigned);
-  const signedLookup = buildInvoiceLookup(signedFiles, 1);
+  const signedLookup = buildInvoiceLookup(signedFiles, 1, pattern);
   const signedByFilename = new Map(signedFiles.map((f) => [f.filename, f]));
 
   for (const inv of invoiceNumbers) {
-    const filename = matchInvoiceFile(signedLookup, inv, 1);
+    const filename = matchInvoiceFile(signedLookup, inv, 1, pattern);
     const file = filename ? signedByFilename.get(filename) : undefined;
     if (file && !seen.has(inv.toUpperCase())) {
       seen.add(inv.toUpperCase());

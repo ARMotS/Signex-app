@@ -133,7 +133,7 @@ export async function removeStopFromTrip(
     const changed = keepForCollections
       ? await tx.stop.updateMany({
           where: guard,
-          data: { invoiceNumber: "", invoiceFile: null, nop: 0 },
+          data: { invoiceNumber: "", invoiceNoNormalized: null, invoiceFile: null, nop: 0 },
         })
       : await tx.stop.deleteMany({ where: guard });
 

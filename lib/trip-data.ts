@@ -10,7 +10,7 @@
 
 import { scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
-import { StopStatus as PrismaStopStatus } from "@prisma/client";
+import { Prisma, StopStatus as PrismaStopStatus } from "@prisma/client";
 import type {
   CollectionStatus,
   CollectionType,
@@ -19,6 +19,9 @@ import type {
 import { isTerminalStatus } from "./collections";
 import { moveToProcessed } from "./trip-sheet-folder";
 import { mapWithConcurrency } from "./concurrency";
+import { readInvoiceNoPattern } from "./config";
+import { normalizeInvoiceNo, normalizedInvoiceNoOrNull, type InvoiceNoPattern } from "./invoice-number";
+import { ensureInvoices, scheduleInvoiceHeaders } from "./invoice-registry";
 
 export type StopStatus = "PENDING" | "IN_PROGRESS" | "SIGNED";
 
@@ -37,6 +40,12 @@ export interface TripCollection {
   upliftSubtype?: UpliftSubtype | null;
   notes?: string | null;
   originalInvoiceNo?: string | null;
+  /**
+   * The invoice folder's PDF for originalInvoiceNo, if the preview found one.
+   * Parse-time only — not a Collection column. Tells the deploy that the
+   * invoice is on file, so it is not registered as a stub.
+   */
+  originalInvoiceFile?: string | null;
   status: CollectionStatus | string;
   exceptionReason?: string | null;
   expectedQty?: number | null;
@@ -235,6 +244,36 @@ export async function saveTripSheet(
 ): Promise<TripSheet> {
   const db = scopedPrisma(tenantId);
   const status: "ACTIVE" | "QUEUED" = "ACTIVE";
+  const pattern = await readInvoiceNoPattern(tenantId);
+
+  // Register every invoice this run touches BEFORE anything of the run is
+  // written, so a failure here leaves no half-saved trip. Delivery invoices
+  // come first (their row names the customer); a collection's invoice that is
+  // not on file becomes a stub, so the chain still has an anchor.
+  const knownCustomer = (name: string) => (name && name !== "Unknown" ? name : null);
+  const invoiceIds = await ensureInvoices(
+    tenantId,
+    [
+      ...trip.stops
+        .filter((stop) => stop.invoiceNumber)
+        .map((stop) => ({
+          invoiceNo: stop.invoiceNumber,
+          pdfFilename: stop.invoiceFile ?? null,
+          customerName: knownCustomer(stop.customerName),
+        })),
+      ...trip.stops.flatMap((stop) =>
+        (stop.collections ?? [])
+          .filter((c) => c.originalInvoiceNo)
+          .map((c) => ({
+            invoiceNo: c.originalInvoiceNo!,
+            pdfFilename: c.originalInvoiceFile ?? null,
+            customerName: knownCustomer(stop.customerName),
+            stubIfNew: true,
+          }))
+      ),
+    ],
+    pattern
+  );
 
   // The scoped client stamps tenantId on the sheet AND on the nested stops.
   const created = await db.tripSheet.create({
@@ -248,6 +287,7 @@ export async function saveTripSheet(
         create: trip.stops.map((stop) => ({
           stopNumber: stop.stopNumber,
           invoiceNumber: stop.invoiceNumber,
+          invoiceNoNormalized: normalizedInvoiceNoOrNull(stop.invoiceNumber, pattern),
           customerName: stop.customerName,
           address: stop.address || "",
           nop: stop.nop || 0,
@@ -290,6 +330,9 @@ export async function saveTripSheet(
       upliftSubtype: collection.upliftSubtype ?? null,
       notes: collection.notes ?? null,
       originalInvoiceNo: collection.originalInvoiceNo ?? null,
+      invoiceNoNormalized: normalizedInvoiceNoOrNull(collection.originalInvoiceNo, pattern),
+      invoiceId:
+        invoiceIds.get(normalizedInvoiceNoOrNull(collection.originalInvoiceNo, pattern) ?? "") ?? null,
       exceptionReason: null,
       expectedQty: collection.expectedQty ?? null,
       sourceFileId: collection.sourceFileId ?? null,
@@ -298,6 +341,9 @@ export async function saveTripSheet(
       stopId: stopIdByNumber.get(stop.stopNumber)!,
     }))
   );
+
+  // Date and customer off each new invoice's PDF, after the response.
+  scheduleInvoiceHeaders(tenantId, { ids: [...invoiceIds.values()], limit: 50 });
 
   let collections: Awaited<ReturnType<typeof db.collection.findMany>> = [];
   if (collectionRows.length > 0) {
@@ -1408,4 +1454,111 @@ export async function listCollections(
   });
 
   return records.slice(0, cap);
+}
+
+// ─── Normalized invoice numbers ───────────────────────────────────────────
+
+/**
+ * Bring this scope's stored invoiceNoNormalized values in line with its
+ * current pattern: after the pattern changes in Settings, and from the
+ * backfill for rows written before the column existed.
+ *
+ * Only live rows carry the column — completed trips are archived as JSON and
+ * their readers normalize the raw value on the fly. That keeps this small: a
+ * scope's live stops and collections, not its history.
+ *
+ * Updates are keyed on the RAW value, not on row ids: every row holding
+ * "INV-2026-1047" gets that value's normalization. A row whose invoice number
+ * changes underneath (a stop taken off its run has it blanked) is therefore
+ * never handed a value computed from what it used to hold. No transaction:
+ * rows are independent, and a run cut short converges when run again.
+ *
+ * @param apply false counts what would change and writes nothing.
+ */
+export async function renormalizeInvoiceNumbers(
+  tenantId: string,
+  pattern: InvoiceNoPattern,
+  { apply = true }: { apply?: boolean } = {}
+): Promise<{ stops: number; collections: number; invoices: number; invoiceConflicts: number }> {
+  const db = scopedPrisma(tenantId);
+
+  const [stops, collections, invoices] = await Promise.all([
+    db.stop.findMany({ select: { invoiceNumber: true, invoiceNoNormalized: true } }),
+    db.collection.findMany({ select: { originalInvoiceNo: true, invoiceNoNormalized: true } }),
+    db.invoice.findMany({ select: { id: true, invoiceNo: true, invoiceNoNormalized: true } }),
+  ]);
+
+  // The invoice registry is keyed on the normalized number, so a new pattern
+  // can make two rows claim one number. Those are left as they are and
+  // counted: merging them would re-point collections, which is a decision for
+  // a person, not a settings save.
+  const invoiceChanges = invoices
+    .map((inv) => ({ ...inv, next: normalizeInvoiceNo(inv.invoiceNo, pattern) }))
+    .filter((inv) => inv.next && inv.next !== inv.invoiceNoNormalized);
+  let invoiceConflicts = 0;
+  if (apply) {
+    await mapWithConcurrency(
+      invoiceChanges,
+      async (inv) => {
+        try {
+          await db.invoice.update({ where: { id: inv.id }, data: { invoiceNoNormalized: inv.next } });
+        } catch (err) {
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+            invoiceConflicts++;
+          } else {
+            throw err;
+          }
+        }
+      },
+      4
+    );
+  }
+
+  /** raw value → its normalization, for every raw value with a row that disagrees */
+  const stale = <T>(rows: T[], raw: (r: T) => string | null, stored: (r: T) => string | null) => {
+    const changes = new Map<string, string | null>();
+    let count = 0;
+    for (const row of rows) {
+      const value = raw(row) ?? "";
+      const next = normalizedInvoiceNoOrNull(value, pattern);
+      if (next !== stored(row)) {
+        changes.set(value, next);
+        count++;
+      }
+    }
+    return { changes, count };
+  };
+
+  const stopChanges = stale(stops, (s) => s.invoiceNumber, (s) => s.invoiceNoNormalized);
+  const collectionChanges = stale(
+    collections,
+    (c) => c.originalInvoiceNo,
+    (c) => c.invoiceNoNormalized
+  );
+
+  if (apply) {
+    await mapWithConcurrency(
+      [...stopChanges.changes],
+      ([raw, next]) =>
+        db.stop.updateMany({ where: { invoiceNumber: raw }, data: { invoiceNoNormalized: next } }),
+      4
+    );
+    await mapWithConcurrency(
+      [...collectionChanges.changes],
+      ([raw, next]) =>
+        db.collection.updateMany({
+          // A blank originalInvoiceNo is stored as null; "" never reaches the DB.
+          where: { originalInvoiceNo: raw === "" ? null : raw },
+          data: { invoiceNoNormalized: next },
+        }),
+      4
+    );
+  }
+
+  return {
+    stops: stopChanges.count,
+    collections: collectionChanges.count,
+    invoices: invoiceChanges.length - invoiceConflicts,
+    invoiceConflicts,
+  };
 }

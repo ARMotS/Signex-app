@@ -55,6 +55,7 @@ model Tenant {
   removedStops  RemovedStop[]
   rejectedLines RejectedLine[]
   reallocatedStops ReallocatedStop[]
+  invoices      Invoice[]
 }
 
 model User {
@@ -225,7 +226,13 @@ enum EmailStatus {
 model Stop {
   id            String     @id @default(cuid())
   stopNumber    Int
+  /// As printed on the trip sheet; what is displayed.
   invoiceNumber String
+  /// invoiceNumber reduced to the digits every document agrees on
+  /// (INV-2026-1047 → 1047, lib/invoice-number.ts) under this scope's pattern.
+  /// What matching reads. Null for a stop with no invoice, and for rows written
+  /// before the column existed until the backfill runs.
+  invoiceNoNormalized String?
   customerName  String     @default("Unknown")
   address       String     @default("")
   nop           Int        @default(0)
@@ -274,6 +281,7 @@ model Stop {
   @@index([contactId])
   // The dispatcher's outstanding-email queue is read on every dashboard poll.
   @@index([tenantId, emailStatus])
+  @@index([tenantId, invoiceNoNormalized])
   // Drives "signed today" reporting without scanning a scope's whole history.
   @@index([tenantId, signedAt])
 }
@@ -341,6 +349,14 @@ model Collection {
   /// The invoice this credit goes back against. Read off the collection
   /// document when one is matched; null when the paperwork does not carry it.
   originalInvoiceNo String?
+  /// originalInvoiceNo normalized exactly as Stop.invoiceNoNormalized — the
+  /// key a credit note is matched to its collection on.
+  invoiceNoNormalized String?
+  /// The invoice this collection is credited against: the anchor of the
+  /// invoice → collection → credit note chain. Set at deploy (a stub invoice
+  /// is created when the PDF is not on file). Null for an ad hoc collection or
+  /// an uplift with no invoice behind it.
+  invoiceId         String?
   status            CollectionStatus @default(PENDING)
   /// Required whenever status is PARTIAL, NOT_AVAILABLE or REFUSED.
   exceptionReason   String?          @db.Text
@@ -382,6 +398,9 @@ model Collection {
   // Restrict, not SetNull: the composite FK includes the required tenantId, so
   // SetNull would try to null a NOT NULL column. Same reasoning as Stop.contact.
   driver    Driver?   @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+  // Restrict for the same reason as driver: an invoice is a durable anchor and
+  // is never deleted while anything points at it.
+  invoice   Invoice?  @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
 
   @@unique([tenantId, tripSheetId, collectionNo])
   @@index([tenantId])
@@ -391,6 +410,7 @@ model Collection {
   // Drives the credit-return report: type + date range, without scanning a
   // scope's whole collection history.
   @@index([tenantId, type, collectedAt])
+  @@index([tenantId, invoiceNoNormalized])
 }
 
 // ─── Completed Trip Sheets (archive) ──────────────────────────────────────
@@ -480,6 +500,55 @@ model ArchivedEmailResend {
 //
 // Per-scope key/value config. Invoice folder, trip sheet folder and signature
 // position are settings of ONE admin, not of the installation.
+
+// ─── Invoices (durable registry) ──────────────────────────────────────────
+//
+// Invoices themselves are PDFs in the scope's invoice folder, and the Stop that
+// delivered one is deleted when its trip completes. This is the record that
+// outlives both: one row per invoice NUMBER, the anchor every collection and
+// credit note hangs off. Filled from the folder listing, deploys and uploads —
+// never by a parse of the PDF's line items.
+
+model Invoice {
+  id                  String    @id @default(cuid())
+  tenantId            String    @default("")
+  tenant              Tenant    @relation(fields: [tenantId], references: [id])
+  /// As first seen (file stem or sheet cell). Display only.
+  invoiceNo           String
+  /// What everything matches on — see lib/invoice-number.ts. Numbers run on
+  /// across years, so this is unique per scope.
+  invoiceNoNormalized String
+  /// The file in the invoice folder. Null for a stub, or once the file is deleted.
+  pdfFilename         String?
+  /// Created from a collection row whose invoice PDF was not on file — an
+  /// invoice delivered before Signex, say. Cleared when the PDF turns up.
+  isStub              Boolean   @default(false)
+  /// The trip sheet's CUSTOMER — the value shown. The latest sheet wins.
+  customerName        String?
+  /// Read off the PDF header, for the cross-check. On a cash sale "Invoice to"
+  /// is the cash account and "Deliver to" is the real customer.
+  deliverToName       String?
+  billToName          String?
+  /// The invoice's own date, from the PDF. Never the trip sheet's Date, which
+  /// is the day of the trip.
+  invoiceDate         DateTime? @db.Date
+  /// TEXT (PDF text layer), AI (scanned PDF read by Claude) or MANUAL. Null
+  /// until the header has been read; a read header is never re-read.
+  headerSource        String?
+  headerAttempts      Int       @default(0)
+  headerError         String?   @db.Text
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  collections Collection[]
+
+  @@unique([tenantId, invoiceNoNormalized])
+  // Composite-FK target, as Stop's.
+  @@unique([tenantId, id])
+  @@index([tenantId, invoiceDate])
+  @@index([tenantId, customerName])
+  @@index([tenantId, headerSource])
+}
 
 model AppConfig {
   tenantId  String   @default("")
