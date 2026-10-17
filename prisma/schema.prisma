@@ -373,7 +373,14 @@ model Collection {
   signedFileId      String?
   signedFilePath    String?
   /// PNG data URL, as Stop.signatureData. Same capture component, same storage.
+  /// Cleared when the trip completes, once the signed PDF holding it is filed —
+  /// that PDF is the record, and this is the bulk of the row.
   signature         String?          @db.Text
+  /// The signed PDF really contains the office's original pages. False when
+  /// the original could not be read at signing (the receipt page stands
+  /// alone), and for receipts signed before this was recorded. Only when true
+  /// may the original in Pending/ be removed.
+  signedIncludesSource Boolean       @default(false)
   signedByName      String?
   collectedAt       DateTime?
   /// The signed collection receipt emailed to the customer — same states and
@@ -386,15 +393,29 @@ model Collection {
   emailError         String?     @db.Text
   /// Who completed it. Null until the collection reaches a terminal status.
   driverId          String?
-  tripSheetId       String
-  stopId            String
+  /// The live trip and stop. BOTH null once the trip has completed: the row
+  /// outlives them — a credit note arrives days later and must find it — so
+  /// completion detaches it (lib/trip-data.ts completeTripSheet) before the
+  /// trip is deleted. "tripSheetId is null" is what archived means. Deleting a
+  /// trip any other way still cascades its (attached) collections away.
+  tripSheetId       String?
+  stopId            String?
+  /// The stop's customer, copied onto the row so an archived collection —
+  /// which has no stop left — still names who it was collected from.
+  customerName      String?
+  /// The CompletedTripSheet snapshot this collection was archived with. No FK:
+  /// the archive is never joined to, as RemovedStop is never joined to a trip.
+  completedTripSheetId String?
   tenantId          String           @default("")
   tenant            Tenant           @relation(fields: [tenantId], references: [id])
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
 
-  tripSheet TripSheet @relation(fields: [tenantId, tripSheetId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
-  stop      Stop      @relation(fields: [tenantId, stopId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  // Composite FKs kept while attached, so a live collection still cannot point
+  // into another scope's trip or stop. A null component switches the
+  // constraint off (MATCH SIMPLE) — that is how an archived row lets go.
+  tripSheet TripSheet? @relation(fields: [tenantId, tripSheetId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  stop      Stop?      @relation(fields: [tenantId, stopId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   // Restrict, not SetNull: the composite FK includes the required tenantId, so
   // SetNull would try to null a NOT NULL column. Same reasoning as Stop.contact.
   driver    Driver?   @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
@@ -411,6 +432,7 @@ model Collection {
   // scope's whole collection history.
   @@index([tenantId, type, collectedAt])
   @@index([tenantId, invoiceNoNormalized])
+  @@index([tenantId, completedTripSheetId])
 }
 
 // ─── Completed Trip Sheets (archive) ──────────────────────────────────────

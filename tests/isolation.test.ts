@@ -3571,4 +3571,205 @@ suite("cross-ADMIN isolation", () => {
       for (const stop of body.stops) expect(stop.invoiceDate).not.toBe("2026-01-02");
     });
   });
+
+  // ── Collections outlive their trip ──────────────────────────────────
+  describe("collections outlive their trip", () => {
+    /**
+     * Deploy a one-stop run carrying a collection, record its outcome, and
+     * complete it. Returns the collection's id and the archive row.
+     */
+    async function completedRunWithCollection(
+      fx: typeof f.a,
+      opts: { collectionNo: string; signedFilePath?: string | null; signedIncludesSource?: boolean; sourceFilePath?: string | null }
+    ) {
+      const { saveTripSheet, completeTripSheet } = await import("@/lib/trip-data");
+      const trip = await saveTripSheet(fx.tenantId, {
+        driverId: fx.driver.id,
+        driverName: fx.driver.name,
+        regNo: "REG-C",
+        uploadedBy: fx.admin.id,
+        sourceFilename: `${opts.collectionNo}.csv`,
+        stops: [
+          {
+            stopNumber: 1,
+            invoiceNumber: "",
+            customerName: "Keep Co",
+            address: "",
+            nop: 0,
+            status: "PENDING",
+            collections: [
+              {
+                id: "preview-id", // the preview's own id; saveTripSheet assigns the real one
+                collectionNo: opts.collectionNo,
+                type: "CREDIT_RETURN",
+                originalInvoiceNo: "INV-5550",
+                status: "PENDING",
+                expectedQty: 2,
+              },
+            ],
+          },
+        ],
+      });
+
+      const collection = await db().collection.findFirstOrThrow({
+        where: { tripSheetId: trip.id, collectionNo: opts.collectionNo },
+      });
+      await db().collection.update({
+        where: { id: collection.id },
+        data: {
+          status: "COLLECTED",
+          collectedQty: 2,
+          collectedAt: new Date(),
+          driverId: fx.driver.id,
+          signature: "data:image/png;base64,AAAA",
+          signedByName: "Customer",
+          signedFilePath: opts.signedFilePath === undefined ? `${opts.collectionNo}_signed.pdf` : opts.signedFilePath,
+          signedIncludesSource: opts.signedIncludesSource ?? false,
+          sourceFilePath: opts.sourceFilePath ?? null,
+        },
+      });
+
+      const outcome = await completeTripSheet(fx.tenantId, trip.id, "Admin");
+      expect(outcome.success).toBe(true);
+      const archive = await db().completedTripSheet.findFirstOrThrow({ where: { tripSheetId: trip.id } });
+      return { tripId: trip.id, collectionId: collection.id, archive };
+    }
+
+    it("keeps the row, detached and linked to its archive, in its own scope", async () => {
+      const { tripId, collectionId, archive } = await completedRunWithCollection(f.a, { collectionNo: "KEEP-1" });
+
+      expect(await db().tripSheet.findUnique({ where: { id: tripId } })).toBeNull();
+      const row = await db().collection.findUnique({ where: { id: collectionId } });
+      expect(row).toMatchObject({
+        tenantId: f.a.tenantId,
+        tripSheetId: null,
+        stopId: null,
+        completedTripSheetId: archive.id,
+        customerName: "Keep Co",
+        status: "COLLECTED",
+        invoiceNoNormalized: "5550",
+        // Its signed PDF is filed, so the PNG went.
+        signature: null,
+      });
+      expect(row!.invoiceId).not.toBeNull();
+      expect((archive.collections as any[])[0].collectionId).toBe(collectionId);
+      expect(await db().collection.count({ where: { tenantId: f.b.tenantId, collectionNo: "KEEP-1" } })).toBe(0);
+    });
+
+    it("keeps the signature when the signed PDF was never filed", async () => {
+      const { collectionId } = await completedRunWithCollection(f.a, { collectionNo: "KEEP-2", signedFilePath: null });
+      const row = await db().collection.findUnique({ where: { id: collectionId } });
+      expect(row?.signature).toBe("data:image/png;base64,AAAA");
+    });
+
+    it("the collections report lists an archived collection once, to its own scope only", async () => {
+      await completedRunWithCollection(f.a, { collectionNo: "KEEP-3" });
+      const { listCollections } = await import("@/lib/trip-data");
+
+      const a = await listCollections(f.a.tenantId, { includeArchived: true });
+      expect(a.filter((r) => r.collectionNo === "KEEP-3")).toHaveLength(1);
+      expect(a.find((r) => r.collectionNo === "KEEP-3")?.archived).toBe(true);
+
+      const b = await listCollections(f.b.tenantId, { includeArchived: true });
+      expect(b.some((r) => r.collectionNo === "KEEP-3")).toBe(false);
+    });
+
+    it("is no driver's once archived, and its outcome cannot be re-recorded", async () => {
+      const { collectionId } = await completedRunWithCollection(f.a, { collectionNo: "KEEP-4" });
+      const { GET, PUT } = await import("@/app/api/collections/[id]/route");
+
+      useSession(driverSession(f.a));
+      expect((await GET(req(`/api/collections/${collectionId}`), params({ id: collectionId }))).status).toBe(404);
+
+      useSession(adminSession(f.a));
+      expect((await GET(req(`/api/collections/${collectionId}`), params({ id: collectionId }))).status).toBe(200);
+      const res = await PUT(
+        req(`/api/collections/${collectionId}`, {
+          method: "PUT",
+          body: { status: "REFUSED", exceptionReason: "changed my mind" },
+        }),
+        params({ id: collectionId })
+      );
+      expect(res.status).toBe(409);
+
+      useSession(adminSession(f.b));
+      expect((await GET(req(`/api/collections/${collectionId}`), params({ id: collectionId }))).status).toBe(404);
+    });
+
+    it("drops out of the driver's cursor", async () => {
+      const { buildSyncCursor } = await import("@/lib/sync-cursor");
+      const before = await buildSyncCursor(f.a.tenantId, { driverId: f.a.driver.id });
+      await completedRunWithCollection(f.a, { collectionNo: "KEEP-5" });
+      const after = await buildSyncCursor(f.a.tenantId, { driverId: f.a.driver.id });
+      expect(after.collections).toBe(before.collections);
+    });
+
+    it("removes a settled original from Pending, through the caller's own connection only", async () => {
+      const fetchMock = vi.mocked(fetch);
+      const original = fetchMock.getMockImplementation()!;
+      // Name lookups inside Pending find the document; everything else as usual.
+      fetchMock.mockImplementation(async (url: any, init: any) => {
+        if (String(url).includes("Pending")) {
+          const auth: string | undefined = init?.headers?.Authorization;
+          graphCalls.push({ url: String(url), token: auth ? auth.replace("Bearer ", "") : null });
+          return new Response(JSON.stringify({ id: "pending-item-KEEP-6", name: "KEEP-6.pdf" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return original(url, init);
+      });
+
+      try {
+        await completedRunWithCollection(f.a, {
+          collectionNo: "KEEP-6",
+          signedIncludesSource: true,
+          sourceFilePath: "KEEP-6.pdf",
+        });
+        const deletes = graphCalls.filter((c) => c.url.endsWith("/items/pending-item-KEEP-6"));
+        expect(deletes).toHaveLength(1);
+        expect(deletes[0].token).toBe("access-token-A");
+
+        // Not when the signed copy does not contain the original.
+        graphCalls.length = 0;
+        await completedRunWithCollection(f.a, {
+          collectionNo: "KEEP-7",
+          signedIncludesSource: false,
+          sourceFilePath: "KEEP-7.pdf",
+        });
+        expect(graphCalls.some((c) => c.url.includes("/items/pending-item"))).toBe(false);
+      } finally {
+        fetchMock.mockImplementation(original);
+      }
+    });
+
+    it("a workspace holding archived collections can still be purged", async () => {
+      const { POST, DELETE } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+      const created = await (
+        await POST(
+          req("/api/admin/users", {
+            method: "POST",
+            body: { name: "Admin P", email: "admin-p@example.test", username: "office.p", password: "office-p-pass1" },
+          })
+        )
+      ).json();
+      const tenantId: string = created.scope.tenantId;
+      const admin = await db().admin.findUniqueOrThrow({ where: { email: "admin-p@example.test" } });
+      const driver = await db().driver.create({ data: { name: "Purge Driver", tenantId } });
+
+      await completedRunWithCollection(
+        { ...f.a, tenantId, admin: { id: admin.id, name: admin.name, email: admin.email }, driver: { id: driver.id, name: driver.name } },
+        { collectionNo: "PURGE-1" }
+      );
+      expect(await db().collection.count({ where: { tenantId, tripSheetId: null } })).toBe(1);
+
+      const res = await DELETE(
+        req("/api/admin/users", { method: "DELETE", body: { id: admin.id, deleteScopeData: true } })
+      );
+      expect(res.status).toBe(200);
+      expect(await db().collection.count({ where: { tenantId } })).toBe(0);
+      expect(await db().invoice.count({ where: { tenantId } })).toBe(0);
+    });
+  });
 });

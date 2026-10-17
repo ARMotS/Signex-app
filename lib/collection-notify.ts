@@ -77,15 +77,18 @@ export async function sendCollectionReceiptEmail(
     // is resolved here by exact company name, the same rule invoice signing
     // uses. Exact, not fuzzy: the receipt carries signed paperwork, and a near
     // miss would mail it to the wrong company.
-    let contact = collection.stop.contact;
+    //
+    // A collection whose trip has completed has no stop left; its customer was
+    // copied onto the row, and is resolved by the same exact rule.
+    let contact = collection.stop?.contact ?? null;
     if (!contact) {
-      const name = collection.stop.customerName.trim();
+      const name = (collection.stop?.customerName ?? collection.customerName ?? "").trim();
       contact = name
         ? await db.contact.findFirst({
             where: { deletedAt: null, companyName: { equals: name, mode: "insensitive" } },
           })
         : null;
-      if (contact) {
+      if (contact && collection.stop) {
         await db.stop.updateMany({
           where: { id: collection.stop.id, contactId: null },
           data: { contactId: contact.id },

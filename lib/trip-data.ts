@@ -16,7 +16,7 @@ import type {
   CollectionType,
   UpliftSubtype,
 } from "@prisma/client";
-import { isTerminalStatus } from "./collections";
+import { isTerminalStatus, removeSettledOriginals } from "./collections";
 import { moveToProcessed } from "./trip-sheet-folder";
 import { mapWithConcurrency } from "./concurrency";
 import { readInvoiceNoPattern } from "./config";
@@ -179,6 +179,11 @@ export interface ArchivedStop {
  * and it was not there" is part of a complete record.
  */
 export interface ArchivedCollection {
+  /**
+   * The Collection row, which outlives the trip (detached at completion).
+   * Absent on snapshots taken before collections were kept.
+   */
+  collectionId?: string;
   collectionNo: string;
   type: string;
   upliftSubtype: string | null;
@@ -337,6 +342,9 @@ export async function saveTripSheet(
       expectedQty: collection.expectedQty ?? null,
       sourceFileId: collection.sourceFileId ?? null,
       sourceFilePath: collection.sourceFilePath ?? null,
+      // Copied now so the row still names its customer after completion has
+      // detached it from the stop.
+      customerName: stop.customerName || null,
       tripSheetId: created.id,
       stopId: stopIdByNumber.get(stop.stopNumber)!,
     }))
@@ -356,6 +364,7 @@ export async function saveTripSheet(
 
   const collectionsByStop = new Map<string, typeof collections>();
   for (const collection of collections) {
+    if (!collection.stopId) continue; // just created on this trip — always attached
     const existing = collectionsByStop.get(collection.stopId) || [];
     existing.push(collection);
     collectionsByStop.set(collection.stopId, existing);
@@ -779,14 +788,20 @@ export async function completeTripSheet(
       }
     }
 
-    // Snapshot BEFORE the delete. Deleting the sheet is what keeps finished
-    // stops out of every driver's run sheet and out of the change-feed cursor,
-    // but it used to take the day's record with it — a dispatcher who closed
-    // out a route could no longer see it had happened.
+    // Snapshot, detach and delete in ONE transaction. Deleting the sheet is
+    // what keeps finished stops out of every driver's run sheet and out of the
+    // change-feed cursor; the snapshot is the day's record (frozen as JSON, so
+    // later edits to a driver or contact cannot rewrite what was delivered).
+    // Together, so a failure cannot leave a snapshot of a trip that is still
+    // live, and a second completion of the same trip rolls back whole rather
+    // than archiving it twice.
     //
-    // Frozen as JSON on purpose: this is an archive of what was delivered, and
-    // later edits to a driver or a contact must not be able to rewrite it.
-    await db.completedTripSheet.create({
+    // Collections are DETACHED, not deleted: a credit note references the
+    // invoice and arrives after the trip has gone, so the rows must outlive
+    // it. Clearing tripSheetId/stopId is what lets the delete below pass them
+    // by instead of cascading through them.
+    const archive = await db.$transaction(async (tx) => {
+    const snapshot = await tx.completedTripSheet.create({
       data: {
         tripSheetId: trip.id,
         driverId: trip.driverId,
@@ -823,15 +838,15 @@ export async function completeTripSheet(
             })),
           }),
         })),
-        // Frozen for the same reason the stops are, and carrying both file
-        // references: the Collection rows cascade away with the trip sheet
-        // below, so this is the whole record the archive view and the
-        // credit-return report read afterwards. The PDFs themselves stay in
-        // Collections/Signed permanently — nothing is moved or deleted when a
-        // trip closes.
+        // Frozen for the same reason the stops are: this is what the archive
+        // view and the credit-return report show of the day. The rows
+        // themselves now live on (detached below) for credit matching; the
+        // collectionId ties each frozen entry to its row. Signed PDFs stay in
+        // Collections/Signed permanently.
         collections: collections.map((c) => {
-          const stop = stopById.get(c.stopId);
+          const stop = c.stopId ? stopById.get(c.stopId) : undefined;
           return {
+            collectionId: c.id,
             collectionNo: c.collectionNo,
             type: c.type,
             upliftSubtype: c.upliftSubtype,
@@ -841,7 +856,7 @@ export async function completeTripSheet(
             notes: c.notes,
             expectedQty: c.expectedQty,
             collectedQty: c.collectedQty,
-            customerName: stop?.customerName ?? "Unknown",
+            customerName: stop?.customerName ?? c.customerName ?? "Unknown",
             stopNumber: stop?.stopNumber ?? null,
             signedByName: c.signedByName,
             collectedAt: c.collectedAt ? c.collectedAt.toISOString() : null,
@@ -854,8 +869,39 @@ export async function completeTripSheet(
       },
     });
 
-    // Delete the trip sheet (cascades to stops)
-    await db.tripSheet.delete({ where: { id: tripId } });
+    if (collections.length > 0) {
+      // The customer, for rows deployed before it was copied onto them —
+      // after the detach there is no stop left to read it from.
+      for (const stop of stops) {
+        await tx.collection.updateMany({
+          where: { stopId: stop.id, customerName: null },
+          data: { customerName: stop.customerName },
+        });
+      }
+      // The signed PDF is the record of the signature; the PNG is the bulk
+      // of the row. Kept only where filing failed, so the office can still
+      // produce the document by hand.
+      await tx.collection.updateMany({
+        where: { tripSheetId: tripId, signedFilePath: { not: null } },
+        data: { signature: null },
+      });
+      await tx.collection.updateMany({
+        where: { tripSheetId: tripId },
+        data: { tripSheetId: null, stopId: null, completedTripSheetId: snapshot.id },
+      });
+    }
+
+    // Cascades to the stops; the collections were detached above.
+    await tx.tripSheet.delete({ where: { id: tripId } });
+    return snapshot;
+    });
+
+    // Originals the signed copies now fully contain. After the commit, and
+    // best-effort: a leftover file is harmless, the archive is already safe.
+    const settled = await removeSettledOriginals(
+      tenantId,
+      collections.map((c) => c.id)
+    );
 
     await logAudit({
       action: "STATUS_CHANGE",
@@ -866,7 +912,9 @@ export async function completeTripSheet(
         collections.length ? `; ${collections.length} collections closed out` : ""
       }${removedCount ? `; ${removedCount} invoice(s) removed before signing` : ""}${
         reallocatedCount ? `; ${reallocatedCount} stop(s) reallocated to another driver` : ""
-      })${
+      }${
+        settled.removed.length ? `; ${settled.removed.length} settled collection original(s) removed from Pending` : ""
+      }; archive ${archive.id})${
         trip.sourceFilename
           ? archivedFile
             ? ` — archived ${trip.sourceFilename} to processed/`
@@ -1337,6 +1385,10 @@ export async function listCollections(
 
   const live = await db.collection.findMany({
     where: {
+      // Live only. Archived rows (detached at completion) are reported from
+      // the frozen snapshot below, exactly as before they were kept — reading
+      // them here too would list every closed-out collection twice.
+      tripSheetId: { not: null },
       ...(type && { type }),
       ...(status && { status }),
       ...(tripSheetId && { tripSheetId }),
@@ -1368,18 +1420,19 @@ export async function listCollections(
     notes: c.notes,
     expectedQty: c.expectedQty,
     collectedQty: c.collectedQty,
-    customerName: c.stop.customerName,
-    stopNumber: c.stop.stopNumber,
+    customerName: c.stop?.customerName ?? c.customerName ?? "Unknown",
+    stopNumber: c.stop?.stopNumber ?? null,
     signedByName: c.signedByName,
     collectedAt: c.collectedAt,
     sourceFilePath: c.sourceFilePath,
     signedFileId: c.signedFileId,
     signedFilePath: c.signedFilePath,
-    driverId: c.tripSheet.driverId,
-    driverName: c.tripSheet.driver?.name ?? null,
+    driverId: c.tripSheet?.driverId ?? c.driverId,
+    driverName: c.tripSheet?.driver?.name ?? null,
     emailStatus: c.emailStatus,
     emailError: c.emailError,
-    tripSheetId: c.tripSheetId,
+    // Filtered to attached rows above.
+    tripSheetId: c.tripSheetId!,
     archived: false,
     completedTripSheetId: null,
   }));

@@ -54,8 +54,10 @@ async function loadCollection(
   if (!collection) return null;
 
   if (ctx.role === "DRIVER") {
+    // An archived collection (its trip completed) has no trip left, so it is
+    // no driver's any more — as before collections were kept, when it was gone.
     const driver = await ctx.db.driver.findFirst({ where: { id: ctx.userId } });
-    if (!driver || collection.tripSheet.driverId !== driver.id) return null;
+    if (!driver || !collection.tripSheet || collection.tripSheet.driverId !== driver.id) return null;
   }
 
   return collection;
@@ -118,6 +120,16 @@ export const PUT = withAuth(async (
     );
   }
 
+  // Its trip is closed and archived. Re-recording would rewrite a signed
+  // document the archive and any credit note already rely on.
+  if (!collection.tripSheet) {
+    return NextResponse.json(
+      { error: "This collection's trip sheet has been completed and archived; its outcome can no longer be changed." },
+      { status: 409 }
+    );
+  }
+  const tripDriverId = collection.tripSheet.driverId;
+
   const body = await request.json();
   const {
     status,
@@ -149,7 +161,7 @@ export const PUT = withAuth(async (
     ctx.role === "DRIVER"
       ? await ctx.db.driver.findFirst({ where: { id: ctx.userId } })
       : await ctx.db.driver.findFirst({
-          where: { id: collection.tripSheet.driverId },
+          where: { id: tripDriverId },
         });
 
   const collectedAt = new Date();
@@ -207,7 +219,7 @@ export const PUT = withAuth(async (
         collectedQty: collectedQty ?? null,
         exceptionReason: exceptionReason?.trim() || null,
         notes: collection.notes,
-        customerName: collection.stop.customerName,
+        customerName: collection.stop?.customerName ?? collection.customerName ?? "Unknown",
         signedByName: signedByName?.trim() || null,
         driverName: driver?.name ?? null,
         collectedAt,
@@ -224,7 +236,13 @@ export const PUT = withAuth(async (
 
     await ctx.db.collection.update({
       where: { id },
-      data: { signedFilePath: outputName, signedFileId: saved.fileId ?? null },
+      data: {
+        signedFilePath: outputName,
+        signedFileId: saved.fileId ?? null,
+        // Whether the office's original pages are inside this PDF. Only then
+        // may the original be cleared out of Pending/ when the trip completes.
+        signedIncludesSource: sourcePdf !== null,
+      },
     });
   } catch (err) {
     console.error(`Failed to write the signed document for collection ${id}:`, err);
