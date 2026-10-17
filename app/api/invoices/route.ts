@@ -3,6 +3,14 @@ import { listInvoiceFiles, getInvoiceFolderPath, deleteInvoiceFiles, deleteInvoi
 import { getCloudAccountStatus } from "@/lib/microsoft-graph";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { readInvoiceNoPattern } from "@/lib/config";
+import { normalizeInvoiceNo } from "@/lib/invoice-number";
+import {
+  customerMismatch,
+  detachInvoiceFiles,
+  ensureInvoices,
+  scheduleInvoiceHeaders,
+} from "@/lib/invoice-registry";
 import {
   DEFAULT_INVOICE_DELETED_REASON,
   normalizeRemovalReason,
@@ -16,11 +24,53 @@ export const GET = withAuth(async () => {
   const cloudStatus = await getCloudAccountStatus(ctx.tenantId);
   const isOneDrive = !!cloudStatus?.invoiceFolderItemId;
 
-  const [invoices, folderPath, duplicates] = await Promise.all([
+  const [files, folderPath, duplicates, pattern] = await Promise.all([
     listInvoiceFiles(ctx.tenantId),
     getInvoiceFolderPath(ctx.tenantId),
     findDuplicateInvoices(ctx.tenantId),
+    readInvoiceNoPattern(ctx.tenantId),
   ]);
+
+  // Every file seen gets a registry row ("fill": a listing never re-points an
+  // invoice at a different copy of itself), then the rows supply each file's
+  // invoice date and customer. Headers not read yet are read after the
+  // response — this page lists the folder, it does not wait on PDFs.
+  await ensureInvoices(
+    ctx.tenantId,
+    files.map((f) => ({ invoiceNo: f.name, pdfFilename: f.filename })),
+    pattern,
+    { fileAuthority: "fill" }
+  );
+  const records = await ctx.db.invoice.findMany({
+    select: {
+      id: true,
+      invoiceNoNormalized: true,
+      customerName: true,
+      deliverToName: true,
+      billToName: true,
+      invoiceDate: true,
+      headerSource: true,
+      headerError: true,
+      isStub: true,
+    },
+  });
+  const recordByKey = new Map(records.map((r) => [r.invoiceNoNormalized, r]));
+  scheduleInvoiceHeaders(ctx.tenantId, { limit: 25 });
+
+  const invoices = files.map((f) => {
+    const r = recordByKey.get(normalizeInvoiceNo(f.invoiceNumber, pattern));
+    return {
+      ...f,
+      recordId: r?.id ?? null,
+      invoiceDate: r?.invoiceDate ? r.invoiceDate.toISOString().slice(0, 10) : null,
+      // The trip sheet's name wins; until a sheet names it, the PDF's.
+      customerName: r?.customerName ?? r?.deliverToName ?? r?.billToName ?? null,
+      pdfCustomerName: r?.deliverToName ?? r?.billToName ?? null,
+      customerMismatch: r ? customerMismatch(r.customerName, r.deliverToName, r.billToName) : false,
+      headerSource: r?.headerSource ?? null,
+      headerError: r?.headerSource ? null : r?.headerError ?? null,
+    };
+  });
 
   const signedCount = invoices.filter((i) => i.isSigned).length;
   const unsignedCount = invoices.length - signedCount;
@@ -60,6 +110,9 @@ export const DELETE = withAuth(async (request: NextRequest) => {
   // client keeps runs consistent. Signed stops stay: the delivery happened.
   const failed = new Set<string>(result.failed);
   const gone = filenames.filter((f: unknown): f is string => typeof f === "string" && !failed.has(f));
+  // The invoice record stays (it anchors what was delivered and collected
+  // against it); it just no longer has a PDF.
+  await detachInvoiceFiles(ctx.tenantId, gone);
   const trips = await removeStopsForDeletedInvoices(ctx.tenantId, gone, {
     reason: normalizeRemovalReason(body.reason) ?? DEFAULT_INVOICE_DELETED_REASON,
     removedBy: ctx.name,

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readConfig, writeConfig, validateFolderPath } from "@/lib/config";
 import { assertCollectionsFolderIsSibling } from "@/lib/collections";
+import { compileInvoiceNoPattern, type InvoiceNoPattern } from "@/lib/invoice-number";
+import { renormalizeInvoiceNumbers } from "@/lib/trip-data";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
@@ -75,9 +77,32 @@ export const PUT = withAuth(async (request: NextRequest) => {
     }
   }
 
+  // The invoice-number pattern runs server-side on every import, so it is
+  // validated here rather than trusted (see compileInvoiceNoPattern).
+  let newPattern: { pattern: InvoiceNoPattern } | null = null;
+  if (body.invoiceNoPattern !== undefined) {
+    const source = String(body.invoiceNoPattern ?? "").trim();
+    const compiled = compileInvoiceNoPattern(source);
+    if (!compiled.ok) {
+      return NextResponse.json({ error: compiled.error }, { status: 400 });
+    }
+    body.invoiceNoPattern = source;
+    if (source !== (await readConfig(ctx.tenantId)).invoiceNoPattern) {
+      newPattern = { pattern: compiled.pattern };
+    }
+  }
+
   const updated = await writeConfig(ctx.tenantId, body);
+
+  // Stored invoiceNoNormalized values were computed under the old pattern.
+  // Live rows only — see renormalizeInvoiceNumbers.
+  const renormalized = newPattern
+    ? await renormalizeInvoiceNumbers(ctx.tenantId, newPattern.pattern)
+    : undefined;
+
   return NextResponse.json({
     success: true,
     config: updated,
+    ...(renormalized && { renormalized }),
   });
 });

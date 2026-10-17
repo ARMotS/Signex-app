@@ -13,6 +13,7 @@ import path from "path";
 import { scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
 import { detectCloudProvider, type CloudProvider } from "./cloud-detect";
+import { compileInvoiceNoPattern, type InvoiceNoPattern } from "./invoice-number";
 
 export interface SignaturePosition {
   xPercent: number;      // 0-100, left edge of signature box as % of page width
@@ -43,6 +44,12 @@ export interface SignexConfig {
   collectionsFolderPath: string;
   collectionsFolderType: CloudProvider;
   signaturePosition: SignaturePosition;
+  /**
+   * How this scope's invoice numbers are read: a regex whose group captures
+   * the number (see compileInvoiceNoPattern). Empty means the built-in rule,
+   * which handles INV-2026-1047, IV-1047-2026 and IV-365-4.
+   */
+  invoiceNoPattern: string;
 }
 
 const DEFAULT_CONFIG: SignexConfig = {
@@ -53,6 +60,7 @@ const DEFAULT_CONFIG: SignexConfig = {
   collectionsFolderPath: "",
   collectionsFolderType: "local",
   signaturePosition: DEFAULT_SIGNATURE_POSITION,
+  invoiceNoPattern: "",
 };
 
 /**
@@ -75,6 +83,8 @@ export async function readConfig(tenantId: string): Promise<SignexConfig> {
       } else if (row.key === "collectionsFolderPath") {
         config.collectionsFolderPath = row.value;
         config.collectionsFolderType = detectCloudProvider(row.value);
+      } else if (row.key === "invoiceNoPattern") {
+        config.invoiceNoPattern = row.value;
       } else if (row.key === "signaturePosition") {
         try {
           config.signaturePosition = JSON.parse(row.value);
@@ -125,6 +135,29 @@ export async function writeConfig(
   });
 
   return merged;
+}
+
+/**
+ * This scope's compiled invoice-number pattern, or null for the built-in rule.
+ *
+ * Deliberately NOT routed through readConfig, which falls back to defaults on a
+ * database error: a silent fall back to the built-in rule would write
+ * invoiceNoNormalized values the tenant's own pattern disagrees with. A failed
+ * read throws, and the parse or save it belongs to fails with it.
+ *
+ * A stored pattern that no longer compiles (written before a validation rule
+ * existed) is logged and treated as the built-in rule rather than taking every
+ * trip sheet import down with it.
+ */
+export async function readInvoiceNoPattern(tenantId: string): Promise<InvoiceNoPattern> {
+  const row = await scopedPrisma(tenantId).appConfig.findUnique({
+    where: { tenantId_key: { tenantId, key: "invoiceNoPattern" } },
+  });
+  const compiled = compileInvoiceNoPattern(row?.value ?? "");
+  if (compiled.ok) return compiled.pattern;
+
+  console.error(`Ignoring invalid invoiceNoPattern for scope ${tenantId}: ${compiled.error}`);
+  return null;
 }
 
 /**

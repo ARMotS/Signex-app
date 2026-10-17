@@ -37,6 +37,8 @@ interface TripStop {
   status: "PENDING" | "IN_PROGRESS" | "SIGNED";
   signedAt?: string;
   tripSheetDate?: string;
+  /** The invoice's own date (YYYY-MM-DD), once read off its PDF. */
+  invoiceDate?: string | null;
   collections?: TripCollection[];
   /** Lines the customer refused — the office recorded them; do not hand over. */
   rejectedLines?: { id: string; description: string; quantity: number | null; reason: string }[];
@@ -377,6 +379,12 @@ export default function RunPage() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-mono text-xs text-ink-black">
                         {stop.invoiceNumber}
+                        {stop.invoiceDate && (
+                          <span className="text-ink-muted">
+                            {" · "}
+                            {stop.invoiceDate.split("-").reverse().join("/")}
+                          </span>
+                        )}
                       </span>
                       {stop.nop > 0 && (
                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-ink-surface rounded text-[10px] font-mono">

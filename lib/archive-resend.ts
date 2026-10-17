@@ -22,7 +22,8 @@ import { scopedPrisma } from "./db-scoped";
 import { sendDeliveryConfirmation } from "./email";
 import { readSignedPdf } from "./delivery-notify";
 import { listInvoiceFiles } from "./invoices";
-import { buildInvoiceLookup, matchInvoiceFile } from "./trip-parser";
+import { buildInvoiceLookup, matchInvoiceFile } from "./invoice-number";
+import { readInvoiceNoPattern } from "./config";
 import type { ArchivedStop } from "./trip-data";
 
 /** Resends allowed per delivery. Mirrored by the CHECK in the migration. */
@@ -176,8 +177,12 @@ async function findSignedInvoiceFile(
   invoiceNumber: string
 ): Promise<string | null> {
   try {
-    const signed = (await listInvoiceFiles(tenantId)).filter((f) => f.isSigned);
-    return matchInvoiceFile(buildInvoiceLookup(signed, 1), invoiceNumber, 1) ?? null;
+    const [files, pattern] = await Promise.all([
+      listInvoiceFiles(tenantId),
+      readInvoiceNoPattern(tenantId),
+    ]);
+    const signed = files.filter((f) => f.isSigned);
+    return matchInvoiceFile(buildInvoiceLookup(signed, 1, pattern), invoiceNumber, 1, pattern) ?? null;
   } catch {
     return null;
   }

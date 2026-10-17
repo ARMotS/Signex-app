@@ -14,6 +14,24 @@ interface InvoiceFile {
   invoiceNumber: string;
   isSigned: boolean;
   signedAt?: string;
+  /** The invoice registry row behind this file — what a hand correction edits. */
+  recordId: string | null;
+  /** The invoice's own date (YYYY-MM-DD), read off the PDF. Not the trip date. */
+  invoiceDate: string | null;
+  /** The trip sheet's CUSTOMER, else the PDF's Deliver to. */
+  customerName: string | null;
+  pdfCustomerName: string | null;
+  /** The trip sheet's customer matches neither name on the PDF. */
+  customerMismatch: boolean;
+  headerSource: string | null;
+  headerError: string | null;
+}
+
+/** DD/MM/YYYY, as the trip sheets write it. */
+function formatInvoiceDate(iso: string | null): string {
+  if (!iso) return "—";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
 }
 
 interface DuplicateGroup {
@@ -65,6 +83,52 @@ export default function InvoicesPage() {
   const [deleteReason, setDeleteReason] = useState("");
   /** What the last delete took off live runs, shown once it is done. */
   const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
+
+  // Hand correction of an invoice's date / customer (PATCH /api/invoice-records).
+  const [editing, setEditing] = useState<{
+    inv: InvoiceFile;
+    date: string;
+    customer: string;
+    saving: boolean;
+    error: string | null;
+  } | null>(null);
+
+  const saveEdit = async () => {
+    if (!editing?.inv.recordId) return;
+    setEditing({ ...editing, saving: true, error: null });
+    try {
+      const res = await fetch(`/api/invoice-records/${encodeURIComponent(editing.inv.recordId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invoiceDate: editing.date || null, customerName: editing.customer }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setEditing({ ...editing, saving: false, error: json.error || "Failed to save" });
+        return;
+      }
+      // Every file of this invoice shares the record (IV-365-4 and IV-365-5).
+      setData((prev) =>
+        prev && {
+          ...prev,
+          invoices: prev.invoices.map((i) =>
+            i.recordId === editing.inv.recordId
+              ? {
+                  ...i,
+                  invoiceDate: json.invoiceDate,
+                  customerName: json.customerName ?? i.pdfCustomerName,
+                  headerSource: "MANUAL",
+                  headerError: null,
+                }
+              : i
+          ),
+        }
+      );
+      setEditing(null);
+    } catch {
+      setEditing({ ...editing, saving: false, error: "Network error" });
+    }
+  };
 
   // Upload — files land in the same folder this page lists, so a PDF added
   // here is immediately available to match against a trip sheet.
@@ -175,7 +239,14 @@ export default function InvoicesPage() {
     queryTokens.length === 0
       ? statusFiltered
       : statusFiltered.filter((inv) =>
-          matchesTokens(queryTokens, [inv.invoiceNumber, inv.filename, inv.name])
+          matchesTokens(queryTokens, [
+            inv.invoiceNumber,
+            inv.filename,
+            inv.name,
+            inv.customerName,
+            inv.pdfCustomerName,
+            formatInvoiceDate(inv.invoiceDate),
+          ])
         );
 
   // Pagination
@@ -581,6 +652,12 @@ export default function InvoicesPage() {
                   <th className="text-left px-5 py-3 font-mono text-xs text-ink-muted uppercase tracking-wide">
                     Invoice
                   </th>
+                  <th className="text-left px-5 py-3 font-mono text-xs text-ink-muted uppercase tracking-wide whitespace-nowrap">
+                    Invoice Date
+                  </th>
+                  <th className="text-left px-5 py-3 font-mono text-xs text-ink-muted uppercase tracking-wide">
+                    Customer
+                  </th>
                   <th className="text-left px-5 py-3 font-mono text-xs text-ink-muted uppercase tracking-wide">
                     Status
                   </th>
@@ -621,6 +698,54 @@ export default function InvoicesPage() {
                           <span className="inline-flex items-center px-1.5 py-0.5 text-[9px] font-mono font-medium rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20">
                             DUPLICATE
                           </span>
+                        )}
+                      </div>
+                    </td>
+                    <td
+                      className="px-5 py-3.5 font-mono text-xs text-ink-black whitespace-nowrap"
+                      title={
+                        inv.invoiceDate
+                          ? inv.headerSource === "MANUAL"
+                            ? "Entered by hand"
+                            : "Read from the invoice PDF"
+                          : inv.headerError ?? "Not read from the PDF yet"
+                      }
+                    >
+                      {formatInvoiceDate(inv.invoiceDate)}
+                    </td>
+                    <td className="px-5 py-3.5 text-xs text-ink-black">
+                      <div className="flex items-center gap-1.5 max-w-[220px]">
+                        <span className="truncate" title={inv.customerName ?? undefined}>
+                          {inv.customerName ?? "—"}
+                        </span>
+                        {inv.customerMismatch && (
+                          <span
+                            className="shrink-0 inline-flex items-center justify-center w-4 h-4 text-[10px] font-mono font-bold rounded-full bg-ink-amber-dim text-ink-amber"
+                            title={`The invoice PDF names ${inv.pdfCustomerName ?? "a different customer"}`}
+                          >
+                            !
+                          </span>
+                        )}
+                        {inv.recordId && (
+                          <button
+                            onClick={() =>
+                              setEditing({
+                                inv,
+                                date: inv.invoiceDate ?? "",
+                                customer: inv.customerName ?? "",
+                                saving: false,
+                                error: null,
+                              })
+                            }
+                            className="shrink-0 text-ink-muted hover:text-ink-black transition-colors"
+                            title="Correct the invoice date or customer"
+                            aria-label={`Edit invoice ${inv.invoiceNumber}`}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M12 20h9" />
+                              <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                            </svg>
+                          </button>
                         )}
                       </div>
                     </td>
@@ -898,6 +1023,59 @@ export default function InvoicesPage() {
                 ) : (
                   deleteMode === "original_only" ? "Delete Originals" : "Delete All Copies"
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={() => setEditing(null)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <h3 className="font-mono text-sm font-medium text-ink-black">Invoice {editing.inv.invoiceNumber}</h3>
+                <p className="text-xs text-ink-muted mt-1">
+                  Correct what was read off the PDF. A date entered here is never overwritten by a later read.
+                </p>
+              </div>
+              <label className="block">
+                <span className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">Invoice date</span>
+                <input
+                  type="date"
+                  value={editing.date}
+                  onChange={(e) => setEditing({ ...editing, date: e.target.value })}
+                  className="w-full px-3 py-2 text-sm font-mono bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-green"
+                />
+              </label>
+              <label className="block">
+                <span className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">Customer</span>
+                <input
+                  type="text"
+                  value={editing.customer}
+                  onChange={(e) => setEditing({ ...editing, customer: e.target.value })}
+                  maxLength={200}
+                  className="w-full px-3 py-2 text-sm bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-green"
+                />
+                {editing.inv.pdfCustomerName && (
+                  <span className="block text-xs text-ink-muted mt-1.5">PDF: {editing.inv.pdfCustomerName}</span>
+                )}
+              </label>
+              {editing.error && <p className="text-xs text-ink-red">{editing.error}</p>}
+            </div>
+            <div className="flex justify-end gap-3 px-6 py-4 border-t border-ink-border bg-ink-surface/50">
+              <button
+                onClick={() => setEditing(null)}
+                className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveEdit}
+                disabled={editing.saving}
+                className="px-5 py-2 text-sm font-mono font-medium rounded bg-ink-green text-white hover:bg-ink-green-hover disabled:opacity-60"
+              >
+                {editing.saving ? "Saving…" : "Save"}
               </button>
             </div>
           </div>

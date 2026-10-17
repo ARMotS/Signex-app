@@ -4,6 +4,8 @@ import type { StopStatus } from "@/lib/trip-data";
 import { scheduleDeliveryConfirmation } from "@/lib/delivery-notify";
 import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { readInvoiceNoPattern } from "@/lib/config";
+import { normalizeInvoiceNo } from "@/lib/invoice-number";
 
 /**
  * Signing a stop schedules the confirmation email in `after()`, whose work
@@ -43,8 +45,26 @@ export const GET = withAuth(async (request: NextRequest) => {
 
   const tripSheets = await getTripSheetsForDriver(ctx.tenantId, driverId);
   const activeSheets = tripSheets.filter((t) => t.status === "ACTIVE");
+  // The invoice's own date, from the registry, so the driver can tell two
+  // invoices for one customer apart at the door. Date only — nothing priced
+  // ever reaches a driver.
+  const pattern = await readInvoiceNoPattern(ctx.tenantId);
+  const keyOf = (s: { invoiceNumber: string }) => normalizeInvoiceNo(s.invoiceNumber, pattern);
+  const keys = [...new Set(activeSheets.flatMap((sheet) => sheet.stops.map(keyOf)).filter(Boolean))];
+  const dates = keys.length
+    ? await ctx.db.invoice.findMany({
+        where: { invoiceNoNormalized: { in: keys }, invoiceDate: { not: null } },
+        select: { invoiceNoNormalized: true, invoiceDate: true },
+      })
+    : [];
+  const dateByKey = new Map(dates.map((d) => [d.invoiceNoNormalized, d.invoiceDate!.toISOString().slice(0, 10)]));
+
   const stops = activeSheets.flatMap((sheet) =>
-    sheet.stops.map((s) => ({ ...s, tripSheetDate: sheet.uploadedAt }))
+    sheet.stops.map((s) => ({
+      ...s,
+      tripSheetDate: sheet.uploadedAt,
+      invoiceDate: dateByKey.get(keyOf(s)) ?? null,
+    }))
   );
   return NextResponse.json({ stops, tripSheets });
 });

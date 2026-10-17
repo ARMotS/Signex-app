@@ -45,9 +45,13 @@ vi.mock("@/lib/collections", async (importOriginal) => {
   };
 });
 
-// The already-signed check is the only database read on this path.
+// The already-signed check and the tenant's invoice-number pattern are the
+// only database reads on this path. No stored pattern: the built-in rule.
 vi.mock("@/lib/db-scoped", () => ({
-  scopedPrisma: () => ({ stop: { findMany: async () => [] } }),
+  scopedPrisma: () => ({
+    stop: { findMany: async () => [] },
+    appConfig: { findUnique: async () => null },
+  }),
 }));
 
 import { parseTripSheet, parseCollectionTyping, collectMissingInvoices } from "@/lib/trip-parser";
@@ -670,5 +674,66 @@ describe("the Excel path reads COLLECTNO too", () => {
       type: "NON_CREDIT_UPLIFT",
       upliftSubtype: "DOCUMENTS",
     });
+  });
+});
+
+// ─── The client's current layout ─────────────────────────────────────────
+
+describe("fixture: Date | Driver | REG No | CUSTOMER | INVOICE NO | COLLECTIONNO | NOP", () => {
+  const CLIENT_HEADERS = ["Date", "Driver", "REG No", "CUSTOMER", "INVOICE NO", "COLLECTIONNO", "NOP"];
+
+  it("groups a delivery row and a collection row for one customer into one stop", async () => {
+    // The PDF prints INV-2026-1047; the sheet prints 1047 on both rows.
+    invoiceFiles = [invoice("INV-2026-1047"), invoice("INV-2026-1050")];
+    collectionDocs = [doc("COL-118")];
+
+    const result = await parse([
+      CLIENT_HEADERS,
+      ["17/10/2026", "John Smith", "CA 123-456", "Acme Hardware", "1047", "", "4"],
+      ["17/10/2026", "John Smith", "CA 123-456", "Beta Supplies", "1050", "0", "1"],
+      ["17/10/2026", "John Smith", "CA 123-456", "Acme Hardware", "1047", "COL-118", "2"],
+    ]);
+
+    expect(result.success).toBe(true);
+    expect(result.missingInvoices).toEqual([]);
+
+    const stops = result.driverResults[0].stops;
+    expect(stops.map((s) => [s.customerName, s.invoiceNumber, s.invoiceFile, s.nop])).toEqual([
+      ["Acme Hardware", "1047", "INV-2026-1047.pdf", 4],
+      ["Beta Supplies", "1050", "INV-2026-1050.pdf", 1],
+    ]);
+
+    // The collection row: credited against the invoice on its own row, and its
+    // NOP is what to collect — not more parcels for Acme's delivery.
+    expect(stops[0].collections).toHaveLength(1);
+    expect(stops[0].collections![0]).toMatchObject({
+      collectionNo: "COL-118",
+      originalInvoiceNo: "1047",
+      expectedQty: 2,
+      sourceFilePath: "COL-118.pdf",
+    });
+    expect(stops[1].collections).toEqual([]);
+  });
+
+  it("reads NOP as the collect quantity on a collection-only stop", async () => {
+    const result = await parse([
+      CLIENT_HEADERS,
+      ["17/10/2026", "John Smith", "CA 123-456", "Gamma Motors", "1047", "COL-119", "3"],
+    ]);
+
+    const [stop] = result.driverResults[0].stops;
+    expect(stop.invoiceNumber).toBe("");
+    // Nothing is being delivered here, so no parcels to hand over.
+    expect(stop.nop).toBe(0);
+    expect(stop.collections![0]).toMatchObject({ originalInvoiceNo: "1047", expectedQty: 3 });
+  });
+
+  it("lets an explicit COLLECTQTY win over NOP", async () => {
+    const result = await parse([
+      [...CLIENT_HEADERS, "COLLECTQTY"],
+      ["17/10/2026", "John Smith", "CA 123-456", "Gamma Motors", "1047", "COL-119", "3", "5"],
+    ]);
+
+    expect(result.driverResults[0].stops[0].collections![0].expectedQty).toBe(5);
   });
 });

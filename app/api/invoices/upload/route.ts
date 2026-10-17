@@ -9,6 +9,8 @@ import {
 } from "@/lib/invoices";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { readInvoiceNoPattern } from "@/lib/config";
+import { ensureInvoices, scheduleInvoiceHeaders } from "@/lib/invoice-registry";
 
 /**
  * Upload one invoice PDF into this scope's invoice folder.
@@ -104,6 +106,29 @@ export const POST = withAuth(async (request: NextRequest) => {
       { error: result.error, conflict: result.conflict === true, filename: result.filename },
       { status: result.conflict ? 409 : 400 }
     );
+  }
+
+  // Register the invoice and read its header in the background. Best-effort:
+  // the file is already saved, and the next listing of the folder registers
+  // it anyway — a registry hiccup must not report a successful upload as failed.
+  try {
+    const savedName = result.filename ?? targetName;
+    const ids = await ensureInvoices(
+      ctx.tenantId,
+      [{ invoiceNo: savedName.replace(/\.pdf$/i, ""), pdfFilename: savedName }],
+      await readInvoiceNoPattern(ctx.tenantId)
+    );
+    if (overwrite) {
+      // A replaced PDF may carry a different date. A header typed in by hand
+      // stays — that was a person's decision.
+      await ctx.db.invoice.updateMany({
+        where: { id: { in: [...ids.values()] }, NOT: { headerSource: "MANUAL" } },
+        data: { headerSource: null, headerAttempts: 0, headerError: null },
+      });
+    }
+    scheduleInvoiceHeaders(ctx.tenantId, { ids: [...ids.values()] });
+  } catch (err) {
+    console.error("Invoice registered on disk but not in the registry:", err);
   }
 
   return NextResponse.json({
