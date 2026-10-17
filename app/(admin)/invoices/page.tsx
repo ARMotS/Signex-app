@@ -849,11 +849,11 @@ export default function InvoicesPage() {
                         value={deleteReason}
                         onChange={(e) => setDeleteReason(e.target.value)}
                         maxLength={500}
-                        placeholder="Reason, e.g. Customer rejected — wrong item sent"
+                        placeholder="Reason, e.g. Invoice cancelled"
                         className="w-full px-2.5 py-1.5 text-xs border border-ink-border rounded bg-white focus:outline-none focus:border-ink-black"
                       />
                       <p className="mt-1.5 text-[11px] text-ink-muted">
-                        Only one line of the invoice refused? Cancel, and use Reject… on the stop in Trip Sheets instead.
+                        Only skipping the stop, or one line of it? Cancel, and use Remove… on the stop in Trip Sheets — the PDF is kept.
                       </p>
                     </div>
                   )}

@@ -245,7 +245,7 @@ export default function RunPage() {
           <p className="font-mono text-sm font-medium text-ink-green">Run complete — return to base</p>
           <p className="text-xs text-ink-muted mt-1">
             {removed.length > 0
-              ? `Every remaining stop is done. ${removed.length} invoice${removed.length !== 1 ? "s were" : " was"} rejected and taken off by the office — bring ${removed.length !== 1 ? "those goods" : "the goods"} back.`
+              ? `Every remaining stop is done. ${removed.length} invoice${removed.length !== 1 ? "s were" : " was"} taken off the route by the office — bring ${removed.length !== 1 ? "those goods" : "the goods"} back.`
               : movedAway.length > 0
               ? `Every remaining stop is done. ${movedAway.length} stop${movedAway.length !== 1 ? "s were" : " was"} moved to another driver.`
               : "Every stop is done."}
@@ -391,7 +391,7 @@ export default function RunPage() {
                     {(stop.rejectedLines?.length ?? 0) > 0 && (
                       <div className="mt-2 px-2.5 py-2 rounded bg-ink-red-dim border border-ink-red/20">
                         <p className="text-[10px] font-mono uppercase tracking-wide text-ink-red mb-1">
-                          Refused — do not hand over
+                          Removed by the office — do not hand over
                         </p>
                         {stop.rejectedLines!.map((l) => (
                           <p key={l.id} className="text-xs text-ink-black">

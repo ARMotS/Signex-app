@@ -124,7 +124,7 @@ export function DeliveryConfirmation({
               <>
                 <Hr style={styles.divider} />
                 <Text style={styles.exceptionsHeading}>
-                  Not delivered — refused at delivery
+                  Not delivered — removed from this delivery
                 </Text>
                 {rejectedLines.map((line, i) => (
                   <Text key={i} style={styles.exceptionLine}>

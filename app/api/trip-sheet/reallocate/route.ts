@@ -74,5 +74,13 @@ export const POST = withAuth(async (request: NextRequest) => {
         },
         { status: 409 }
       );
+    case "collected":
+      return NextResponse.json(
+        {
+          error: `Collection already done, so its stop stays with its driver: ${result.collectionNos.join(", ")}. Nothing was moved.`,
+          code: "COLLECTION_DONE",
+        },
+        { status: 409 }
+      );
   }
 });
