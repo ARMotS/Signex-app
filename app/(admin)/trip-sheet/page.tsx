@@ -54,6 +54,8 @@ interface TripCollection {
   type: "CREDIT_RETURN" | "NON_CREDIT_UPLIFT";
   upliftSubtype?: string | null;
   originalInvoiceNo?: string | null;
+  /** Preview only: the credited invoice's PDF in the invoice folder, if found. */
+  originalInvoiceFile?: string | null;
   status: "PENDING" | "COLLECTED" | "PARTIAL" | "NOT_AVAILABLE" | "REFUSED";
   exceptionReason?: string | null;
   expectedQty?: number | null;
@@ -2005,12 +2007,16 @@ export default function TripSheetPage() {
                 </p>
               </div>
               <div className="flex items-center gap-3">
+                {/* Only when the sheet delivers anything: "0 matched" on a
+                    collection-only sheet read as a failure. */}
+                {preview.preview.matchedInvoices + preview.preview.unmatchedInvoices > 0 && (
                 <div className="flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-ink-green" />
                   <span className="text-xs font-mono text-ink-muted">
                     {preview.preview.matchedInvoices} matched
                   </span>
                 </div>
+                )}
                 {preview.preview.unmatchedInvoices > 0 && (
                   <div className="flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full bg-ink-amber" />
@@ -2382,7 +2388,9 @@ export default function TripSheetPage() {
                             {stop.stopNumber}
                           </span>
                           <span className="font-mono font-medium text-ink-black min-w-[100px]">
-                            {stop.invoiceNumber}
+                            {stop.invoiceNumber || (
+                              <span className="font-normal text-ink-muted">Collection</span>
+                            )}
                           </span>
                           <span className="text-ink-muted truncate flex-1">
                             {stop.customerName}
@@ -2398,7 +2406,41 @@ export default function TripSheetPage() {
                                   {stop.nop} pcs
                                 </span>
                               )}
-                              {stop.invoiceFile ? (
+                              {/* Each collection with whether its office sheet was
+                                  found — the document that matters for a
+                                  collection. Not finding one never blocks a deploy. */}
+                              {(stop.collections ?? []).map((c) => (
+                                <span
+                                  key={c.id}
+                                  className={`flex items-center gap-1 font-mono ${c.sourceFilePath ? "text-ink-violet" : "text-ink-muted"}`}
+                                  title={
+                                    c.sourceFilePath
+                                      ? `Collection sheet found: ${c.sourceFilePath}`
+                                      : "No collection sheet in the collections folder yet — it is looked for again until the trip starts"
+                                  }
+                                >
+                                  {c.type === "CREDIT_RETURN" ? "CR" : "UPL"} {c.collectionNo}
+                                  <span className="opacity-70">{c.sourceFilePath ? "· sheet ✓" : "· no sheet yet"}</span>
+                                  {/* The invoice this is credited against — NOT a
+                                      delivery, so never required; shown so the office
+                                      can see the collection will link to its PDF. */}
+                                  {c.originalInvoiceNo && (
+                                    <span
+                                      className={c.originalInvoiceFile ? "text-ink-green" : "text-ink-muted"}
+                                      title={
+                                        c.originalInvoiceFile
+                                          ? `Credited invoice found: ${c.originalInvoiceFile}`
+                                          : "The credited invoice's PDF is not in the invoice folder — not needed to deploy; the collection is linked to the invoice number"
+                                      }
+                                    >
+                                      · against {c.originalInvoiceNo} {c.originalInvoiceFile ? "· invoice ✓" : "· invoice not on file"}
+                                    </span>
+                                  )}
+                                </span>
+                              ))}
+                              {/* A stop with no invoice number delivers nothing, so
+                                  there is no invoice PDF to find (collection-only). */}
+                              {!stop.invoiceNumber ? null : stop.invoiceFile ? (
                                 <span className="flex items-center gap-1 text-ink-green">
                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                     <polyline points="20 6 9 17 4 12" />
