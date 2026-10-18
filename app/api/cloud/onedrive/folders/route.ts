@@ -5,9 +5,10 @@ import {
   setOneDriveFolder,
   setOneDriveInvoiceFolder,
   setOneDriveCollectionsFolder,
+  setOneDriveCreditsFolder,
   getCloudAccountStatus,
 } from "@/lib/microsoft-graph";
-import { assertCollectionsFolderIsSibling } from "@/lib/collections";
+import { assertCollectionsFolderIsSibling, foldersOverlap } from "@/lib/collections";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
@@ -36,10 +37,10 @@ export const GET = withAuth(async (request: NextRequest) => {
 
 /**
  * POST /api/cloud/onedrive/folders
- * Set the selected OneDrive folder as the trip sheet, invoice or collections
- * source.
+ * Set the selected OneDrive folder as the trip sheet, invoice, collections or
+ * credits source.
  * Body: { folderPath: string, folderItemId: string,
- *         target?: "tripsheets" | "invoices" | "collections" }
+ *         target?: "tripsheets" | "invoices" | "collections" | "credits" }
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
@@ -84,7 +85,34 @@ export const POST = withAuth(async (request: NextRequest) => {
     }
   }
 
-  if (target === "invoices") {
+  // The credits folder is read the same extension-based way, so it overlaps
+  // neither of the PDF folders — and neither of them may be moved over it.
+  if (target === "credits" || target === "invoices" || target === "collections") {
+    const status = await getCloudAccountStatus(ctx.tenantId);
+    const others =
+      target === "credits"
+        ? [
+            { label: "invoice", path: status?.invoiceFolderPath, id: status?.invoiceFolderItemId },
+            { label: "collections", path: status?.collectionsFolderPath, id: status?.collectionsFolderItemId },
+          ]
+        : [{ label: "credits", path: status?.creditsFolderPath, id: status?.creditsFolderItemId }];
+    const clash = others.find((o) => (o.id && o.id === folderItemId) || foldersOverlap(o.path, folderPath));
+    if (clash) {
+      return NextResponse.json(
+        {
+          error:
+            target === "credits"
+              ? `That folder overlaps the ${clash.label} folder. Credit notes need a folder of their own, alongside Invoices and Collections — not inside either, and not around them.`
+              : "That folder overlaps the credits folder. Invoices, collections and credit notes each need a folder of their own, side by side.",
+        },
+        { status: 400 }
+      );
+    }
+  }
+
+  if (target === "credits") {
+    await setOneDriveCreditsFolder(ctx.tenantId, folderPath, folderItemId);
+  } else if (target === "invoices") {
     await setOneDriveInvoiceFolder(ctx.tenantId, folderPath, folderItemId);
   } else if (target === "collections") {
     await setOneDriveCollectionsFolder(ctx.tenantId, folderPath, folderItemId);

@@ -22,6 +22,7 @@ import { readCollectionDeclaration, readInvoiceNoPattern } from "@/lib/config";
 import { normalizedInvoiceNoOrNull } from "@/lib/invoice-number";
 import { RECEIPT_STATUSES, sendCollectionReceiptEmail } from "@/lib/collection-notify";
 import { getScope, requireRole } from "@/lib/tenant";
+import { normalizeRemovalReason, removeCollectionFromTrip } from "@/lib/stop-removal";
 import { withAuth } from "@/lib/api-handler";
 
 /**
@@ -482,4 +483,43 @@ export const PATCH = withAuth(async (
     success: true,
     collection: { ...rest, hasSignature: !!signature },
   });
+});
+
+/**
+ * Take a collection off the run before the driver gets to it — the customer
+ * rang to say not to collect. ADMIN only, reason required, kept as a
+ * RemovedCollection record. A collection from another scope is 404; one the
+ * driver has already recorded, or whose trip is archived, is 409.
+ */
+export const DELETE = withAuth(async (
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) => {
+  const ctx = await getScope();
+  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  const { id } = await params;
+
+  const body = await request.json().catch(() => ({}));
+  const reason = normalizeRemovalReason(body?.reason);
+  if (!reason) {
+    return NextResponse.json({ error: "A reason is required to remove a collection" }, { status: 400 });
+  }
+
+  const result = await removeCollectionFromTrip(ctx.tenantId, id, { reason, removedBy: ctx.name });
+  switch (result.outcome) {
+    case "not_found":
+      return NextResponse.json({ error: "Collection not found" }, { status: 404 });
+    case "done":
+      return NextResponse.json(
+        { error: "The driver has already recorded this collection — it can no longer be removed." },
+        { status: 409 }
+      );
+    case "closed":
+      return NextResponse.json(
+        { error: "This collection's trip sheet has been completed and archived." },
+        { status: 409 }
+      );
+    case "removed":
+      return NextResponse.json({ success: true, ...result });
+  }
 });

@@ -60,11 +60,13 @@ export async function resetDatabase() {
   const p = db();
   // Order matters: children before parents.
   await p.loginName.deleteMany();
+  await p.creditNote.deleteMany();
   await p.collection.deleteMany();
   // After collections, which reference it.
   await p.invoice.deleteMany();
   await p.rejectedLine.deleteMany();
   await p.removedStop.deleteMany();
+  await p.removedCollection.deleteMany();
   await p.reallocatedStop.deleteMany();
   await p.stop.deleteMany();
   await p.tripSheet.deleteMany();
