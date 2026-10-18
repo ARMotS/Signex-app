@@ -453,6 +453,12 @@ model Collection {
   sheetReviewedBy   String?
   sheetReviewedAt   DateTime?
   lines             CollectionLine[]
+  /// The driver chose "Not as listed": what came back differs from the sheet.
+  hasVariance       Boolean   @default(false)
+  /// Why a collection failed: CUSTOMER_NOT_READY · GOODS_NOT_AVAILABLE ·
+  /// CUSTOMER_REFUSED · OTHER. The status (NOT_AVAILABLE / REFUSED) says what
+  /// accounts does about it; this says what happened at the door.
+  failReason        String?
 
   @@unique([tenantId, tripSheetId, collectionNo])
   @@index([tenantId])
@@ -486,8 +492,18 @@ model CollectionLine {
   /// The sheet's Qty: the count the office expects back.
   qtyListed    Int
   /// The sheet's Returned column as printed — 0 on the office's copy. What
-  /// the driver actually collects is recorded at the door (step 5).
+  /// the driver actually collects is qtyCollected.
   qtyReturnedPrinted Int?
+  /// What the driver brought back — set at the door. "Collected as listed"
+  /// sets it to qtyListed on every line; "Not as listed" records the counts.
+  qtyCollected Int?
+  /// Why it differs from the sheet: SHORT · DAMAGED · NOT_AVAILABLE ·
+  /// CUSTOMER_KEPT · OTHER (lib/collection-confirm.ts). Required when fewer
+  /// came back; allowed on a full count (goods back, but damaged).
+  diffReason   String?
+  diffNote     String?   @db.Text
+  /// Handed over but not on the sheet — added by the driver (qtyListed 0).
+  isExtra      Boolean   @default(false)
   /// The sheet's Reason cell, as printed (a code on the client's sheet).
   reasonCode   String?
   /// Credit return or non-credit uplift. The sheet has no Type column: a sheet

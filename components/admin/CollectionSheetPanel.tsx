@@ -20,6 +20,11 @@ export interface SheetLine {
   qtyListed: number;
   reasonCode: string | null;
   type: "CREDIT_RETURN" | "NON_CREDIT_UPLIFT";
+  /** What the driver brought back, once recorded. */
+  qtyCollected?: number | null;
+  diffReason?: string | null;
+  diffNote?: string | null;
+  isExtra?: boolean;
 }
 
 export interface SheetCollection {
@@ -53,6 +58,8 @@ export default function CollectionSheetPanel({
   const lines = collection.lines ?? [];
   const issues = collection.sheetIssues ?? [];
   const editable = collection.status === "PENDING";
+  // Once the driver has recorded the outcome, show what came back beside the sheet.
+  const collected = !editable && lines.some((l) => l.qtyCollected != null);
   const badge = BADGE[status];
 
   const describe = (json: { status?: string; lines?: number; issues?: unknown[] }) =>
@@ -176,24 +183,45 @@ export default function CollectionSheetPanel({
                       <th className="py-1 pr-2">Item</th>
                       <th className="py-1 pr-2">Description</th>
                       <th className="py-1 pr-2 text-right">Qty</th>
+                      {collected && <th className="py-1 pr-2 text-right">Got</th>}
                       <th className="py-1 text-right">Reason</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-ink-border">
-                    {lines.map((line) => (
-                      <tr key={line.lineNo}>
-                        <td className="py-1.5 pr-2 font-mono text-ink-muted">{line.lineNo}</td>
-                        <td className="py-1.5 pr-2 font-mono text-ink-black">{line.itemCode ?? "—"}</td>
-                        <td className="py-1.5 pr-2 text-ink-black">
-                          {line.description}
-                          {line.type === "NON_CREDIT_UPLIFT" && (
-                            <span className="ml-1.5 text-[10px] font-mono text-ink-muted">UPLIFT</span>
+                    {lines.map((line) => {
+                      const differs =
+                        line.isExtra || !!line.diffReason || (collected && (line.qtyCollected ?? 0) !== line.qtyListed);
+                      return (
+                        <tr key={line.lineNo} className={differs ? "bg-ink-amber-dim/30" : ""}>
+                          <td className="py-1.5 pr-2 font-mono text-ink-muted">{line.lineNo}</td>
+                          <td className="py-1.5 pr-2 font-mono text-ink-black">{line.itemCode ?? "—"}</td>
+                          <td className="py-1.5 pr-2 text-ink-black">
+                            {line.description}
+                            {line.isExtra && (
+                              <span className="ml-1.5 text-[10px] font-mono text-ink-blue">EXTRA — NOT ON SHEET</span>
+                            )}
+                            {line.type === "NON_CREDIT_UPLIFT" && (
+                              <span className="ml-1.5 text-[10px] font-mono text-ink-muted">UPLIFT</span>
+                            )}
+                            {line.diffReason && (
+                              <span className="block text-[11px] text-ink-amber">
+                                {line.diffReason.replace(/_/g, " ").toLowerCase()}
+                                {line.diffNote ? ` — ${line.diffNote}` : ""}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1.5 pr-2 text-right font-mono text-ink-black">
+                            {line.isExtra ? "—" : line.qtyListed}
+                          </td>
+                          {collected && (
+                            <td className="py-1.5 pr-2 text-right font-mono font-medium text-ink-black">
+                              {line.qtyCollected ?? "—"}
+                            </td>
                           )}
-                        </td>
-                        <td className="py-1.5 pr-2 text-right font-mono text-ink-black">{line.qtyListed}</td>
-                        <td className="py-1.5 text-right font-mono text-ink-muted">{line.reasonCode ?? "—"}</td>
-                      </tr>
-                    ))}
+                          <td className="py-1.5 text-right font-mono text-ink-muted">{line.reasonCode ?? "—"}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               )}

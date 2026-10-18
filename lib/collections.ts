@@ -814,6 +814,25 @@ export interface CollectionReceiptData {
   signedByName?: string | null;
   driverName?: string | null;
   collectedAt: Date;
+  /**
+   * The office's sheet, line by line, with what came back. Absent for a
+   * collection whose sheet was never read — the receipt then shows the box
+   * count, as it always has.
+   */
+  lines?: ReceiptLine[];
+  /** Printed above the customer's signature (Settings → collection receipt). */
+  declaration?: string | null;
+}
+
+export interface ReceiptLine {
+  itemCode: string | null;
+  description: string;
+  qtyListed: number;
+  qtyCollected: number | null;
+  /** Already a label: "Damaged", "Short"… */
+  diffReason: string | null;
+  diffNote: string | null;
+  isExtra: boolean;
 }
 
 export const COLLECTION_TYPE_LABEL: Record<CollectionType, string> = {
@@ -855,6 +874,19 @@ const PAGE_HEIGHT = 841.89;
  * is why NOT_AVAILABLE and REFUSED still produce a filed PDF: "we went and it
  * was not there" is a result accounts needs on paper too.
  */
+/**
+ * Text the receipt font can draw. Helvetica is WinAnsi-encoded and pdf-lib
+ * THROWS on anything else — an emoji in a note a driver typed would fail the
+ * whole receipt. Same rule as invoices.ts latin1, keeping the punctuation the
+ * receipt itself uses.
+ */
+function pdfText(text: string): string {
+  return String(text ?? "")
+    .replace(/[^\x20-\x7E\xA0-\xFF\u2013\u2014\u2018\u2019\u201C\u201D\u2022\u2026]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export async function buildSignedCollectionPdf(
   sourcePdf: Buffer | null,
   data: CollectionReceiptData,
@@ -864,7 +896,8 @@ export async function buildSignedCollectionPdf(
     ? await PDFDocument.load(sourcePdf)
     : await PDFDocument.create();
 
-  const page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+  // `let`: a long sheet's item table continues on a further page.
+  let page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
@@ -896,8 +929,12 @@ export async function buildSignedCollectionPdf(
       ? `${COLLECTION_TYPE_LABEL[data.type]} — ${UPLIFT_SUBTYPE_LABEL[data.upliftSubtype]}`
       : COLLECTION_TYPE_LABEL[data.type];
 
+  const sheetLines = data.lines ?? [];
+  const listedItems = sheetLines.filter((l) => !l.isExtra).reduce((n, l) => n + l.qtyListed, 0);
   const qty =
-    data.collectedQty != null || data.expectedQty != null
+    sheetLines.length > 0
+      ? `${sheetLines.reduce((n, l) => n + (l.qtyCollected ?? 0), 0)} item(s) collected of ${listedItems} listed`
+      : data.collectedQty != null || data.expectedQty != null
       ? `${data.collectedQty ?? 0} of ${data.expectedQty ?? "—"}`
       : null;
 
@@ -938,7 +975,7 @@ export async function buildSignedCollectionPdf(
     });
 
     // Wrap long values (a reason is free text a driver typed on a phone).
-    const lines = wrapText(value, font, 10, valueWidth);
+    const lines = wrapText(pdfText(value), font, 10, valueWidth);
     for (const [i, line] of lines.entries()) {
       page.drawText(line, {
         x: margin + labelWidth,
@@ -952,6 +989,55 @@ export async function buildSignedCollectionPdf(
     y -= Math.max(22, lines.length * 13 + 9);
   }
 
+  // ── Items: the sheet against what came back ──────────────────────────
+  // Every variance is spelled out on its own line ("Listed 2 · Collected 1 ·
+  // Damaged"), never left for the reader to work out from two columns.
+  if (sheetLines.length > 0) {
+    y -= 6;
+    const cols = { item: margin, desc: margin + 78, listed: PAGE_WIDTH - margin - 118, got: PAGE_WIDTH - margin - 58 };
+    const header = () => {
+      for (const [label, x] of [
+        ["ITEM", cols.item],
+        ["DESCRIPTION", cols.desc],
+        ["LISTED", cols.listed],
+        ["COLLECTED", cols.got],
+      ] as const) {
+        page.drawText(label, { x, y, size: 7, font: bold, color: muted });
+      }
+      y -= 6;
+      page.drawLine({ start: { x: margin, y }, end: { x: PAGE_WIDTH - margin, y }, thickness: 0.5, color: rule });
+      y -= 12;
+    };
+    header();
+
+    for (const line of sheetLines) {
+      const differs = line.isExtra || line.diffReason !== null || (line.qtyCollected ?? 0) !== line.qtyListed;
+      const descLines = wrapText(pdfText(line.description), font, 9, cols.listed - cols.desc - 10);
+      const needed = descLines.length * 11 + (differs ? 12 : 0) + 6;
+      if (y - needed < margin + 200) {
+        page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+        y = PAGE_HEIGHT - margin;
+        header();
+      }
+      const weight = differs ? bold : font;
+      page.drawText(pdfText(line.itemCode ?? "—").slice(0, 14) || "—", { x: cols.item, y, size: 9, font: weight, color: ink });
+      descLines.forEach((t, i) => page.drawText(t, { x: cols.desc, y: y - i * 11, size: 9, font, color: ink }));
+      page.drawText(line.isExtra ? "—" : String(line.qtyListed), { x: cols.listed, y, size: 9, font, color: ink });
+      page.drawText(String(line.qtyCollected ?? "—"), { x: cols.got, y, size: 9, font: weight, color: ink });
+      y -= descLines.length * 11;
+      if (differs) {
+        const why = line.isExtra
+          ? `Extra — not on the sheet · Collected ${line.qtyCollected ?? 0}`
+          : `Listed ${line.qtyListed} · Collected ${line.qtyCollected ?? 0}${line.diffReason ? ` · ${line.diffReason}` : ""}${
+              line.diffNote ? ` — ${line.diffNote}` : ""
+            }`;
+        page.drawText(pdfText(why).slice(0, 110), { x: cols.desc, y: y - 1, size: 8, font: bold, color: rgb(0.65, 0.4, 0.05) });
+        y -= 12;
+      }
+      y -= 6;
+    }
+  }
+
   y -= 10;
   page.drawLine({
     start: { x: margin, y },
@@ -959,7 +1045,16 @@ export async function buildSignedCollectionPdf(
     thickness: 0.5,
     color: rule,
   });
-  y -= 28;
+  y -= 22;
+
+  // The declaration the customer signs under — only where something changed hands.
+  if (data.declaration && (data.status === "COLLECTED" || data.status === "PARTIAL")) {
+    for (const line of wrapText(pdfText(data.declaration), font, 8.5, PAGE_WIDTH - margin * 2)) {
+      page.drawText(line, { x: margin, y, size: 8.5, font, color: ink });
+      y -= 11;
+    }
+    y -= 12;
+  }
 
   page.drawText("CUSTOMER SIGNATURE", {
     x: margin,
@@ -1001,7 +1096,7 @@ export async function buildSignedCollectionPdf(
   });
   y -= 12;
 
-  page.drawText(data.signedByName ? `Signed by ${data.signedByName}` : "Not signed", {
+  page.drawText(data.signedByName ? `Signed by ${pdfText(data.signedByName)}` : "Not signed", {
     x: margin,
     y,
     size: 9,

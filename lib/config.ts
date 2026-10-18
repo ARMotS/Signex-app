@@ -14,6 +14,7 @@ import { scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
 import { detectCloudProvider, type CloudProvider } from "./cloud-detect";
 import { compileInvoiceNoPattern, type InvoiceNoPattern } from "./invoice-number";
+import { collectionDeclaration } from "./collection-confirm";
 
 export interface SignaturePosition {
   xPercent: number;      // 0-100, left edge of signature box as % of page width
@@ -50,6 +51,11 @@ export interface SignexConfig {
    * which handles INV-2026-1047, IV-1047-2026 and IV-365-4.
    */
   invoiceNoPattern: string;
+  /**
+   * Printed above the customer's signature on a collection receipt.
+   * `{companyName}` is filled in. Empty means DEFAULT_COLLECTION_DECLARATION.
+   */
+  collectionDeclarationText: string;
 }
 
 const DEFAULT_CONFIG: SignexConfig = {
@@ -61,6 +67,7 @@ const DEFAULT_CONFIG: SignexConfig = {
   collectionsFolderType: "local",
   signaturePosition: DEFAULT_SIGNATURE_POSITION,
   invoiceNoPattern: "",
+  collectionDeclarationText: "",
 };
 
 /**
@@ -85,6 +92,8 @@ export async function readConfig(tenantId: string): Promise<SignexConfig> {
         config.collectionsFolderType = detectCloudProvider(row.value);
       } else if (row.key === "invoiceNoPattern") {
         config.invoiceNoPattern = row.value;
+      } else if (row.key === "collectionDeclarationText") {
+        config.collectionDeclarationText = row.value;
       } else if (row.key === "signaturePosition") {
         try {
           config.signaturePosition = JSON.parse(row.value);
@@ -158,6 +167,23 @@ export async function readInvoiceNoPattern(tenantId: string): Promise<InvoiceNoP
 
   console.error(`Ignoring invalid invoiceNoPattern for scope ${tenantId}: ${compiled.error}`);
   return null;
+}
+
+/**
+ * The declaration printed above the customer's signature on a collection
+ * receipt, with the company filled in — the same COMPANY_NAME the emails use,
+ * else this scope's company name, so it never reads "approval by Signex".
+ */
+export async function readCollectionDeclaration(tenantId: string): Promise<string> {
+  const [config, tenant] = await Promise.all([
+    readConfig(tenantId),
+    scopedPrisma(tenantId).tenant.findUnique({
+      where: { id: tenantId },
+      select: { name: true, companyName: true },
+    }),
+  ]);
+  const company = process.env.COMPANY_NAME || tenant?.companyName || tenant?.name || "";
+  return collectionDeclaration(config.collectionDeclarationText, company);
 }
 
 /**

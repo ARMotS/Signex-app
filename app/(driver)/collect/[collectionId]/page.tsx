@@ -4,6 +4,22 @@ import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import SignaturePad, { type SignaturePadHandle } from "@/components/SignaturePad";
 import PdfViewer from "@/components/PdfViewer";
+import {
+  DIFF_REASONS,
+  DIFF_REASON_LABEL,
+  FAIL_REASONS,
+  FAIL_REASON_LABEL,
+  resolveConfirmation,
+  type ConfirmMode,
+  type DiffReason,
+  type FailReason,
+} from "@/lib/collection-confirm";
+
+const MODE_LABEL: Record<ConfirmMode, string> = {
+  AS_LISTED: "Collected as listed",
+  NOT_AS_LISTED: "Not as listed",
+  FAILED: "Collection failed",
+};
 
 type Outcome = "COLLECTED" | "PARTIAL" | "NOT_AVAILABLE" | "REFUSED";
 
@@ -25,6 +41,7 @@ interface CollectionData {
     shortName: string | null;
     description: string;
     qtyListed: number;
+    isExtra?: boolean;
   }[];
 }
 
@@ -79,6 +96,15 @@ export default function CollectPage() {
   const [hasSignature, setHasSignature] = useState(false);
   const [showDocument, setShowDocument] = useState(false);
 
+  // Confirm-by-exception — used when the office's sheet has been read into lines.
+  const [mode, setMode] = useState<ConfirmMode | null>(null);
+  const [counts, setCounts] = useState<Record<number, number>>({});
+  const [reasons, setReasons] = useState<Record<number, DiffReason | "">>({});
+  const [lineNotes, setLineNotes] = useState<Record<number, string>>({});
+  const [extras, setExtras] = useState<{ description: string; qty: string }[]>([]);
+  const [failReason, setFailReason] = useState<FailReason | "">("");
+  const [failNote, setFailNote] = useState("");
+
   const collectionId = params.collectionId as string;
 
   const fetchCollection = useCallback(async () => {
@@ -109,14 +135,42 @@ export default function CollectPage() {
       setErrorMessage("Failed to connect to server");
       setStatus("error");
     }
-  }, [collectionId]);
+    // setCollectedQty is stable; listed because the React Compiler infers it.
+  }, [collectionId, setCollectedQty]);
 
   useEffect(() => {
     fetchCollection();
   }, [fetchCollection]);
 
-  const needsSignature = outcome ? NEEDS_SIGNATURE.includes(outcome) : false;
-  const needsReason = outcome ? NEEDS_REASON.includes(outcome) : false;
+  // The sheet's lines, when it has been read: the driver confirms against them.
+  const listed = (collection?.lines ?? []).filter((l) => !l.isExtra);
+  const hasLines = listed.length > 0;
+
+  const confirmPayload = mode
+    ? {
+        mode,
+        lines: listed.map((l) => ({
+          lineNo: l.lineNo,
+          qtyCollected: counts[l.lineNo] ?? l.qtyListed,
+          diffReason: reasons[l.lineNo] || null,
+          diffNote: lineNotes[l.lineNo]?.trim() || null,
+        })),
+        extras: extras
+          .filter((e) => e.description.trim() || e.qty.trim())
+          .map((e) => ({ description: e.description, qty: Number(e.qty) })),
+        failReason: failReason || null,
+        failNote: failNote.trim() || null,
+      }
+    : null;
+  // The same rules the server applies — what is allowed here is what it accepts.
+  const confirmation = hasLines && confirmPayload ? resolveConfirmation(listed, confirmPayload) : null;
+
+  const needsSignature = hasLines
+    ? confirmation?.ok === true && confirmation.needsSignature
+    : outcome
+    ? NEEDS_SIGNATURE.includes(outcome)
+    : false;
+  const needsReason = !hasLines && (outcome ? NEEDS_REASON.includes(outcome) : false);
 
   const qtyIsValid =
     outcome !== "PARTIAL" ||
@@ -124,14 +178,14 @@ export default function CollectPage() {
     collectedQty.trim() === "" ||
     Number(collectedQty) < collection.expectedQty;
 
-  const canSubmit =
-    !!outcome &&
-    qtyIsValid &&
-    (!needsReason || reason.trim().length > 0) &&
-    (!needsSignature || (hasSignature && signedByName.trim().length > 0));
+  const signed = !needsSignature || (hasSignature && signedByName.trim().length > 0);
+  const canSubmit = hasLines
+    ? confirmation?.ok === true && signed
+    : !!outcome && qtyIsValid && (!needsReason || reason.trim().length > 0) && signed;
 
   const handleConfirm = async () => {
-    if (!collection || !outcome || !canSubmit) return;
+    if (!collection || !canSubmit) return;
+    if (!hasLines && !outcome) return;
 
     setStatus("saving");
 
@@ -139,14 +193,21 @@ export default function CollectPage() {
       const res = await fetch(`/api/collections/${collection.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          status: outcome,
-          exceptionReason: needsReason ? reason.trim() : undefined,
-          collectedQty:
-            collectedQty.trim() === "" ? null : Number(collectedQty.trim()),
-          signedByName: needsSignature ? signedByName.trim() : undefined,
-          signatureImage: needsSignature ? padRef.current?.toDataURL() : undefined,
-        }),
+        body: JSON.stringify(
+          hasLines
+            ? {
+                ...confirmPayload,
+                signedByName: needsSignature ? signedByName.trim() : undefined,
+                signatureImage: needsSignature ? padRef.current?.toDataURL() : undefined,
+              }
+            : {
+                status: outcome,
+                exceptionReason: needsReason ? reason.trim() : undefined,
+                collectedQty: collectedQty.trim() === "" ? null : Number(collectedQty.trim()),
+                signedByName: needsSignature ? signedByName.trim() : undefined,
+                signatureImage: needsSignature ? padRef.current?.toDataURL() : undefined,
+              }
+        ),
       });
 
       const data = await res.json();
@@ -215,7 +276,8 @@ export default function CollectPage() {
           Collection recorded
         </h2>
         <p className="text-sm text-ink-muted text-center mb-4">
-          {collection?.collectionNo} · {OUTCOMES.find((o) => o.value === outcome)?.label}
+          {collection?.collectionNo} ·{" "}
+          {hasLines && mode ? MODE_LABEL[mode] : OUTCOMES.find((o) => o.value === outcome)?.label}
         </p>
 
         {/* The receipt email went as part of Confirm. A failure is the office's
@@ -356,7 +418,204 @@ export default function CollectPage() {
           </div>
         )}
 
-        {/* Outcome */}
+        {/* Confirm-by-exception: the sheet was read, so the driver confirms it
+            in one tap, records only what differs, or says why it failed. */}
+        {hasLines && (
+          <div className="px-4 py-4 space-y-4">
+            <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">What happened?</p>
+            <button
+              onClick={() => setMode("AS_LISTED")}
+              className={`w-full p-4 rounded border text-left transition-all touch-target ${
+                mode === "AS_LISTED" ? "border-ink-green bg-ink-green-dim" : "border-ink-border bg-ink-card"
+              }`}
+            >
+              <p className={`font-mono text-base font-medium ${mode === "AS_LISTED" ? "text-ink-green" : "text-ink-black"}`}>
+                Collected as listed
+              </p>
+              <p className="text-[11px] text-ink-muted mt-0.5">Everything on the sheet came back</p>
+            </button>
+            <div className="grid grid-cols-2 gap-2">
+              {(["NOT_AS_LISTED", "FAILED"] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={`p-3 rounded border text-left transition-all touch-target ${
+                    mode === m ? "border-ink-green bg-ink-green-dim" : "border-ink-border bg-ink-card"
+                  }`}
+                >
+                  <p className={`font-mono text-sm font-medium ${mode === m ? "text-ink-green" : "text-ink-black"}`}>
+                    {MODE_LABEL[m]}
+                  </p>
+                  <p className="text-[11px] text-ink-muted mt-0.5">
+                    {m === "NOT_AS_LISTED" ? "Record only what differs" : "Nothing collected"}
+                  </p>
+                </button>
+              ))}
+            </div>
+
+            {mode === "NOT_AS_LISTED" && (
+              <div className="space-y-3">
+                {listed.map((line) => {
+                  const count = counts[line.lineNo] ?? line.qtyListed;
+                  const short = count < line.qtyListed;
+                  const set = (n: number) =>
+                    setCounts((c) => ({ ...c, [line.lineNo]: Math.max(0, Math.min(line.qtyListed, n)) }));
+                  return (
+                    <div
+                      key={line.lineNo}
+                      className={`p-3 rounded border ${short || reasons[line.lineNo] ? "border-ink-amber/40 bg-ink-amber-dim/30" : "border-ink-border bg-ink-card"}`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm text-ink-black leading-snug">{line.description}</p>
+                          <p className="text-[11px] font-mono text-ink-muted-light">Listed {line.qtyListed}</p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            onClick={() => set(count - 1)}
+                            disabled={count <= 0}
+                            aria-label={`One fewer ${line.description}`}
+                            className="w-9 h-9 rounded border border-ink-border bg-white font-mono text-lg disabled:opacity-30 touch-target"
+                          >
+                            −
+                          </button>
+                          <span className="w-7 text-center font-mono text-base font-medium">{count}</span>
+                          <button
+                            onClick={() => set(count + 1)}
+                            disabled={count >= line.qtyListed}
+                            aria-label={`One more ${line.description}`}
+                            className="w-9 h-9 rounded border border-ink-border bg-white font-mono text-lg disabled:opacity-30 touch-target"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {DIFF_REASONS.map((r) => (
+                          <button
+                            key={r}
+                            onClick={() =>
+                              setReasons((rs) => ({ ...rs, [line.lineNo]: rs[line.lineNo] === r ? "" : r }))
+                            }
+                            className={`px-2 py-1 rounded text-[11px] font-mono border ${
+                              reasons[line.lineNo] === r
+                                ? "bg-ink-amber text-white border-ink-amber"
+                                : "bg-white text-ink-muted border-ink-border"
+                            }`}
+                          >
+                            {DIFF_REASON_LABEL[r]}
+                          </button>
+                        ))}
+                      </div>
+                      {short && !reasons[line.lineNo] && (
+                        <p className="text-[11px] text-ink-red mt-1">Say why fewer came back.</p>
+                      )}
+                      {reasons[line.lineNo] && (
+                        <input
+                          type="text"
+                          value={lineNotes[line.lineNo] ?? ""}
+                          onChange={(e) => setLineNotes((n) => ({ ...n, [line.lineNo]: e.target.value }))}
+                          maxLength={300}
+                          placeholder={reasons[line.lineNo] === "OTHER" ? "What happened? (required)" : "Note (optional)"}
+                          className="mt-2 w-full px-2.5 py-2 bg-white border border-ink-border rounded font-mono text-xs focus:border-ink-green outline-none"
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+
+                {extras.map((extra, i) => (
+                  <div key={i} className="p-3 rounded border border-ink-blue/30 bg-ink-blue-dim/30 flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={extra.description}
+                      onChange={(e) =>
+                        setExtras((xs) => xs.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))
+                      }
+                      maxLength={120}
+                      placeholder="Item not on the sheet"
+                      className="flex-1 min-w-0 px-2.5 py-2 bg-white border border-ink-border rounded font-mono text-xs focus:border-ink-green outline-none"
+                    />
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      value={extra.qty}
+                      onChange={(e) => setExtras((xs) => xs.map((x, j) => (j === i ? { ...x, qty: e.target.value } : x)))}
+                      aria-label="How many"
+                      className="w-16 px-2 py-2 bg-white border border-ink-border rounded font-mono text-xs focus:border-ink-green outline-none"
+                    />
+                    <button
+                      onClick={() => setExtras((xs) => xs.filter((_, j) => j !== i))}
+                      aria-label="Remove this item"
+                      className="text-ink-muted hover:text-ink-red font-mono text-sm px-1"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                <button
+                  onClick={() => setExtras((xs) => [...xs, { description: "", qty: "1" }])}
+                  className="text-xs font-mono text-ink-blue hover:underline"
+                >
+                  + Item handed over that is not on the sheet
+                </button>
+
+                {confirmation && !confirmation.ok && (
+                  <p className="text-[11px] text-ink-muted">{confirmation.error}</p>
+                )}
+              </div>
+            )}
+
+            {mode === "FAILED" && (
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  {FAIL_REASONS.map((r) => (
+                    <button
+                      key={r}
+                      onClick={() => setFailReason(r)}
+                      className={`p-2.5 rounded border text-left text-xs font-mono touch-target ${
+                        failReason === r ? "border-ink-green bg-ink-green-dim text-ink-green" : "border-ink-border bg-ink-card text-ink-black"
+                      }`}
+                    >
+                      {FAIL_REASON_LABEL[r]}
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  value={failNote}
+                  onChange={(e) => setFailNote(e.target.value)}
+                  rows={2}
+                  maxLength={300}
+                  placeholder={failReason === "OTHER" ? "What happened? (required)" : "Note for the office (optional)"}
+                  className="w-full px-3 py-2.5 bg-ink-card border border-ink-border rounded font-mono text-sm focus:border-ink-green outline-none resize-none"
+                />
+                <p className="text-[11px] text-ink-muted-light">No signature — nothing changed hands.</p>
+              </div>
+            )}
+
+            {needsSignature && (
+              <>
+                <div>
+                  <label className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-2">
+                    Who is signing <span className="text-ink-red">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={signedByName}
+                    onChange={(e) => setSignedByName(e.target.value)}
+                    className="w-full px-3 py-2.5 bg-ink-card border border-ink-border rounded font-mono text-sm focus:border-ink-green outline-none"
+                    placeholder="Name of the person handing it over"
+                  />
+                </div>
+                <SignaturePad ref={padRef} onChange={setHasSignature} />
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Outcome — a collection whose sheet was never read */}
+        {!hasLines && (
         <div className="px-4 py-4">
           <p className="text-xs font-mono text-ink-muted uppercase tracking-wide mb-3">
             What happened?
@@ -400,8 +659,9 @@ export default function CollectPage() {
             ))}
           </div>
         </div>
+        )}
 
-        {outcome && (
+        {!hasLines && outcome && (
           <div className="px-4 pb-4 space-y-4">
             {/* Quantity — only where something was taken */}
             {(outcome === "COLLECTED" || outcome === "PARTIAL") && (

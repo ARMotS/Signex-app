@@ -3929,7 +3929,7 @@ suite("cross-ADMIN isolation", () => {
       useSession(driverSession(f.a));
       const body = await (await GET(req(`/api/collections/${collection.id}`), params({ id: collection.id }))).json();
       expect(body.collection.lines).toEqual([
-        { lineNo: 1, itemCode: null, shortName: null, description: "12V REG", qtyListed: 2, type: "CREDIT_RETURN" },
+        { lineNo: 1, itemCode: null, shortName: null, description: "12V REG", qtyListed: 2, type: "CREDIT_RETURN", isExtra: false },
       ]);
     });
 
@@ -3940,6 +3940,103 @@ suite("cross-ADMIN isolation", () => {
           data: { tenantId: f.b.tenantId, collectionId: collection.id, lineNo: 1, description: "X", qtyListed: 1 },
         })
       ).rejects.toThrow();
+    });
+
+    // ── Confirm-by-exception at the door ──
+    /** A live collection with the office's three lines already read. */
+    async function collectionWithLines(fx: typeof f.a, collectionNo: string) {
+      const collection = await liveCollection(fx, collectionNo);
+      await db().collectionLine.createMany({
+        data: [
+          { tenantId: fx.tenantId, collectionId: collection.id, lineNo: 1, itemCode: "CABLE 7COR", description: "0.75MM 7COR CABLE", qtyListed: 1 },
+          { tenantId: fx.tenantId, collectionId: collection.id, lineNo: 2, itemCode: "REG", description: "12V HYBRID REG", qtyListed: 1 },
+          { tenantId: fx.tenantId, collectionId: collection.id, lineNo: 3, itemCode: "RELAY", description: "12V 5PIN RELAY", qtyListed: 2 },
+        ],
+      });
+      return collection;
+    }
+    // A 1×1 PNG: a real image, so the receipt can embed it.
+    const SIGNATURE =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    const put = async (id: string, body: object) => {
+      const { PUT } = await import("@/app/api/collections/[id]/route");
+      return PUT(req(`/api/collections/${id}`, { method: "PUT", body }), params({ id }));
+    };
+
+    it("Not as listed records the counts, the reasons and the extras on the driver's own collection", async () => {
+      const collection = await collectionWithLines(f.a, "1900");
+      useSession(driverSession(f.a));
+
+      const res = await put(collection.id, {
+        mode: "NOT_AS_LISTED",
+        lines: [{ lineNo: 3, qtyCollected: 1, diffReason: "DAMAGED", diffNote: "one cracked" }],
+        extras: [{ description: "Plastic crate", qty: 1 }],
+        signedByName: "J Smith",
+        signatureImage: SIGNATURE,
+      });
+      expect(res.status).toBe(200);
+
+      const row = await db().collection.findUniqueOrThrow({ where: { id: collection.id } });
+      expect(row).toMatchObject({ status: "PARTIAL", hasVariance: true, collectedQty: 4, failReason: null });
+      const lines = await db().collectionLine.findMany({ where: { collectionId: collection.id }, orderBy: { lineNo: "asc" } });
+      expect(lines.map((l) => [l.lineNo, l.qtyListed, l.qtyCollected, l.diffReason, l.isExtra, l.tenantId])).toEqual([
+        [1, 1, 1, null, false, f.a.tenantId],
+        [2, 1, 1, null, false, f.a.tenantId],
+        [3, 2, 1, "DAMAGED", false, f.a.tenantId],
+        [4, 0, 1, null, true, f.a.tenantId],
+      ]);
+    });
+
+    it("Collection failed records no signature, nothing collected, and refused as REFUSED", async () => {
+      const collection = await collectionWithLines(f.a, "1901");
+      useSession(driverSession(f.a));
+
+      const res = await put(collection.id, { mode: "FAILED", failReason: "CUSTOMER_REFUSED" });
+      expect(res.status).toBe(200);
+      const row = await db().collection.findUniqueOrThrow({ where: { id: collection.id } });
+      expect(row).toMatchObject({ status: "REFUSED", failReason: "CUSTOMER_REFUSED", signature: null, hasVariance: false });
+      const collected = await db().collectionLine.findMany({ where: { collectionId: collection.id }, select: { qtyCollected: true } });
+      expect(collected.every((l) => l.qtyCollected === 0)).toBe(true);
+    });
+
+    it("ADMIN 2 recording an outcome on ADMIN 1's collection gets 404 and changes nothing", async () => {
+      const collection = await collectionWithLines(f.a, "1902");
+      useSession(adminSession(f.b));
+
+      const res = await put(collection.id, { mode: "AS_LISTED", signedByName: "X", signatureImage: SIGNATURE });
+      expect(res.status).toBe(404);
+      expect((await db().collection.findUniqueOrThrow({ where: { id: collection.id } })).status).toBe("PENDING");
+      expect(
+        await db().collectionLine.count({ where: { collectionId: collection.id, qtyCollected: { not: null } } })
+      ).toBe(0);
+    });
+
+    it("refuses an impossible count, and a mode on a collection with no sheet lines", async () => {
+      const withLines = await collectionWithLines(f.a, "1903");
+      const withoutLines = await liveCollection(f.a, "1904");
+      useSession(driverSession(f.a));
+
+      const tooMany = await put(withLines.id, {
+        mode: "NOT_AS_LISTED",
+        lines: [{ lineNo: 1, qtyCollected: 5 }],
+        signedByName: "J",
+        signatureImage: SIGNATURE,
+      });
+      expect(tooMany.status).toBe(400);
+      expect((await put(withoutLines.id, { mode: "AS_LISTED", signedByName: "J", signatureImage: SIGNATURE })).status).toBe(400);
+    });
+
+    it("still accepts the direct outcome from a phone running the previous screen", async () => {
+      const collection = await collectionWithLines(f.a, "1905");
+      useSession(driverSession(f.a));
+      const res = await put(collection.id, {
+        status: "COLLECTED",
+        collectedQty: 1,
+        signedByName: "J",
+        signatureImage: SIGNATURE,
+      });
+      expect(res.status).toBe(200);
+      expect((await db().collection.findUniqueOrThrow({ where: { id: collection.id } })).status).toBe("COLLECTED");
     });
   });
 });

@@ -77,6 +77,15 @@ export const PUT = withAuth(async (request: NextRequest) => {
     }
   }
 
+  // Printed on every collection receipt above the customer's signature.
+  if (body.collectionDeclarationText !== undefined) {
+    const text = String(body.collectionDeclarationText ?? "").replace(/\s+/g, " ").trim();
+    if (text.length > 600) {
+      return NextResponse.json({ error: "Keep the declaration under 600 characters." }, { status: 400 });
+    }
+    body.collectionDeclarationText = text;
+  }
+
   // The invoice-number pattern runs server-side on every import, so it is
   // validated here rather than trusted (see compileInvoiceNoPattern).
   let newPattern: { pattern: InvoiceNoPattern } | null = null;
