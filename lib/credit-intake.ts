@@ -228,7 +228,7 @@ export async function ingestCreditNote(
 }
 
 /** Move a note's file to Rejected/ (or Signed/), recording where it went or why it did not. */
-async function fileAway(tenantId: string, id: string, file: CreditFile, to: "rejected" | "signed") {
+export async function fileAway(tenantId: string, id: string, file: CreditFile, to: "rejected" | "signed") {
   const db = scopedPrisma(tenantId);
   try {
     await moveCreditNoteFile(tenantId, file.itemId, to, file.filename);
@@ -331,20 +331,32 @@ export async function reassessCreditNote(tenantId: string, creditNoteId: string)
     }))
   );
 
-  // What other notes already pay for out of these collections: signed ones,
-  // and live ones received before this one. Later notes yield to earlier.
+  // What other notes already pay for out of these collections: signed ones
+  // (what they were frozen at, at signing), then live ones received before
+  // this one. Later notes yield to earlier.
+  const alreadyCredited = new Map<string, number>();
+  const lineIds = collectedLines.map((l) => l.id);
+  if (lineIds.length > 0) {
+    const signed = await db.creditNoteAllocation.findMany({
+      where: { collectionLineId: { in: lineIds }, creditNoteId: { not: note.id }, creditNote: { status: "SIGNED" } },
+      select: { collectionLineId: true, qty: true },
+    });
+    for (const a of signed) {
+      alreadyCredited.set(a.collectionLineId, (alreadyCredited.get(a.collectionLineId) ?? 0) + Number(a.qty));
+    }
+  }
   const others = linkedIds.length
     ? await db.creditNote.findMany({
         where: {
           id: { not: note.id },
           collections: { some: { collectionId: { in: linkedIds }, source: { in: ["AUTO", "MANUAL"] } } },
-          OR: [{ status: "SIGNED" }, { status: { in: LIVE }, createdAt: { lt: note.createdAt } }],
+          status: { in: LIVE },
+          createdAt: { lt: note.createdAt },
         },
         include: { lines: { orderBy: { lineNo: "asc" } } },
         orderBy: { createdAt: "asc" },
       })
     : [];
-  const alreadyCredited = new Map<string, number>();
   for (const other of others) {
     const m = matchCreditLines(
       other.lines.map((l) => ({ ...l, qty: Number(l.qty) })),

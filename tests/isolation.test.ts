@@ -4346,5 +4346,126 @@ suite("cross-ADMIN isolation", () => {
       expect(note).toMatchObject({ tenantId: f.a.tenantId, creditNo: "407800", sourceFolder: "root" });
       expect(await db().creditNote.count({ where: { tenantId: f.b.tenantId, sourceItemId: "folder-cn-1" } })).toBe(0);
     });
+    // ── Signing off ──
+    const SIGNATURE_PNG =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+    /** Graph serves the fixture note for any download, accepts uploads and deletes, and records every call. */
+    async function withCreditGraph<T>(run: () => Promise<T>): Promise<T> {
+      const pdf = await notePdf();
+      const fetchMock = vi.mocked(fetch);
+      const original = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation(async (url: any, init: any) => {
+        const u = String(url);
+        const method = init?.method ?? "GET";
+        const auth: string | undefined = init?.headers?.Authorization;
+        graphCalls.push({ url: `${method} ${u}`, token: auth ? auth.replace("Bearer ", "") : null });
+        if (method === "GET" && u.endsWith("/content")) {
+          return new Response(new Uint8Array(pdf), { status: 200, headers: { "Content-Type": "application/pdf" } });
+        }
+        if (method === "PUT") {
+          return new Response(JSON.stringify({ id: "signed-copy-1", name: "signed.pdf" }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        if (method === "DELETE") return new Response(null, { status: 204 });
+        return new Response(JSON.stringify({ value: [], id: "folder-x" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+      try {
+        return await run();
+      } finally {
+        fetchMock.mockImplementation(original);
+      }
+    }
+
+    const sign = async (id: string, body: object) => {
+      const { POST } = await import("@/app/api/credit-notes/[id]/sign/route");
+      return POST(req(`/api/credit-notes/${id}/sign`, { method: "POST", body }), params({ id }));
+    };
+
+    it("ADMIN 2 signing ADMIN 1's note gets 404, a driver 403, and nothing is signed", async () => {
+      const note = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-a-407712" } });
+      useSession(adminSession(f.b));
+      expect((await sign(note.id, { signedByName: "Intruder", signatureImage: SIGNATURE_PNG })).status).toBe(404);
+      useSession(driverSession(f.a));
+      expect((await sign(note.id, { signedByName: "Driver", signatureImage: SIGNATURE_PNG })).status).toBe(403);
+      expect((await db().creditNote.findUniqueOrThrow({ where: { id: note.id } })).status).toBe("RECEIVED");
+      expect(await db().creditNoteAllocation.count({ where: { creditNoteId: note.id } })).toBe(0);
+    });
+
+    it("signs under the caller's login, files with the caller's connection, and freezes what it paid for", async () => {
+      const note = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-a-407712" } });
+      useSession(adminSession(f.a));
+      expect((await sign(note.id, { signedByName: "T", signatureImage: SIGNATURE_PNG })).status).toBe(400);
+
+      const res = await withCreditGraph(() => sign(note.id, { signedByName: "Thabo Mokoena", signatureImage: SIGNATURE_PNG }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ outcome: "signed", filed: true, filingError: null });
+
+      const signed = await db().creditNote.findUniqueOrThrow({ where: { id: note.id }, include: { allocations: true } });
+      expect(signed).toMatchObject({
+        status: "SIGNED",
+        signedByName: "Thabo Mokoena",
+        signedByLogin: f.a.admin.name,
+        signedFileId: "signed-copy-1",
+        signedFilename: "CN407712_INV384281_COLCN-1.pdf",
+        signedIncludesSource: true,
+        originalRemoved: true,
+        signature: null,
+      });
+      expect(signed.allocations).toHaveLength(1);
+      expect(signed.allocations[0]).toMatchObject({ tenantId: f.a.tenantId, collectionNo: "CN-1" });
+
+      const tokens = new Set(graphCalls.map((c) => c.token).filter(Boolean));
+      expect([...tokens]).toEqual(["access-token-A"]);
+      expect(graphCalls.some((c) => c.url.startsWith("DELETE") && c.url.includes("item-a-407712"))).toBe(true);
+
+      // Signed is settled: a second signature is refused.
+      expect((await sign(note.id, { signedByName: "Thabo Mokoena", signatureImage: SIGNATURE_PNG })).status).toBe(409);
+    });
+
+    it("a second note for goods already credited needs a reason before it can be signed", async () => {
+      await ingest(f.a, "item-a-407900", { creditNo: "407900" });
+      const second = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-a-407900" } });
+      expect(second.status).toBe("NEEDS_REVIEW");
+      expect(JSON.stringify(second.issues)).toContain("MORE_THAN_COLLECTED");
+
+      useSession(adminSession(f.a));
+      const refused = await sign(second.id, { signedByName: "Thabo Mokoena", signatureImage: SIGNATURE_PNG });
+      expect(refused.status).toBe(400);
+      expect((await refused.json()).issues.length).toBeGreaterThan(0);
+
+      const res = await withCreditGraph(() =>
+        sign(second.id, { signedByName: "Thabo Mokoena", signatureImage: SIGNATURE_PNG, acknowledgement: "Second unit came back with the rep" })
+      );
+      expect(res.status).toBe(200);
+      const row = await db().creditNote.findUniqueOrThrow({ where: { id: second.id } });
+      expect(row.acknowledgement).toBe("Second unit came back with the rep");
+      expect(JSON.stringify(row.acknowledgedIssues)).toContain("MORE_THAN_COLLECTED");
+    });
+
+    it("rejecting is the owner's alone, needs a reason, and frees the credit number", async () => {
+      const { PUT } = await import("@/app/api/credit-notes/[id]/route");
+      const theirs = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-b-407712" } });
+
+      useSession(adminSession(f.a));
+      expect(
+        (await PUT(req(`/api/credit-notes/${theirs.id}`, { method: "PUT", body: { action: "reject", reason: "Not ours" } }), params({ id: theirs.id }))).status
+      ).toBe(404);
+
+      useSession(adminSession(f.b));
+      expect(
+        (await PUT(req(`/api/credit-notes/${theirs.id}`, { method: "PUT", body: { action: "reject", reason: "" } }), params({ id: theirs.id }))).status
+      ).toBe(400);
+      const ok = await PUT(
+        req(`/api/credit-notes/${theirs.id}`, { method: "PUT", body: { action: "reject", reason: "Raised against the wrong customer" } }),
+        params({ id: theirs.id })
+      );
+      expect(ok.status).toBe(200);
+      expect(await db().creditNote.findUniqueOrThrow({ where: { id: theirs.id } })).toMatchObject({
+        status: "REJECTED",
+        creditNoClaim: null,
+        rejectReason: "Raised against the wrong customer",
+        rejectedBy: f.b.admin.name,
+      });
+    });
   });
 });

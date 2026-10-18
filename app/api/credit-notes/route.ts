@@ -3,7 +3,8 @@ import type { CreditNoteStatus, Prisma } from "@prisma/client";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { looksLikePdf, MAX_INVOICE_UPLOAD_BYTES, sanitizeInvoiceFilename } from "@/lib/invoices";
-import { scheduleCreditsSync, uploadCreditNote } from "@/lib/credit-intake";
+import { uploadCreditNote } from "@/lib/credit-intake";
+import { scheduleCreditsWork } from "@/lib/credit-signoff";
 import type { CreditIssue } from "@/lib/credit-note";
 
 /**
@@ -65,7 +66,7 @@ export const GET = withAuth(async (request: NextRequest) => {
     }),
   ]);
 
-  if (account?.creditsFolderPath) scheduleCreditsSync(ctx.tenantId);
+  if (account?.creditsFolderPath) scheduleCreditsWork(ctx.tenantId);
 
   const counts = Object.fromEntries(STATUSES.map((s) => [s, 0])) as Record<CreditNoteStatus, number>;
   for (const g of grouped) counts[g.status] = g._count._all;
@@ -97,6 +98,9 @@ export const GET = withAuth(async (request: NextRequest) => {
         fileError: n.fileError,
         readSource: n.readSource,
         uploadedBy: n.uploadedBy,
+        signedByName: n.signedByName,
+        signedAt: n.signedAt?.toISOString() ?? null,
+        filingError: n.filingError,
         receivedAt: n.createdAt.toISOString(),
       };
     }),

@@ -1098,6 +1098,22 @@ export async function uploadCreditNoteOriginal(
   return uploadFileToFolder(tenantId, originalsId, safe, buffer, "application/pdf");
 }
 
+/**
+ * File a signed credit note in Signed/. Replaces a file of the same name on
+ * purpose, like saveSignedCollection: it is output built from a record we
+ * hold, so a retried filing must converge rather than fail.
+ */
+export async function uploadSignedCreditNote(
+  tenantId: string,
+  filename: string,
+  buffer: Buffer
+): Promise<OneDriveItem> {
+  const account = await getAccount(tenantId);
+  if (!account?.creditsFolderItemId) throw new Error("OneDrive credits folder not configured");
+  const signedId = await ensureSubfolder(tenantId, account.creditsFolderItemId, CREDITS_SUBFOLDERS.signed);
+  return uploadFileToFolder(tenantId, signedId, assertSafeItemName(filename), buffer, "application/pdf");
+}
+
 /** Move a credit note into Signed/ or Rejected/ (renamed on a clash, never overwritten). */
 export async function moveCreditNoteFile(
   tenantId: string,
