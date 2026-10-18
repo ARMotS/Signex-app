@@ -3,22 +3,74 @@
 import { useState, useEffect, useCallback } from "react";
 import { FilterSearch } from "@/components/admin/FilterSearch";
 import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
+import { DocChip, StatusBadge } from "@/components/ui/Chips";
 
-interface BackupInvoice {
+/**
+ * Backups: download what Signex has filed, and clear out what may be cleared.
+ *
+ * Four kinds of file. Signed invoices and completed trip sheets can be
+ * purged once downloaded. Signed collection receipts and signed credit notes
+ * are DOWNLOAD-ONLY: their Signed/ folders are the record a credit is
+ * reconciled against, and nothing is ever deleted from them. A backup with
+ * credit notes in it also carries credit-register.csv, tracing each note to
+ * its invoice and collections.
+ */
+
+type SectionKey = "invoices" | "trips" | "receipts" | "credits";
+
+interface FileRow {
   filename: string;
   sizeBytes: number;
-  signedAt: string;
+  /** When it was signed, processed or filed. */
+  date: string;
+  /** Extra text a search should find (credit number, invoice, customer). */
+  searchExtra?: string[];
+  creditNo?: string | null;
+  invoiceNo?: string | null;
+  customerName?: string | null;
 }
 
-interface BackupTripSheet {
-  filename: string;
-  sizeBytes: number;
-  processedAt: string;
+interface Summary {
+  invoices: { filename: string; sizeBytes: number; signedAt: string }[];
+  tripSheets: { filename: string; sizeBytes: number; processedAt: string }[];
+  collections: { filename: string; sizeBytes: number; signedAt: string }[];
+  creditNotes: {
+    filename: string;
+    sizeBytes: number;
+    signedAt: string;
+    creditNo: string | null;
+    invoiceNo: string | null;
+    customerName: string | null;
+  }[];
 }
+
+const SECTIONS: {
+  key: SectionKey;
+  title: string;
+  dateLabel: string;
+  purgeable: boolean;
+  note?: string;
+}[] = [
+  { key: "invoices", title: "Signed Invoices", dateLabel: "Signed", purgeable: true },
+  { key: "trips", title: "Completed Trip Sheets", dateLabel: "Processed", purgeable: true },
+  {
+    key: "receipts",
+    title: "Signed Collection Receipts",
+    dateLabel: "Signed",
+    purgeable: false,
+    note: "Kept permanently in Collections/Signed — download only.",
+  },
+  {
+    key: "credits",
+    title: "Signed Credit Notes",
+    dateLabel: "Filed",
+    purgeable: false,
+    note: "Kept permanently in the credits folder's Signed/ — download only. The download includes credit-register.csv.",
+  },
+];
 
 type DatePreset = "ALL" | "7D" | "30D" | "90D" | "CUSTOM";
-
-type KindFilter = "ALL" | "INVOICES" | "TRIPS";
+type KindFilter = "ALL" | SectionKey;
 type SortOrder = "NEWEST" | "OLDEST" | "NAME" | "LARGEST";
 
 /**
@@ -37,23 +89,26 @@ interface BackupSearch {
 
 const EMPTY_SEARCH: BackupSearch = { query: "", kind: "ALL", from: "", to: "", sort: "NEWEST" };
 
-function applySearch<T extends { filename: string; sizeBytes: number }>(
-  rows: T[],
-  dateOf: (row: T) => string,
-  search: BackupSearch,
-  formatDate: (iso: string) => string
-): T[] {
+const emptySets = (): Record<SectionKey, Set<string>> => ({
+  invoices: new Set(),
+  trips: new Set(),
+  receipts: new Set(),
+  credits: new Set(),
+});
+const allPages = (): Record<SectionKey, number> => ({ invoices: 1, trips: 1, receipts: 1, credits: 1 });
+
+function applySearch(rows: FileRow[], search: BackupSearch, formatDate: (iso: string) => string): FileRow[] {
   const tokens = tokenizeQuery(search.query);
   const fromMs = search.from ? new Date(`${search.from}T00:00:00`).getTime() : null;
   const toMs = search.to ? new Date(`${search.to}T23:59:59.999`).getTime() : null;
   const out = rows.filter((row) => {
-    const t = new Date(dateOf(row)).getTime();
+    const t = new Date(row.date).getTime();
     if (fromMs !== null && t < fromMs) return false;
     if (toMs !== null && t > toMs) return false;
     // The formatted date is searchable too, so "oct 2026" finds a month.
-    return matchesTokens(tokens, [row.filename, formatDate(dateOf(row))]);
+    return matchesTokens(tokens, [row.filename, formatDate(row.date), ...(row.searchExtra ?? [])]);
   });
-  const byDate = (a: T, b: T) => new Date(dateOf(a)).getTime() - new Date(dateOf(b)).getTime();
+  const byDate = (a: FileRow, b: FileRow) => new Date(a.date).getTime() - new Date(b.date).getTime();
   switch (search.sort) {
     case "NEWEST": return out.sort((a, b) => byDate(b, a));
     case "OLDEST": return out.sort(byDate);
@@ -80,21 +135,13 @@ function Pager({ page, total, onPage }: { page: number; total: number; onPage: (
         {(page - 1) * BACKUPS_PER_PAGE + 1}–{Math.min(page * BACKUPS_PER_PAGE, total)} of {total}
       </p>
       <div className="flex items-center gap-1">
-        <button
-          onClick={() => onPage(Math.max(1, page - 1))}
-          disabled={page === 1}
-          className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-        >
+        <button onClick={() => onPage(Math.max(1, page - 1))} disabled={page === 1} className="act">
           ‹ Prev
         </button>
-        <span className="text-xs font-mono text-ink-muted">
+        <span className="text-xs font-mono text-ink-muted px-1">
           {page}/{totalPages}
         </span>
-        <button
-          onClick={() => onPage(Math.min(totalPages, page + 1))}
-          disabled={page === totalPages}
-          className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-        >
+        <button onClick={() => onPage(Math.min(totalPages, page + 1))} disabled={page === totalPages} className="act">
           Next ›
         </button>
       </div>
@@ -102,36 +149,51 @@ function Pager({ page, total, onPage }: { page: number; total: number; onPage: (
   );
 }
 
+const Chevron = ({ open }: { open: boolean }) => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+    className={`transition-transform duration-200 ${open ? "rotate-90" : ""}`} aria-hidden="true">
+    <polyline points="9 18 15 12 9 6" />
+  </svg>
+);
+
+const DownloadIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
+  </svg>
+);
+
+const formatSize = (b: number) => {
+  if (b < 1024) return `${b} B`;
+  if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1048576).toFixed(1)} MB`;
+};
+
+const formatDate = (iso: string) =>
+  new Date(iso).toLocaleDateString("en-ZA", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
 export default function BackupsPage() {
-  const [invoices, setInvoices] = useState<BackupInvoice[]>([]);
-  const [tripSheets, setTripSheets] = useState<BackupTripSheet[]>([]);
+  const [rows, setRows] = useState<Record<SectionKey, FileRow[]>>({ invoices: [], trips: [], receipts: [], credits: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [datePreset, setDatePreset] = useState<DatePreset>("ALL");
   const [customDate, setCustomDate] = useState("");
 
-  const [selectedInvoices, setSelectedInvoices] = useState<Set<string>>(new Set());
-  const [selectedTrips, setSelectedTrips] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Record<SectionKey, Set<string>>>(emptySets);
+  const [open, setOpen] = useState<Record<SectionKey, boolean>>({ invoices: true, trips: true, receipts: true, credits: true });
+  const [pages, setPages] = useState<Record<SectionKey, number>>(allPages);
 
   const [downloading, setDownloading] = useState(false);
   const [purging, setPurging] = useState(false);
   const [showPurgeConfirm, setShowPurgeConfirm] = useState(false);
   const [purgeResult, setPurgeResult] = useState<string | null>(null);
 
-  const [invoicesOpen, setInvoicesOpen] = useState(true);
-  const [tripsOpen, setTripsOpen] = useState(true);
-
-  const [invoicePage, setInvoicePage] = useState(1);
-  const [tripPage, setTripPage] = useState(1);
-
   const [search, setSearch] = useState<BackupSearch>(EMPTY_SEARCH);
   const [searchOpen, setSearchOpen] = useState(false);
-  /** Every search change starts both tables back on page 1. */
+  /** Every search change starts every table back on page 1. */
   const updateSearch = (patch: Partial<BackupSearch>) => {
     setSearch((s) => ({ ...s, ...patch }));
-    setInvoicePage(1);
-    setTripPage(1);
+    setPages(allPages());
   };
 
   const getBeforeDate = useCallback((): string | null => {
@@ -152,10 +214,22 @@ export default function BackupsPage() {
       const before = getBeforeDate();
       const url = before ? `/api/backups?before=${encodeURIComponent(before)}` : "/api/backups";
       const res = await fetch(url);
-      const json = await res.json();
+      const json = (await res.json()) as Summary & { error?: string };
       if (json.error) { setError(json.error); return; }
-      setInvoices(json.invoices || []);
-      setTripSheets(json.tripSheets || []);
+      setRows({
+        invoices: (json.invoices ?? []).map((i) => ({ filename: i.filename, sizeBytes: i.sizeBytes, date: i.signedAt })),
+        trips: (json.tripSheets ?? []).map((t) => ({ filename: t.filename, sizeBytes: t.sizeBytes, date: t.processedAt })),
+        receipts: (json.collections ?? []).map((c) => ({ filename: c.filename, sizeBytes: c.sizeBytes, date: c.signedAt })),
+        credits: (json.creditNotes ?? []).map((n) => ({
+          filename: n.filename,
+          sizeBytes: n.sizeBytes,
+          date: n.signedAt,
+          creditNo: n.creditNo,
+          invoiceNo: n.invoiceNo,
+          customerName: n.customerName,
+          searchExtra: [n.creditNo ?? "", n.invoiceNo ?? "", n.customerName ?? ""],
+        })),
+      });
     } catch {
       setError("Failed to load backup data");
     } finally {
@@ -166,91 +240,75 @@ export default function BackupsPage() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   useEffect(() => {
-    setSelectedInvoices(new Set());
-    setSelectedTrips(new Set());
-    setInvoicePage(1);
-    setTripPage(1);
+    setSelected(emptySets());
+    setPages(allPages());
   }, [datePreset, customDate]);
 
-  const formatSize = (b: number) => {
-    if (b < 1024) return `${b} B`;
-    if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
-    return `${(b / 1048576).toFixed(1)} MB`;
+  const filtered: Record<SectionKey, FileRow[]> = {
+    invoices: [], trips: [], receipts: [], credits: [],
   };
-
-  const formatDate = (iso: string) =>
-    new Date(iso).toLocaleDateString("en-ZA", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
-
-  const totalSelected = selectedInvoices.size + selectedTrips.size;
-
-  const toggleInvoice = (f: string) => {
-    setSelectedInvoices((prev) => { const n = new Set(prev); n.has(f) ? n.delete(f) : n.add(f); return n; });
-  };
-  const toggleTrip = (filename: string) => {
-    setSelectedTrips((prev) => { const n = new Set(prev); n.has(filename) ? n.delete(filename) : n.add(filename); return n; });
-  };
-  const filteredInvoices = search.kind === "TRIPS" ? [] : applySearch(invoices, (i) => i.signedAt, search, formatDate);
-  const filteredTrips = search.kind === "INVOICES" ? [] : applySearch(tripSheets, (t) => t.processedAt, search, formatDate);
-  const searchActive =
-    search.query.trim() !== "" || search.kind !== "ALL" || search.from !== "" || search.to !== "";
+  for (const s of SECTIONS) {
+    filtered[s.key] = search.kind === "ALL" || search.kind === s.key ? applySearch(rows[s.key], search, formatDate) : [];
+  }
+  const totalAll = SECTIONS.reduce((n, s) => n + rows[s.key].length, 0);
+  const totalMatches = SECTIONS.reduce((n, s) => n + filtered[s.key].length, 0);
+  const totalSelected = SECTIONS.reduce((n, s) => n + selected[s.key].size, 0);
+  const purgeableSelected = selected.invoices.size + selected.trips.size;
+  const searchActive = search.query.trim() !== "" || search.kind !== "ALL" || search.from !== "" || search.to !== "";
   const advancedActive = search.kind !== "ALL" || search.from !== "" || search.to !== "" || search.sort !== "NEWEST";
-  const totalMatches = filteredInvoices.length + filteredTrips.length;
 
-  const shownInvoicePage = clampPage(invoicePage, filteredInvoices.length);
-  const shownTripPage = clampPage(tripPage, filteredTrips.length);
-  const pageInvoices = filteredInvoices.slice((shownInvoicePage - 1) * BACKUPS_PER_PAGE, shownInvoicePage * BACKUPS_PER_PAGE);
-  const pageTrips = filteredTrips.slice((shownTripPage - 1) * BACKUPS_PER_PAGE, shownTripPage * BACKUPS_PER_PAGE);
-
-  // The header checkbox covers the rows on screen only, so a purge never takes
-  // rows the admin has not seen. "Select All" in the page header covers the rest.
-  const allPageInvoicesSelected = pageInvoices.length > 0 && pageInvoices.every((i) => selectedInvoices.has(i.filename));
-  const allPageTripsSelected = pageTrips.length > 0 && pageTrips.every((t) => selectedTrips.has(t.filename));
-  const toggleAllInvoices = () => {
-    setSelectedInvoices((prev) => {
-      const n = new Set(prev);
-      for (const i of pageInvoices) {
-        if (allPageInvoicesSelected) n.delete(i.filename);
-        else n.add(i.filename);
-      }
-      return n;
+  const toggle = (key: SectionKey, filename: string) => {
+    setSelected((prev) => {
+      const n = new Set(prev[key]);
+      if (n.has(filename)) n.delete(filename);
+      else n.add(filename);
+      return { ...prev, [key]: n };
     });
   };
-  const toggleAllTrips = () => {
-    setSelectedTrips((prev) => {
-      const n = new Set(prev);
-      for (const t of pageTrips) {
-        if (allPageTripsSelected) n.delete(t.filename);
-        else n.add(t.filename);
+  // The header checkbox covers the rows on screen only, so a purge never takes
+  // rows the admin has not seen. "Select all" in the page header covers the rest.
+  const togglePage = (key: SectionKey, pageRows: FileRow[], allOn: boolean) => {
+    setSelected((prev) => {
+      const n = new Set(prev[key]);
+      for (const r of pageRows) {
+        if (allOn) n.delete(r.filename);
+        else n.add(r.filename);
       }
-      return n;
+      return { ...prev, [key]: n };
     });
   };
   // With a search applied this selects the matches only — what the admin sees
   // listed is what goes into the download or the purge.
   const selectAll = () => {
-    setSelectedInvoices(new Set(filteredInvoices.map((i) => i.filename)));
-    setSelectedTrips(new Set(filteredTrips.map((t) => t.filename)));
+    setSelected({
+      invoices: new Set(filtered.invoices.map((r) => r.filename)),
+      trips: new Set(filtered.trips.map((r) => r.filename)),
+      receipts: new Set(filtered.receipts.map((r) => r.filename)),
+      credits: new Set(filtered.credits.map((r) => r.filename)),
+    });
   };
 
-  const handleDownload = async (mode: "invoices" | "trips" | "both") => {
-    const invFiles = mode === "trips" ? [] : Array.from(selectedInvoices);
-    const tripFiles = mode === "invoices" ? [] : Array.from(selectedTrips);
-    if (invFiles.length === 0 && tripFiles.length === 0) return;
+  const handleDownload = async () => {
+    if (totalSelected === 0) return;
     setDownloading(true);
     setError(null);
     try {
       const res = await fetch("/api/backups", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invoiceFilenames: invFiles, tripSheetFilenames: tripFiles }),
+        body: JSON.stringify({
+          invoiceFilenames: Array.from(selected.invoices),
+          tripSheetFilenames: Array.from(selected.trips),
+          collectionFilenames: Array.from(selected.receipts),
+          creditNoteFilenames: Array.from(selected.credits),
+        }),
       });
       if (!res.ok) { const j = await res.json(); setError(j.error || "Download failed"); return; }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const suffix = mode === "invoices" ? "-invoices" : mode === "trips" ? "-tripsheets" : "";
-      a.download = `signex-backup${suffix}-${new Date().toISOString().slice(0, 10)}.zip`;
+      a.download = `signex-backup-${new Date().toISOString().slice(0, 10)}.zip`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -259,7 +317,7 @@ export default function BackupsPage() {
   };
 
   const handlePurge = async () => {
-    if (totalSelected === 0) return;
+    if (purgeableSelected === 0) return;
     setPurging(true);
     setError(null);
     setPurgeResult(null);
@@ -267,14 +325,13 @@ export default function BackupsPage() {
       const res = await fetch("/api/backups", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invoiceFilenames: Array.from(selectedInvoices), tripSheetFilenames: Array.from(selectedTrips) }),
+        body: JSON.stringify({ invoiceFilenames: Array.from(selected.invoices), tripSheetFilenames: Array.from(selected.trips) }),
       });
       const json = await res.json();
       if (!res.ok) { setError(json.error || "Purge failed"); return; }
       const p = json.purged;
       setPurgeResult(`Purged ${p.invoicesDeleted} invoices and ${p.tripSheetsDeleted} trip sheets`);
-      setSelectedInvoices(new Set());
-      setSelectedTrips(new Set());
+      setSelected((prev) => ({ ...prev, invoices: new Set(), trips: new Set() }));
       fetchData();
     } catch { setError("Failed to purge items"); } finally { setPurging(false); setShowPurgeConfirm(false); }
   };
@@ -289,28 +346,26 @@ export default function BackupsPage() {
     }
   };
 
-  // Chevron SVG helper
-  const Chevron = ({ open }: { open: boolean }) => (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-      className={`transition-transform duration-200 ${open ? "rotate-90" : ""}`}>
-      <polyline points="9 18 15 12 9 6" />
-    </svg>
-  );
+  const summaryLine = [
+    `${rows.invoices.length} signed invoices`,
+    `${rows.trips.length} completed trip sheets`,
+    `${rows.receipts.length} collection receipts`,
+    `${rows.credits.length} signed credit notes`,
+  ].join(" · ");
 
   return (
-    <div className="animate-fade-in">
+    <div className={`animate-fade-in ${totalSelected > 0 ? "pb-20" : ""}`}>
       {/* Header */}
       <div className="flex items-start justify-between mb-6 gap-4 flex-wrap">
         <div>
           <h1 className="font-mono text-2xl font-medium text-ink-black tracking-tight">Backups</h1>
           <p className="text-sm text-ink-muted mt-1">
-            {loading ? "Scanning…" : error ? "Error loading data" : `${invoices.length} signed invoices · ${tripSheets.length} completed trip sheets available`}
+            {loading ? "Scanning…" : error ? "Error loading data" : `${summaryLine} available`}
           </p>
         </div>
         {totalSelected > 0 && (
-          <button onClick={selectAll}
-            className="px-3 py-1.5 text-xs font-mono text-ink-muted hover:text-ink-black transition-colors">
-            {searchActive ? `Select all ${totalMatches} matching` : `Select All (${invoices.length + tripSheets.length})`}
+          <button onClick={selectAll} className="act">
+            {searchActive ? `Select all ${totalMatches} matching` : `Select all (${totalAll})`}
           </button>
         )}
       </div>
@@ -333,15 +388,15 @@ export default function BackupsPage() {
       </div>
 
       {/* Detailed search — narrows the listing above without another fetch */}
-      {!loading && !error && (invoices.length > 0 || tripSheets.length > 0) && (
+      {!loading && !error && totalAll > 0 && (
         <div className="mb-6 bg-ink-card border border-ink-border rounded p-3">
           <div className="flex items-center gap-2 flex-wrap">
             <FilterSearch
               value={search.query}
               onChange={(query) => updateSearch({ query })}
-              placeholder="Search filename, invoice no. or date…"
+              placeholder="Search filename, invoice or credit no., customer or date…"
               matchCount={totalMatches}
-              totalCount={invoices.length + tripSheets.length}
+              totalCount={totalAll}
               noun="file"
               shortcut
               className="flex-1 min-w-[220px]"
@@ -350,23 +405,15 @@ export default function BackupsPage() {
               type="button"
               onClick={() => setSearchOpen((o) => !o)}
               aria-expanded={searchOpen}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono rounded border transition-colors ${
-                advancedActive
-                  ? "border-ink-green/30 bg-ink-green-dim text-ink-green"
-                  : "border-ink-border text-ink-muted hover:text-ink-black"
-              }`}
+              className={`act ${advancedActive ? "act-green" : ""}`}
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <line x1="4" y1="6" x2="20" y2="6" /><line x1="7" y1="12" x2="17" y2="12" /><line x1="10" y1="18" x2="14" y2="18" />
               </svg>
               Filters{advancedActive ? " · on" : ""}
             </button>
             {(searchActive || search.sort !== "NEWEST") && (
-              <button
-                type="button"
-                onClick={() => updateSearch(EMPTY_SEARCH)}
-                className="px-2 py-1.5 text-xs font-mono text-ink-muted hover:text-ink-black transition-colors"
-              >
+              <button type="button" onClick={() => updateSearch(EMPTY_SEARCH)} className="act">
                 Reset
               </button>
             )}
@@ -382,8 +429,10 @@ export default function BackupsPage() {
                   className="px-2 py-1.5 text-xs font-mono bg-ink-card border border-ink-border rounded text-ink-black focus:outline-none focus:border-ink-green"
                 >
                   <option value="ALL">All files</option>
-                  <option value="INVOICES">Signed invoices</option>
-                  <option value="TRIPS">Completed trip sheets</option>
+                  <option value="invoices">Signed invoices</option>
+                  <option value="trips">Completed trip sheets</option>
+                  <option value="receipts">Collection receipts</option>
+                  <option value="credits">Signed credit notes</option>
                 </select>
               </label>
               <label className="flex flex-col gap-1">
@@ -427,11 +476,12 @@ export default function BackupsPage() {
       {/* Success message */}
       {purgeResult && (
         <div className="flex items-center gap-2 mb-4 px-4 py-2.5 bg-ink-green-dim border border-ink-green/20 rounded animate-fade-in">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-green shrink-0">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-          <p className="text-xs font-mono text-ink-green">{purgeResult}</p>
-          <button onClick={() => setPurgeResult(null)} className="ml-auto text-ink-green/60 hover:text-ink-green">✕</button>
+          <p className="text-xs font-mono text-[color:var(--tone-green-fg)] flex-1">{purgeResult}</p>
+          <button onClick={() => setPurgeResult(null)} className="act act-icon" aria-label="Dismiss">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
         </div>
       )}
 
@@ -451,241 +501,179 @@ export default function BackupsPage() {
       )}
 
       {/* Empty state */}
-      {!loading && !error && invoices.length === 0 && tripSheets.length === 0 && (
+      {!loading && !error && totalAll === 0 && (
         <div className="bg-ink-card border-2 border-dashed border-ink-border rounded p-12 text-center">
-          <div className="text-4xl mb-4">📦</div>
           <p className="font-mono text-sm font-medium text-ink-black mb-2">Nothing to back up</p>
           <p className="text-xs text-ink-muted max-w-sm mx-auto">
-            Signed invoices and completed trip sheets will appear here when available.
+            Signed invoices, completed trip sheets, collection receipts and signed credit notes appear here when available.
           </p>
         </div>
       )}
 
-      {!loading && !error && (invoices.length > 0 || tripSheets.length > 0) && (
+      {!loading && !error && totalAll > 0 && (
         <div className="space-y-4">
           {totalMatches === 0 && (
             <div className="bg-ink-card border-2 border-dashed border-ink-border rounded p-10 text-center">
-              <p className="font-mono text-sm font-medium text-ink-black mb-1">No files match this search</p>
-              <button onClick={() => updateSearch(EMPTY_SEARCH)} className="text-xs font-mono text-ink-green hover:underline">
-                Reset search
-              </button>
+              <p className="font-mono text-sm font-medium text-ink-black mb-2">No files match this search</p>
+              <button onClick={() => updateSearch(EMPTY_SEARCH)} className="act">Reset search</button>
             </div>
           )}
 
-          {/* ── Signed Invoices Section ─────────────────────────────── */}
-          {filteredInvoices.length > 0 && (
-            <div className="bg-ink-card border border-ink-border rounded overflow-hidden">
-              <button onClick={() => setInvoicesOpen(!invoicesOpen)}
-                className="flex items-center gap-3 w-full px-5 py-3.5 text-left hover:bg-ink-surface/50 transition-colors">
-                <Chevron open={invoicesOpen} />
-                <span className="font-mono text-sm font-medium text-ink-black">Signed Invoices</span>
-                <span className="ml-auto text-xs font-mono text-ink-muted">
-                  {searchActive && filteredInvoices.length !== invoices.length ? `${filteredInvoices.length} of ${invoices.length}` : invoices.length} files · {formatSize(filteredInvoices.reduce((s, i) => s + i.sizeBytes, 0))}
-                </span>
-                {selectedInvoices.size > 0 && (
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-green-dim text-ink-green">{selectedInvoices.size} selected</span>
+          {SECTIONS.map((section) => {
+            const list = filtered[section.key];
+            if (list.length === 0) return null;
+            const all = rows[section.key];
+            const sel = selected[section.key];
+            const page = clampPage(pages[section.key], list.length);
+            const pageRows = list.slice((page - 1) * BACKUPS_PER_PAGE, page * BACKUPS_PER_PAGE);
+            const allPageOn = pageRows.length > 0 && pageRows.every((r) => sel.has(r.filename));
+            const isOpen = open[section.key];
+            return (
+              <div key={section.key} className="bg-ink-card border border-ink-border rounded overflow-hidden">
+                <button
+                  onClick={() => setOpen((o) => ({ ...o, [section.key]: !o[section.key] }))}
+                  className="flex items-center gap-3 w-full px-5 py-3.5 text-left hover:bg-ink-surface/50 transition-colors flex-wrap"
+                  aria-expanded={isOpen}
+                >
+                  <Chevron open={isOpen} />
+                  <span className="font-mono text-sm font-medium text-ink-black">{section.title}</span>
+                  {!section.purgeable && <StatusBadge tone="idle">Download only</StatusBadge>}
+                  <span className="ml-auto text-xs font-mono text-ink-muted">
+                    {searchActive && list.length !== all.length ? `${list.length} of ${all.length}` : all.length} files ·{" "}
+                    {formatSize(list.reduce((s, r) => s + r.sizeBytes, 0))}
+                  </span>
+                  {sel.size > 0 && <StatusBadge tone="green">{sel.size} selected</StatusBadge>}
+                </button>
+
+                {isOpen && (
+                  <div className="border-t border-ink-border">
+                    {section.note && (
+                      <p className="px-5 py-2 text-[11px] text-ink-muted bg-ink-surface/40 border-b border-ink-border">{section.note}</p>
+                    )}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-ink-border">
+                            <th className="text-left px-5 py-2.5 w-10">
+                              <input type="checkbox" checked={allPageOn} onChange={() => togglePage(section.key, pageRows, allPageOn)}
+                                aria-label={`Select this page of ${section.title.toLowerCase()}`}
+                                className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F] cursor-pointer" />
+                            </th>
+                            <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">
+                              {section.key === "credits" ? "Credit note" : "Filename"}
+                            </th>
+                            <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Size</th>
+                            <th className="text-right px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide hidden sm:table-cell">
+                              {section.dateLabel}
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-ink-border">
+                          {pageRows.map((r) => (
+                            <tr key={r.filename}
+                              className={`hover:bg-ink-surface/50 transition-colors cursor-pointer ${sel.has(r.filename) ? "bg-ink-green-dim/20" : ""}`}
+                              onClick={() => toggle(section.key, r.filename)}>
+                              <td className="px-5 py-3 w-10" onClick={(e) => e.stopPropagation()}>
+                                <input type="checkbox" checked={sel.has(r.filename)} onChange={() => toggle(section.key, r.filename)}
+                                  aria-label={`Select ${r.filename}`}
+                                  className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F] cursor-pointer" />
+                              </td>
+                              <td className="px-5 py-3 font-mono text-xs text-ink-black">
+                                {section.key === "credits" && r.creditNo ? (
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <DocChip kind="CN" number={r.creditNo} tone="blue" />
+                                    {r.invoiceNo && <DocChip kind="INV" number={r.invoiceNo} tone="ref" />}
+                                    {r.customerName && <span className="text-ink-muted">{r.customerName}</span>}
+                                    <span className="basis-full text-[11px] text-ink-muted">{r.filename}</span>
+                                  </div>
+                                ) : (
+                                  r.filename
+                                )}
+                              </td>
+                              <td className="px-5 py-3 font-mono text-xs text-ink-muted">{formatSize(r.sizeBytes)}</td>
+                              <td className="px-5 py-3 text-right text-xs text-ink-muted hidden sm:table-cell">{formatDate(r.date)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <Pager page={page} total={list.length} onPage={(p) => setPages((prev) => ({ ...prev, [section.key]: p }))} />
+                  </div>
                 )}
-              </button>
-
-              {invoicesOpen && (
-                <div className="border-t border-ink-border">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-ink-border">
-                        <th className="text-left px-5 py-2.5 w-10">
-                          <input type="checkbox" checked={allPageInvoicesSelected} onChange={toggleAllInvoices}
-                            className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F] cursor-pointer" />
-                        </th>
-                        <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Filename</th>
-                        <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Size</th>
-                        <th className="text-right px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide hidden sm:table-cell">Signed</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-ink-border">
-                      {pageInvoices.map((inv) => (
-                        <tr key={inv.filename}
-                          className={`hover:bg-ink-surface/50 transition-colors cursor-pointer ${selectedInvoices.has(inv.filename) ? "bg-ink-green-dim/20" : ""}`}
-                          onClick={() => toggleInvoice(inv.filename)}>
-                          <td className="px-5 py-3 w-10" onClick={(e) => e.stopPropagation()}>
-                            <input type="checkbox" checked={selectedInvoices.has(inv.filename)} onChange={() => toggleInvoice(inv.filename)}
-                              className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F] cursor-pointer" />
-                          </td>
-                          <td className="px-5 py-3 font-mono text-xs text-ink-black">{inv.filename}</td>
-                          <td className="px-5 py-3 font-mono text-xs text-ink-muted">{formatSize(inv.sizeBytes)}</td>
-                          <td className="px-5 py-3 text-right text-xs text-ink-muted hidden sm:table-cell">{formatDate(inv.signedAt)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <Pager page={shownInvoicePage} total={filteredInvoices.length} onPage={setInvoicePage} />
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ── Completed Trip Sheets Section ──────────────────────── */}
-          {filteredTrips.length > 0 && (
-            <div className="bg-ink-card border border-ink-border rounded overflow-hidden">
-              <button onClick={() => setTripsOpen(!tripsOpen)}
-                className="flex items-center gap-3 w-full px-5 py-3.5 text-left hover:bg-ink-surface/50 transition-colors">
-                <Chevron open={tripsOpen} />
-                <span className="font-mono text-sm font-medium text-ink-black">Completed Trip Sheets</span>
-                <span className="ml-auto text-xs font-mono text-ink-muted">
-                  {searchActive && filteredTrips.length !== tripSheets.length ? `${filteredTrips.length} of ${tripSheets.length}` : tripSheets.length} files · {formatSize(filteredTrips.reduce((s, t) => s + t.sizeBytes, 0))}
-                </span>
-                {selectedTrips.size > 0 && (
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-green-dim text-ink-green">{selectedTrips.size} selected</span>
-                )}
-              </button>
-
-              {tripsOpen && (
-                <div className="border-t border-ink-border">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-ink-border">
-                        <th className="text-left px-5 py-2.5 w-10">
-                          <input type="checkbox" checked={allPageTripsSelected} onChange={toggleAllTrips}
-                            className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F] cursor-pointer" />
-                        </th>
-                        <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Filename</th>
-                        <th className="text-left px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide">Size</th>
-                        <th className="text-right px-5 py-2.5 font-mono text-xs text-ink-muted uppercase tracking-wide hidden sm:table-cell">Processed</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-ink-border">
-                      {pageTrips.map((ts) => (
-                        <tr key={ts.filename}
-                          className={`hover:bg-ink-surface/50 transition-colors cursor-pointer ${selectedTrips.has(ts.filename) ? "bg-ink-green-dim/20" : ""}`}
-                          onClick={() => toggleTrip(ts.filename)}>
-                          <td className="px-5 py-3 w-10" onClick={(e) => e.stopPropagation()}>
-                            <input type="checkbox" checked={selectedTrips.has(ts.filename)} onChange={() => toggleTrip(ts.filename)}
-                              className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F] cursor-pointer" />
-                          </td>
-                          <td className="px-5 py-3 font-mono text-xs text-ink-black">{ts.filename}</td>
-                          <td className="px-5 py-3 font-mono text-xs text-ink-muted">{formatSize(ts.sizeBytes)}</td>
-                          <td className="px-5 py-3 text-right text-xs text-ink-muted hidden sm:table-cell">{formatDate(ts.processedAt)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <Pager page={shownTripPage} total={filteredTrips.length} onPage={setTripPage} />
-                </div>
-              )}
-            </div>
-          )}
+              </div>
+            );
+          })}
         </div>
       )}
 
-       {/* ── Sticky Action Bar ─────────────────────────────────────── */}
+      {/* ── Sticky action bar ─────────────────────────────────────── */}
       {totalSelected > 0 && (
-        <div className="fixed bottom-0 left-0 right-0 md:left-56 z-40 bg-ink-card border-t border-ink-border px-5 py-3 animate-fade-in mb-[env(safe-area-inset-bottom)]"
-          style={{ bottom: "0px" }}>
+        <div className="fixed bottom-0 left-0 right-0 md:left-56 z-40 bg-ink-card border-t border-ink-border px-5 py-3 animate-fade-in mb-[env(safe-area-inset-bottom)]">
           <div className="flex items-center justify-between max-w-5xl mx-auto gap-3 flex-wrap">
             <p className="text-xs font-mono text-ink-muted">
-              {selectedInvoices.size > 0 && <span>{selectedInvoices.size} invoice{selectedInvoices.size !== 1 ? "s" : ""}</span>}
-              {selectedInvoices.size > 0 && selectedTrips.size > 0 && <span> · </span>}
-              {selectedTrips.size > 0 && <span>{selectedTrips.size} trip sheet{selectedTrips.size !== 1 ? "s" : ""}</span>}
-              <span> selected</span>
+              {SECTIONS.filter((s) => selected[s.key].size > 0)
+                .map((s) => `${selected[s.key].size} ${s.title.toLowerCase().replace(/^signed |^completed /, "")}`)
+                .join(" · ")}{" "}
+              selected
             </p>
             <div className="flex items-center gap-2 flex-wrap">
-              <button onClick={() => { setSelectedInvoices(new Set()); setSelectedTrips(new Set()); }}
-                className="px-3 py-1.5 text-xs font-mono text-ink-muted hover:text-ink-black transition-colors">
+              <button onClick={() => setSelected(emptySets())} className="act">
                 Clear
               </button>
-              {selectedInvoices.size > 0 && selectedTrips.size > 0 && (
-                <>
-                  <button onClick={() => handleDownload("invoices")} disabled={downloading}
-                    className="flex items-center gap-2 px-3 py-2 text-xs font-mono font-medium text-ink-green bg-ink-green-dim border border-ink-green/20 rounded hover:bg-ink-green/10 transition-all disabled:opacity-50">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
-                    </svg>
-                    Invoices Only
-                  </button>
-                  <button onClick={() => handleDownload("trips")} disabled={downloading}
-                    className="flex items-center gap-2 px-3 py-2 text-xs font-mono font-medium text-ink-green bg-ink-green-dim border border-ink-green/20 rounded hover:bg-ink-green/10 transition-all disabled:opacity-50">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
-                    </svg>
-                    Trip Sheets Only
-                  </button>
-                </>
-              )}
-              <button onClick={() => handleDownload("both")} disabled={downloading}
-                className="flex items-center gap-2 px-4 py-2 text-xs font-mono font-medium text-white bg-ink-green rounded hover:bg-ink-green-hover transition-all disabled:opacity-50">
+              <button onClick={handleDownload} disabled={downloading} className="act act-primary">
                 {downloading ? (
-                  <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Creating…</>
+                  <><div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />Creating…</>
                 ) : (
-                  <>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
-                    </svg>
-                    {selectedInvoices.size > 0 && selectedTrips.size > 0 ? "Download All" : selectedInvoices.size > 0 ? "Download Invoices" : "Download Trip Sheets"}
-                  </>
+                  <><DownloadIcon />Download ZIP</>
                 )}
               </button>
-              <button onClick={() => setShowPurgeConfirm(true)} disabled={purging}
-                className="flex items-center gap-2 px-4 py-2 text-xs font-mono font-medium text-white bg-ink-red rounded hover:bg-red-600 transition-all disabled:opacity-50">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                </svg>
-                Purge Selected
-              </button>
+              {purgeableSelected > 0 && (
+                <button onClick={() => setShowPurgeConfirm(true)} disabled={purging} className="act act-red">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  </svg>
+                  Purge {purgeableSelected}…
+                </button>
+              )}
             </div>
           </div>
         </div>
       )}
 
-      {/* ── Purge Confirmation Modal ──────────────────────────────── */}
+      {/* ── Purge confirmation ────────────────────────────────────── */}
       {showPurgeConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={() => setShowPurgeConfirm(false)}>
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="px-6 py-5">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 rounded-full bg-ink-red-dim flex items-center justify-center">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-red">
-                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                    <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-                  </svg>
-                </div>
-                <div>
-                  <h3 className="font-mono text-sm font-medium text-ink-black">Purge {totalSelected} item{totalSelected !== 1 ? "s" : ""}?</h3>
-                  <p className="text-xs text-ink-muted mt-0.5">This action cannot be undone</p>
-                </div>
-              </div>
+              <h3 className="font-mono text-sm font-medium text-ink-black">
+                Purge {purgeableSelected} file{purgeableSelected !== 1 ? "s" : ""}?
+              </h3>
+              <p className="text-xs text-ink-muted mt-0.5 mb-4">This cannot be undone — download them first.</p>
               <p className="text-sm text-ink-muted mb-3">
                 The following will be <span className="font-medium text-ink-red">permanently removed</span>:
               </p>
               <div className="space-y-2 mb-4">
-                {selectedInvoices.size > 0 && (
-                  <div className="bg-ink-surface rounded p-2">
-                    <p className="text-xs font-mono text-ink-muted mb-1">Signed Invoices ({selectedInvoices.size})</p>
+                {SECTIONS.filter((s) => s.purgeable && selected[s.key].size > 0).map((s) => (
+                  <div key={s.key} className="bg-ink-surface rounded p-2">
+                    <p className="text-xs font-mono text-ink-muted mb-1">{s.title} ({selected[s.key].size})</p>
                     <div className="max-h-20 overflow-y-auto">
-                      {Array.from(selectedInvoices).map((fn) => (
+                      {Array.from(selected[s.key]).map((fn) => (
                         <p key={fn} className="text-xs font-mono text-ink-black py-0.5 truncate">{fn}</p>
                       ))}
                     </div>
                   </div>
-                )}
-                {selectedTrips.size > 0 && (
-                  <div className="bg-ink-surface rounded p-2">
-                    <p className="text-xs font-mono text-ink-muted mb-1">Trip Sheets ({selectedTrips.size})</p>
-                    <div className="max-h-20 overflow-y-auto">
-                      {tripSheets.filter((t) => selectedTrips.has(t.filename)).map((t) => (
-                        <p key={t.filename} className="text-xs font-mono text-ink-black py-0.5 truncate">{t.filename}</p>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                ))}
               </div>
+              {(selected.receipts.size > 0 || selected.credits.size > 0) && (
+                <p className="text-xs text-ink-muted">
+                  Selected collection receipts and credit notes are not purged — they stay in their Signed/ folders.
+                </p>
+              )}
             </div>
-            <div className="flex justify-end gap-3 px-6 py-4 bg-ink-surface/50 border-t border-ink-border">
-              <button onClick={() => setShowPurgeConfirm(false)}
-                className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors">Cancel</button>
-              <button onClick={handlePurge} disabled={purging}
-                className="flex items-center gap-2 px-4 py-2 text-sm font-mono font-medium text-white bg-ink-red rounded hover:bg-red-600 transition-all disabled:opacity-50">
-                {purging ? (
-                  <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Purging…</>
-                ) : "Purge Permanently"}
+            <div className="flex justify-end gap-2 px-6 py-4 bg-ink-surface/50 border-t border-ink-border">
+              <button onClick={() => setShowPurgeConfirm(false)} className="act">Cancel</button>
+              <button onClick={handlePurge} disabled={purging} className="act act-red">
+                {purging ? "Purging…" : "Purge permanently"}
               </button>
             </div>
           </div>

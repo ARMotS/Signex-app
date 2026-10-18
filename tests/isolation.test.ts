@@ -4467,5 +4467,65 @@ suite("cross-ADMIN isolation", () => {
         rejectedBy: f.b.admin.name,
       });
     });
+    // ── Backups of signed credit notes ──
+    it("a backup of signed credit notes reads the caller's own Signed/ and registers only the caller's notes", async () => {
+      const mine = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-a-407712" } });
+      expect(mine.status).toBe("SIGNED");
+      const filename = mine.signedFilename!;
+
+      // B holds a signed note filed under the SAME name, signed by someone else.
+      await db().creditNote.create({
+        data: {
+          tenantId: f.b.tenantId,
+          creditNo: "407712",
+          creditNoNormalized: "407712",
+          status: "SIGNED",
+          signedByName: "Someone In B",
+          signedFilename: filename,
+          sourceItemId: "b-signed-copy",
+          sourceFilename: "CR-407712.pdf",
+          sourceFolder: "Signed",
+        },
+      });
+
+      const pdf = await notePdf();
+      const fetchMock = vi.mocked(fetch);
+      const original = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation(async (url: any, init: any) => {
+        const u = String(url);
+        const auth: string | undefined = init?.headers?.Authorization;
+        graphCalls.push({ url: `${init?.method ?? "GET"} ${u}`, token: auth ? auth.replace("Bearer ", "") : null });
+        const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+        if (u.includes("items/credits-folder-A/children")) return json({ value: [{ id: "signed-A", name: "Signed", folder: { childCount: 1 } }] });
+        if (u.includes("items/signed-A/children")) {
+          return json({ value: [{ id: "signed-file-A", name: filename, size: pdf.length, lastModifiedDateTime: new Date().toISOString(), file: { mimeType: "application/pdf" } }] });
+        }
+        if (u.includes("items/signed-file-A/content")) return new Response(new Uint8Array(pdf), { status: 200 });
+        return json({ value: [] });
+      });
+
+      let listed, zipBuffer;
+      try {
+        const { getBackupableCreditNotes, createBackupZip } = await import("@/lib/backup");
+        listed = await getBackupableCreditNotes(f.a.tenantId);
+        zipBuffer = await createBackupZip(f.a.tenantId, [], [], [], [filename]);
+      } finally {
+        fetchMock.mockImplementation(original);
+      }
+
+      expect(listed).toEqual([expect.objectContaining({ filename, creditNo: "407712", invoiceNo: "384281" })]);
+      expect([...new Set(graphCalls.map((c) => c.token).filter(Boolean))]).toEqual(["access-token-A"]);
+
+      const JSZip = (await import("jszip")).default;
+      const zip = await JSZip.loadAsync(zipBuffer);
+      const names = Object.keys(zip.files);
+      expect(names.some((n) => n.endsWith(`Credit-Notes/${filename}`))).toBe(true);
+      const registerName = names.find((n) => n.endsWith("Credit-Notes/credit-register.csv"))!;
+      const register = await zip.file(registerName)!.async("string");
+      const lines = register.replace(/^﻿/, "").trimEnd().split("\r\n");
+      expect(lines).toHaveLength(2); // header + A's one note
+      expect(register).toContain("Thabo Mokoena");
+      expect(register).not.toContain("Someone In B");
+    });
   });
 });
