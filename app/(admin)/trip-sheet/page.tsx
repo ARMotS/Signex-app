@@ -3235,100 +3235,112 @@ export default function TripSheetPage() {
                           {/* Collections at this stop. Listed under the
                               delivery rather than beside it, because it is one
                               visit to one address — the driver sees the same
-                              shape on their run sheet. */}
+                              shape on their run sheet. Each is a small card:
+                              what it is on top, the office's actions below. */}
                           {(stop.collections?.length ?? 0) > 0 && (
-                            <div className="mt-2 pl-8 space-y-1">
-                              {stop.collections!.map((c) => (
-                                <div
-                                  key={c.id}
-                                  className="flex items-center gap-2 flex-wrap text-[12px]"
-                                >
-                                  {/* Type and number in one chip, coloured by
-                                      status to match the key above. */}
-                                  <span
-                                    className={`badge-sm ${collectionChipClass(c.status)}`}
-                                    title={`${c.type === "CREDIT_RETURN" ? "Credit return" : "Non-credit uplift"} — ${
-                                      COLLECTION_STATUS_LABEL[c.status] ?? c.status
-                                    }`}
+                            <div className="mt-2 pl-8 space-y-1.5">
+                              {stop.collections!.map((c) => {
+                                const listed = (c.lines ?? []).filter((l) => !l.isExtra).reduce((n, l) => n + l.qtyListed, 0);
+                                const back = (c.lines ?? []).reduce((n, l) => n + (l.qtyCollected ?? 0), 0);
+                                const quantity =
+                                  (c.lines?.length ?? 0) > 0
+                                    ? c.status === "PENDING"
+                                      ? `${listed} item${listed === 1 ? "" : "s"}`
+                                      : `${back} of ${listed} items`
+                                    : c.collectedQty != null || c.expectedQty != null
+                                    ? c.status === "PENDING"
+                                      ? `${c.expectedQty ?? "—"} box${c.expectedQty === 1 ? "" : "es"}`
+                                      : `${c.collectedQty ?? 0} of ${c.expectedQty ?? "—"} boxes`
+                                    : null;
+                                return (
+                                  <div
+                                    key={c.id}
+                                    className="rounded border border-ink-border bg-white/60 px-3 py-2 text-[12px]"
                                   >
-                                    <span className="font-semibold">{c.type === "CREDIT_RETURN" ? "CR" : "UPL"}</span>
-                                    <span className="opacity-50">·</span>
-                                    {c.collectionNo}
-                                  </span>
-                                  {c.originalInvoiceNo && (
-                                    <span className="text-ink-muted">
-                                      against {c.originalInvoiceNo}
-                                    </span>
-                                  )}
-                                  {(c.lines?.length ?? 0) > 0 ? (
-                                    // Items against the office's sheet, once it was read.
-                                    <span className="font-mono text-ink-muted">
-                                      {c.status === "PENDING"
-                                        ? `${c.lines!.filter((l) => !l.isExtra).reduce((n, l) => n + l.qtyListed, 0)} items`
-                                        : `${c.lines!.reduce((n, l) => n + (l.qtyCollected ?? 0), 0)} of ${c.lines!
-                                            .filter((l) => !l.isExtra)
-                                            .reduce((n, l) => n + l.qtyListed, 0)} items`}
-                                    </span>
-                                  ) : (
-                                    (c.collectedQty != null || c.expectedQty != null) && (
-                                      <span className="font-mono text-ink-muted">
-                                        {c.collectedQty ?? 0} of {c.expectedQty ?? "—"}
+                                    {/* What it is, and how far along. */}
+                                    <div className="flex items-center gap-x-2 gap-y-1 flex-wrap">
+                                      {/* Type and number in one chip, coloured by
+                                          status to match the key above. */}
+                                      <span
+                                        className={`badge-sm ${collectionChipClass(c.status)}`}
+                                        title={`${c.type === "CREDIT_RETURN" ? "Credit return" : "Non-credit uplift"} — ${
+                                          COLLECTION_STATUS_LABEL[c.status] ?? c.status
+                                        }`}
+                                      >
+                                        <span className="font-semibold">{c.type === "CREDIT_RETURN" ? "CR" : "UPL"}</span>
+                                        <span className="opacity-50">·</span>
+                                        {c.collectionNo}
                                       </span>
-                                    )
-                                  )}
-                                  {c.hasVariance && (
-                                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-amber-dim text-ink-amber">
-                                      NOT AS LISTED
-                                    </span>
-                                  )}
-                                  {/* Said in words as well, so it never rests on
-                                      colour alone. */}
-                                  <span className="text-[11px] font-mono text-ink-muted">
-                                    {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
-                                  </span>
-                                  {c.exceptionReason && (
-                                    <span className="text-ink-amber truncate max-w-[18rem]">
-                                      {c.exceptionReason}
-                                    </span>
-                                  )}
-                                  {c.signedFilePath && (
-                                    <a
-                                      href={`/api/collections/document/${encodeURIComponent(c.signedFilePath)}?signed=true`}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      onClick={(e) => e.stopPropagation()}
-                                      className="font-mono text-[11px] text-ink-violet hover:underline"
-                                    >
-                                      Receipt
-                                    </a>
-                                  )}
-                                  {/* By id, not filename: finds a document the office
-                                      added after this sheet was imported. */}
-                                  <a
-                                      href={`/api/collections/${c.id}/source`}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      onClick={(e) => e.stopPropagation()}
-                                      className="font-mono text-[11px] text-ink-muted hover:text-ink-black hover:underline"
-                                    >
-                                      Document
-                                    </a>
-                                  {/* The office's sheet: read into lines, or
-                                      missing, or needing a look. */}
-                                  <CollectionSheetPanel collection={c} onChanged={fetchTripSheets} />
-                                  {/* The customer rang to say not to collect. */}
-                                  {c.status === "PENDING" && (
-                                    <RemoveCollectionButton
-                                      collection={{ id: c.id, collectionNo: c.collectionNo, customerName: stop.customerName }}
-                                      stopHasOtherWork={!!stop.invoiceNumber || (stop.collections?.length ?? 0) > 1}
-                                      onRemoved={fetchTripSheets}
-                                    />
-                                  )}
-                                </div>
-                              ))}
+                                      {/* Said in words as well, so it never rests on
+                                          colour alone. */}
+                                      <span className="text-[11px] font-mono font-medium text-ink-black">
+                                        {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
+                                      </span>
+                                      {quantity && <span className="font-mono text-ink-muted">· {quantity}</span>}
+                                      {c.originalInvoiceNo && (
+                                        <span className="text-ink-muted">· against invoice {c.originalInvoiceNo}</span>
+                                      )}
+                                      {c.hasVariance && (
+                                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-amber-dim text-ink-amber">
+                                          NOT AS LISTED
+                                        </span>
+                                      )}
+                                    </div>
+                                    {c.exceptionReason && (
+                                      <p className="mt-1 text-ink-amber">{c.exceptionReason}</p>
+                                    )}
+
+                                    {/* The paperwork, and the office's actions. */}
+                                    <div className="mt-1.5 flex items-center gap-x-3 gap-y-1 flex-wrap">
+                                      {/* The office's sheet: read into lines, or
+                                          missing, or needing a look. Once the
+                                          collection is settled, "No sheet" is
+                                          no longer something to act on. */}
+                                      {(c.status === "PENDING" || (c.sheetStatus && c.sheetStatus !== "MISSING")) && (
+                                        <CollectionSheetPanel collection={c} onChanged={fetchTripSheets} />
+                                      )}
+                                      {/* Only when there is one to open. By id, not
+                                          filename: finds a document the office
+                                          added after this sheet was imported. */}
+                                      {c.sourceFilePath && (
+                                        <a
+                                          href={`/api/collections/${c.id}/source`}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="font-mono text-[11px] text-ink-muted hover:text-ink-black hover:underline"
+                                        >
+                                          Office sheet
+                                        </a>
+                                      )}
+                                      {c.signedFilePath && (
+                                        <a
+                                          href={`/api/collections/document/${encodeURIComponent(c.signedFilePath)}?signed=true`}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="font-mono text-[11px] text-ink-violet hover:underline"
+                                        >
+                                          Signed receipt
+                                        </a>
+                                      )}
+                                      {/* The customer rang to say not to collect. */}
+                                      {c.status === "PENDING" && (
+                                        <span className="ml-auto">
+                                          <RemoveCollectionButton
+                                            collection={{ id: c.id, collectionNo: c.collectionNo, customerName: stop.customerName }}
+                                            stopHasOtherWork={!!stop.invoiceNumber || (stop.collections?.length ?? 0) > 1}
+                                            onRemoved={fetchTripSheets}
+                                          />
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
                             </div>
                           )}
-                          {/* Line 2: Email button + Status badge.
+{/* Line 2: Email button + Status badge.
                               The confirmation goes out automatically on
                               signature, so this button is a resend — or the
                               recovery when the automatic attempt failed. */}

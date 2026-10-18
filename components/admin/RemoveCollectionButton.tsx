@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { createPortal } from "react-dom";
 
 /**
  * Take a collection off a live run — the customer rang to say not to collect.
@@ -69,7 +70,10 @@ export default function RemoveCollectionButton({
         Remove…
       </button>
 
-      {open && (
+      {/* Rendered on the page body, not inside the trip card: the card's
+          styles make a "fixed" overlay relative to the card instead of the
+          screen, which clipped the dialog and hid its buttons. */}
+      {open && createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in"
           onClick={(e) => {
@@ -77,7 +81,7 @@ export default function RemoveCollectionButton({
             if (!saving) setOpen(false);
           }}
         >
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="px-6 py-5 space-y-4">
               <div>
                 <h3 className="font-mono text-sm font-medium text-ink-black">
@@ -134,7 +138,8 @@ export default function RemoveCollectionButton({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 /**
  * The office's collection sheet for one collection, on the trip card: a badge
@@ -136,7 +137,10 @@ export default function CollectionSheetPanel({
         {status !== "MISSING" && ` · ${lines.length}`}
       </button>
 
-      {open && (
+      {/* Rendered on the page body, not inside the trip card: the card's
+          styles make a "fixed" overlay relative to the card instead of the
+          screen, which clipped the dialog and hid its buttons. */}
+      {open && createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in"
           onClick={(e) => {
@@ -148,7 +152,7 @@ export default function CollectionSheetPanel({
             className="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4 overflow-hidden max-h-[90vh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="px-6 py-4 border-b border-ink-border">
+            <div className="shrink-0 px-6 py-4 border-b border-ink-border">
               <h3 className="font-mono text-sm font-medium text-ink-black">
                 Collection sheet · {collection.collectionNo}
               </h3>
@@ -161,7 +165,7 @@ export default function CollectionSheetPanel({
               </p>
             </div>
 
-            <div className="px-6 py-4 overflow-y-auto space-y-4">
+            <div className="flex-1 min-h-0 px-6 py-4 overflow-y-auto space-y-4">
               {status === "MISSING" && collection.sheetError && (
                 <p className="text-xs px-2.5 py-1.5 rounded border bg-ink-red-dim/40 text-ink-red border-ink-red/20">
                   Last attempt to read the sheet failed: {collection.sheetError}
@@ -242,7 +246,7 @@ export default function CollectionSheetPanel({
               )}
             </div>
 
-            <div className="flex flex-wrap justify-end gap-2 px-6 py-4 border-t border-ink-border bg-ink-surface/50">
+            <div className="shrink-0 flex flex-wrap justify-end gap-2 px-6 py-4 border-t border-ink-border bg-ink-surface/50">
               <a
                 href={`/api/collections/${collection.id}/source`}
                 target="_blank"
@@ -298,7 +302,8 @@ export default function CollectionSheetPanel({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

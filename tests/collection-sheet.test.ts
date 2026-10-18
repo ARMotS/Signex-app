@@ -27,6 +27,11 @@ describe("reading the client's credit collection sheet", () => {
     });
   });
 
+  it("reads the number when it is printed apart from the title", async () => {
+    const sheet = await read(await collectionSheetPdf({ number: "900004", numberApart: true }));
+    expect(sheet.collectionNo).toBe("900004");
+  });
+
   it("reads each line across its two baselines: Qty expected, Returned as printed, the Reason code", async () => {
     const sheet = await read(await collectionSheetPdf());
     expect(sheet.lines).toEqual([
