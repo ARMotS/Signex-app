@@ -64,6 +64,7 @@ interface TripCollection {
   signedFilePath?: string | null;
   sheetStatus?: SheetCollection["sheetStatus"];
   sheetIssues?: SheetCollection["sheetIssues"];
+  sheetError?: SheetCollection["sheetError"];
   lines?: SheetCollection["lines"];
   hasVariance?: boolean;
 }
@@ -243,11 +244,15 @@ const canMoveStop = (s: TripStop) =>
   s.status !== "SIGNED" && (s.collections ?? []).every((c) => c.status === "PENDING");
 
 /** Every delivery signed (collections are checked by the server on Complete). */
+// The same rule the server enforces in completeTripSheet: every delivery
+// signed AND every collection given an outcome. Checking deliveries alone let a
+// collection-only trip show a full bar and a Complete button the server refused.
 const tripCompletable = (t: TripSheet) =>
   (t.stops.length > 0 ||
     (t.removedStops?.length ?? 0) > 0 ||
     (t.reallocatedOut?.length ?? 0) > 0) &&
-  t.stops.every(deliveryDone);
+  t.stops.every(deliveryDone) &&
+  t.stops.every((s) => (s.collections ?? []).every((c) => c.status !== "PENDING"));
 
 function unsentEmails(stops: TripStop[]) {
   const failed: TripStop[] = [];
@@ -2835,9 +2840,6 @@ export default function TripSheetPage() {
               const reallocTargets = [...new Set(reallocatedOut.map((r) => r.toDriverName))];
               const reallocSources = [...new Set(reallocatedIn.map((r) => r.fromDriverName))];
               const canReallocate = trip.stops.some(canMoveStop);
-              const pct = total > 0
-                ? Math.round((signed / total) * 100)
-                : tripCompletable(trip) ? 100 : 0;
               // A trip cannot be closed out until its collections have outcomes
               // too, so the dispatcher needs to see them here rather than
               // discovering them in the error when Archive is pressed.
@@ -2845,6 +2847,18 @@ export default function TripSheetPage() {
               const collectionsDone = tripCollections.filter(
                 (c) => c.status !== "PENDING"
               ).length;
+              // Progress counts collections as well as deliveries: a
+              // collection-only run (0 deliveries) used to read as 100% done.
+              // Only a trip the server will actually complete reaches 100.
+              const steps = total + tripCollections.length;
+              const pct =
+                steps > 0
+                  ? tripCompletable(trip)
+                    ? 100
+                    : Math.min(99, Math.round(((signed + collectionsDone) / steps) * 100))
+                  : tripCompletable(trip)
+                  ? 100
+                  : 0;
               const collectionExceptions = tripCollections.filter((c) =>
                 COLLECTION_EXCEPTIONS.has(c.status)
               ).length;
@@ -2979,7 +2993,10 @@ export default function TripSheetPage() {
                           />
                         </div>
                         <span className="text-[12px] sm:text-xs font-mono text-ink-muted shrink-0">
-                          {signed}/{total} signed
+                          {/* "0/0 signed" said nothing on a collection-only run. */}
+                          {total > 0 || tripCollections.length === 0
+                            ? `${signed}/${total} signed`
+                            : `${collectionsDone}/${tripCollections.length} collected`}
                           {removedStops.length > 0 && (
                             <span className="text-ink-red"> · {removedStops.length} removed</span>
                           )}

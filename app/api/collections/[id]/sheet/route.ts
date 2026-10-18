@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
-import { saveCollectionDocument, sanitizeCollectionFilename } from "@/lib/collections";
+import {
+  resolveCollectionSource,
+  saveCollectionDocument,
+  sanitizeCollectionFilename,
+} from "@/lib/collections";
 import { looksLikePdf, MAX_INVOICE_UPLOAD_BYTES } from "@/lib/invoices";
 import { loadCollectionSheet, type SheetLoadResult } from "@/lib/collection-sheet-sync";
 
@@ -23,7 +27,14 @@ import { loadCollectionSheet, type SheetLoadResult } from "@/lib/collection-shee
 async function loadOpen(ctx: Awaited<ReturnType<typeof getScope>>, id: string) {
   const collection = await ctx.db.collection.findFirst({
     where: { id },
-    select: { id: true, collectionNo: true, status: true, tripSheetId: true, sheetStatus: true },
+    select: {
+      id: true,
+      collectionNo: true,
+      status: true,
+      tripSheetId: true,
+      sheetStatus: true,
+      sourceFilePath: true,
+    },
   });
   if (!collection) {
     return { error: NextResponse.json({ error: "Collection not found" }, { status: 404 }) };
@@ -120,6 +131,11 @@ export const PUT = withAuth(async (
   const body = await request.json().catch(() => ({}));
 
   if (body.action === "reread") {
+    // A collection still marked "No sheet" may have none recorded yet: look
+    // it up in the folder first, as the automatic re-check would.
+    if (!open.collection.sourceFilePath) {
+      await resolveCollectionSource(ctx.tenantId, open.collection);
+    }
     return respond(await loadCollectionSheet(ctx.tenantId, id, { by: ctx.name }));
   }
 

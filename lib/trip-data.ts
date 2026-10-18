@@ -68,6 +68,8 @@ export interface TripCollection {
   /** The driver recorded "Not as listed". */
   hasVariance?: boolean;
   failReason?: string | null;
+  /** Why the last attempt to read the office's sheet failed, if it did. */
+  sheetError?: string | null;
 }
 
 export interface TripCollectionLine {
@@ -1310,6 +1312,7 @@ interface RawCollection {
   lines?: TripCollectionLine[];
   hasVariance?: boolean;
   failReason?: string | null;
+  sheetError?: string | null;
 }
 
 /**
@@ -1355,6 +1358,7 @@ function mapCollection(collection: RawCollection): TripCollection {
     })),
     hasVariance: collection.hasVariance,
     failReason: collection.failReason,
+    sheetError: collection.sheetError,
   };
 }
 

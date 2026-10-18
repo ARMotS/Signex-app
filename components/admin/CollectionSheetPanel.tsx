@@ -33,6 +33,8 @@ export interface SheetCollection {
   status: string;
   sheetStatus?: "MISSING" | "READY" | "NEEDS_REVIEW";
   sheetIssues?: { code: string; level: "review" | "warning"; message: string }[] | null;
+  /** Why the last attempt to read the sheet failed — shown, never swallowed. */
+  sheetError?: string | null;
   lines?: SheetLine[];
 }
 
@@ -124,7 +126,9 @@ export default function CollectionSheetPanel({
         className={`font-mono text-[11px] px-1.5 py-0.5 rounded border ${badge.className}`}
         title={
           status === "MISSING"
-            ? "No collection sheet found yet — the driver collects against the box count"
+            ? collection.sheetError
+              ? `The sheet could not be read: ${collection.sheetError}`
+              : "No collection sheet found yet — the driver collects against the box count"
             : `${lines.length} line(s) read from the office's sheet`
         }
       >
@@ -158,6 +162,11 @@ export default function CollectionSheetPanel({
             </div>
 
             <div className="px-6 py-4 overflow-y-auto space-y-4">
+              {status === "MISSING" && collection.sheetError && (
+                <p className="text-xs px-2.5 py-1.5 rounded border bg-ink-red-dim/40 text-ink-red border-ink-red/20">
+                  Last attempt to read the sheet failed: {collection.sheetError}
+                </p>
+              )}
               {issues.length > 0 && (
                 <ul className="space-y-1.5">
                   {issues.map((issue) => (
@@ -262,15 +271,14 @@ export default function CollectionSheetPanel({
                   >
                     Attach collection sheet
                   </button>
-                  {status !== "MISSING" && (
-                    <button
-                      onClick={() => act("reread")}
-                      disabled={busy}
-                      className="px-3 py-2 text-xs font-mono rounded border border-ink-border bg-white hover:bg-ink-surface disabled:opacity-60"
-                    >
-                      Read again
-                    </button>
-                  )}
+                  {/* Also on "No sheet": it looks the sheet up in the folder first. */}
+                  <button
+                    onClick={() => act("reread")}
+                    disabled={busy}
+                    className="px-3 py-2 text-xs font-mono rounded border border-ink-border bg-white hover:bg-ink-surface disabled:opacity-60"
+                  >
+                    {status === "MISSING" ? "Look for sheet" : "Read again"}
+                  </button>
                   {status === "NEEDS_REVIEW" && (
                     <button
                       onClick={() => act("approve")}
