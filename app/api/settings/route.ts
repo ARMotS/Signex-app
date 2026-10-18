@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readConfig, writeConfig, validateFolderPath } from "@/lib/config";
+import { readConfig, writeConfig, validateFolderPath, parseVatRatePercent } from "@/lib/config";
 import { assertCollectionsFolderIsSibling } from "@/lib/collections";
 import { compileInvoiceNoPattern, type InvoiceNoPattern } from "@/lib/invoice-number";
 import { renormalizeInvoiceNumbers } from "@/lib/trip-data";
@@ -84,6 +84,15 @@ export const PUT = withAuth(async (request: NextRequest) => {
       return NextResponse.json({ error: "Keep the declaration under 600 characters." }, { status: 400 });
     }
     body.collectionDeclarationText = text;
+  }
+
+  // What a credit note's VAT line is checked against. Blank = the default.
+  if (body.vatRatePercent !== undefined) {
+    const raw = String(body.vatRatePercent ?? "").trim();
+    if (raw && parseVatRatePercent(raw) === null) {
+      return NextResponse.json({ error: "Enter the VAT rate as a percentage between 0 and 50." }, { status: 400 });
+    }
+    body.vatRatePercent = raw ? String(parseVatRatePercent(raw)) : "";
   }
 
   // The invoice-number pattern runs server-side on every import, so it is

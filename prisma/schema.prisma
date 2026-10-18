@@ -58,6 +58,9 @@ model Tenant {
   rejectedLines RejectedLine[]
   reallocatedStops ReallocatedStop[]
   invoices      Invoice[]
+  creditNotes   CreditNote[]
+  creditNoteLines CreditNoteLine[]
+  creditNoteCollections CreditNoteCollection[]
 }
 
 model User {
@@ -454,6 +457,7 @@ model Collection {
   sheetReviewedBy   String?
   sheetReviewedAt   DateTime?
   lines             CollectionLine[]
+  creditNoteLinks   CreditNoteCollection[]
   /// The driver chose "Not as listed": what came back differs from the sheet.
   hasVariance       Boolean   @default(false)
   /// Why a collection failed: CUSTOMER_NOT_READY · GOODS_NOT_AVAILABLE ·
@@ -648,6 +652,7 @@ model Invoice {
   updatedAt           DateTime  @updatedAt
 
   collections Collection[]
+  creditNotes CreditNote[]
 
   @@unique([tenantId, invoiceNoNormalized])
   // Composite-FK target, as Stop's.
@@ -694,6 +699,16 @@ model CloudAccount {
   // other's documents. lib/collections.ts rejects a nested configuration.
   collectionsFolderPath   String?
   collectionsFolderItemId String?
+  // Credit notes: the folder the accounting software writes this branch's
+  // credit notes to, with flat Originals/ Signed/ Rejected/ beneath it. Not
+  // inside (or around) the invoice or collections folder — every listing here
+  // is extension-based. See lib/credit-intake.ts.
+  creditsFolderPath   String?
+  creditsFolderItemId String?
+  /// Last look at the credits folder — throttles the automatic check.
+  creditsCheckedAt    DateTime?
+  /// Why the last look failed, for the Credits page. Null when it worked.
+  creditsError        String?  @db.Text
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -916,4 +931,135 @@ model ReallocatedStop {
 
   @@index([tenantId, fromTripSheetId])
   @@index([tenantId, toTripSheetId])
+}
+
+// ─── Credit notes (lib/credit-note.ts, lib/credit-intake.ts) ─────────────
+
+/// RECEIVED: read, nothing for the office to look at. NEEDS_REVIEW: read,
+/// but something disagrees (shown as issues). SIGNED: signed off by the
+/// office and filed in Signed/. REJECTED: not this branch's to sign — a
+/// duplicate credit number, say — and moved to Rejected/.
+enum CreditNoteStatus {
+  RECEIVED
+  NEEDS_REVIEW
+  SIGNED
+  REJECTED
+}
+
+/// A credit note from the accounting software, read off its PDF in the
+/// branch's credits folder. Matched to the invoice it credits (the note never
+/// prints a collection number) and through that invoice to the collections
+/// whose goods it pays for.
+model CreditNote {
+  id                  String   @id @default(cuid())
+  tenantId            String   @default("")
+  tenant              Tenant   @relation(fields: [tenantId], references: [id])
+  /// As printed ("CR NOTE 407712"). Null when it could not be read.
+  creditNo            String?
+  /// The digits of creditNo. NOT unique: a duplicate is kept, as REJECTED.
+  creditNoNormalized  String?
+  /// creditNoNormalized while the note is live, null once it is rejected.
+  /// Its unique index is what makes two live notes with one number
+  /// impossible, even when two copies are picked up at the same moment.
+  creditNoClaim       String?
+  /// The invoice credited, as printed ("Inv No. 384281").
+  invoiceNo           String?
+  invoiceNoNormalized String?
+  /// The registry row for that invoice. Null when Signex has never seen it.
+  invoiceId           String?
+  /// The note's own date — its "Invoice date" box, not the Order date.
+  creditDate          DateTime? @db.Date
+  accountNo           String?
+  deliverToName       String?
+  billToName          String?
+  subtotal            Decimal? @db.Decimal(12, 2)
+  vatAmount           Decimal? @db.Decimal(12, 2)
+  total               Decimal? @db.Decimal(12, 2)
+  status              CreditNoteStatus @default(RECEIVED)
+  /// What the last check found: [{code, level, message}].
+  issues              Json?
+  /// TEXT (the PDF text layer, by position) or AI (a scan read by Claude).
+  readSource          String?
+  readAt              DateTime?
+  readError           String?  @db.Text
+  rejectReason        String?  @db.Text
+  /// The file. The OneDrive item id follows it through moves between
+  /// subfolders; the name is for display and for the signed copy's name.
+  sourceItemId        String
+  sourceFilename      String
+  /// Where the file sits now: Originals, root (dropped straight into the
+  /// credits folder), Rejected or Signed.
+  sourceFolder        String
+  /// The file's last-modified time when read: a re-saved note is read again.
+  sourceModifiedAt    DateTime?
+  /// A move between subfolders that failed — the row is right, the folder is not.
+  fileError           String?  @db.Text
+  /// Who uploaded it through Signex. Null when it was picked up from the folder.
+  uploadedBy          String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // Restrict, as Collection.invoice: an invoice is a durable anchor.
+  invoice     Invoice?               @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+  lines       CreditNoteLine[]
+  collections CreditNoteCollection[]
+
+  @@unique([tenantId, sourceItemId])
+  @@unique([tenantId, creditNoClaim])
+  // Composite-FK target, so a line or link cannot hang off another scope's note.
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
+  @@index([tenantId, invoiceNoNormalized])
+  @@index([tenantId, creditDate])
+}
+
+/// One line of a credit note, as printed. Quantities are what a credit is
+/// matched on; amounts are only checked against the note's own totals (returns
+/// carry a handling charge, so a credit never equals the invoice's price).
+model CreditNoteLine {
+  id           String   @id @default(cuid())
+  tenantId     String   @default("")
+  tenant       Tenant   @relation(fields: [tenantId], references: [id])
+  creditNoteId String
+  /// Position on the note, 1-based, across pages.
+  lineNo       Int
+  /// "Product no" — the same code the collection sheet prints.
+  productCode  String?
+  /// The unlabelled short-name column after Product no.
+  shortName    String?
+  bin          String?
+  description  String
+  qty          Decimal  @db.Decimal(12, 3)
+  unitPrice    Decimal? @db.Decimal(12, 2)
+  discountPct  Decimal? @db.Decimal(6, 2)
+  nett         Decimal? @db.Decimal(12, 2)
+  createdAt    DateTime @default(now())
+
+  creditNote CreditNote @relation(fields: [tenantId, creditNoteId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenantId, creditNoteId, lineNo])
+  @@index([tenantId, creditNoteId])
+}
+
+/// Which collections a credit note pays for. AUTO: found through the
+/// invoice. MANUAL: linked by the office. EXCLUDED: an AUTO link the office
+/// took away, kept so the next automatic check does not put it back.
+model CreditNoteCollection {
+  id           String   @id @default(cuid())
+  tenantId     String   @default("")
+  tenant       Tenant   @relation(fields: [tenantId], references: [id])
+  creditNoteId String
+  collectionId String
+  source       String
+  linkedBy     String?
+  createdAt    DateTime @default(now())
+
+  creditNote CreditNote @relation(fields: [tenantId, creditNoteId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  // Cascade: a collection deleted with its live trip takes its links with it.
+  // Completion detaches collections rather than deleting them, so the usual
+  // path keeps every link.
+  collection Collection @relation(fields: [tenantId, collectionId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenantId, creditNoteId, collectionId])
+  @@index([tenantId, collectionId])
 }

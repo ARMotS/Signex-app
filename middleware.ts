@@ -28,6 +28,7 @@ const ADMIN_ROUTES = [
   "/trip-sheet",
   "/invoices",
   "/collections",
+  "/credits",
   "/settings",
   "/backups",
   "/users",

@@ -126,6 +126,14 @@ export function assertCollectionsFolderIsSibling(
   return { ok: true };
 }
 
+/** True when either folder is, or sits inside, the other. Blank never overlaps. */
+export function foldersOverlap(a: string | null | undefined, b: string | null | undefined): boolean {
+  const x = (a ?? "").trim();
+  const y = (b ?? "").trim();
+  if (!x || !y) return false;
+  return isWithin(x, y) || isWithin(y, x);
+}
+
 // ─── Collection number normalisation ──────────────────────────────────────
 
 /**

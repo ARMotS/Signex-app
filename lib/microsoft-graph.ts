@@ -46,6 +46,18 @@ const SIGNED_SUBFOLDER = "signed";
 const COLLECTIONS_PENDING_SUBFOLDER = "Pending";
 const COLLECTIONS_SIGNED_SUBFOLDER = "Signed";
 
+/**
+ * Subfolders of the CREDITS folder — flat, by the client's choice: no year or
+ * month nesting, the Credits page sorts and filters instead. The accounting
+ * software writes to Originals/ (or straight into the folder); Signex files
+ * signed notes in Signed/ and moves the ones it will not sign to Rejected/.
+ */
+export const CREDITS_SUBFOLDERS = {
+  originals: "Originals",
+  signed: "Signed",
+  rejected: "Rejected",
+} as const;
+
 function getClientId(): string {
   const id = process.env.MICROSOFT_CLIENT_ID;
   if (!id) throw new Error("MICROSOFT_CLIENT_ID is not configured");
@@ -351,6 +363,8 @@ export async function getCloudAccountStatus(tenantId: string) {
     invoiceFolderItemId: account.invoiceFolderItemId,
     collectionsFolderPath: account.collectionsFolderPath,
     collectionsFolderItemId: account.collectionsFolderItemId,
+    creditsFolderPath: account.creditsFolderPath,
+    creditsFolderItemId: account.creditsFolderItemId,
   };
 }
 
@@ -1007,6 +1021,93 @@ export async function uploadSignedCollectionToOneDrive(
     buffer,
     "application/pdf"
   );
+}
+
+// ─── Credit notes ─────────────────────────────────────────────────────────
+
+/**
+ * Set the configured OneDrive folder for credit notes, for this scope. The
+ * caller checks it does not overlap the invoice or collections folder.
+ */
+export async function setOneDriveCreditsFolder(
+  tenantId: string,
+  folderPath: string,
+  folderItemId: string
+): Promise<void> {
+  await scopedPrisma(tenantId).cloudAccount.updateMany({
+    where: { provider: PROVIDER },
+    data: { creditsFolderPath: folderPath, creditsFolderItemId: folderItemId, creditsError: null },
+  });
+}
+
+export interface CreditFolderItem extends OneDriveItem {
+  /** Where it was found: Originals/, or dropped straight into the credits folder. */
+  creditsSubfolder: "Originals" | "root";
+}
+
+/**
+ * Credit notes waiting to be dealt with: Originals/, then PDFs sitting directly
+ * in the credits folder (Originals/ wins a name clash), as the collections
+ * folder reads Pending/ and its root. Never Signed/ or Rejected/.
+ *
+ * Null when this scope has no credits folder; throws when it cannot be read,
+ * so a broken connection is reported rather than looking like an empty folder.
+ */
+export async function listOneDriveCreditNotes(tenantId: string): Promise<CreditFolderItem[] | null> {
+  const account = await getAccount(tenantId);
+  if (!account?.creditsFolderItemId) return null;
+
+  const isPdf = (item: OneDriveItem) => !item.folder && item.name.toLowerCase().endsWith(".pdf");
+  const children = await listFolderById(tenantId, account.creditsFolderItemId);
+  const originalsFolder = children.find(
+    (item) => item.folder && item.name.toLowerCase() === CREDITS_SUBFOLDERS.originals.toLowerCase()
+  );
+  const originals = originalsFolder
+    ? (await listFolderById(tenantId, originalsFolder.id)).filter(isPdf)
+    : [];
+
+  const seen = new Set(originals.map((item) => item.name.toLowerCase()));
+  const root = children.filter((item) => isPdf(item) && !seen.has(item.name.toLowerCase()));
+
+  return [
+    ...originals.map((item) => ({ ...item, creditsSubfolder: "Originals" as const })),
+    ...root.map((item) => ({ ...item, creditsSubfolder: "root" as const })),
+  ];
+}
+
+/**
+ * Store an uploaded credit note in Originals/. Never replaces a file of the
+ * same name: null means one is already there.
+ */
+export async function uploadCreditNoteOriginal(
+  tenantId: string,
+  filename: string,
+  buffer: Buffer
+): Promise<OneDriveItem | null> {
+  const account = await getAccount(tenantId);
+  if (!account?.creditsFolderItemId) throw new Error("OneDrive credits folder not configured");
+
+  const originalsId = await ensureSubfolder(tenantId, account.creditsFolderItemId, CREDITS_SUBFOLDERS.originals);
+  const safe = assertSafeItemName(filename);
+  const existing = await graphGetOrNull<OneDriveItem>(
+    tenantId,
+    `/me/drive/items/${originalsId}:/${encodeURIComponent(safe)}`
+  );
+  if (existing) return null;
+
+  return uploadFileToFolder(tenantId, originalsId, safe, buffer, "application/pdf");
+}
+
+/** Move a credit note into Signed/ or Rejected/ (renamed on a clash, never overwritten). */
+export async function moveCreditNoteFile(
+  tenantId: string,
+  itemId: string,
+  to: "signed" | "rejected",
+  filename: string
+): Promise<void> {
+  const account = await getAccount(tenantId);
+  if (!account?.creditsFolderItemId) throw new Error("OneDrive credits folder not configured");
+  await moveFileToSubfolder(tenantId, itemId, account.creditsFolderItemId, CREDITS_SUBFOLDERS[to], filename);
 }
 
 /**

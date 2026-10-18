@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import InvoiceNumberSettings from "@/components/admin/InvoiceNumberSettings";
 import CollectionDeclarationSettings from "@/components/admin/CollectionDeclarationSettings";
+import CreditNoteSettings from "@/components/admin/CreditNoteSettings";
 
 interface OneDriveAccount {
   connected: boolean;
@@ -14,6 +15,8 @@ interface OneDriveAccount {
   invoiceFolderItemId?: string;
   collectionsFolderPath?: string;
   collectionsFolderItemId?: string;
+  creditsFolderPath?: string;
+  creditsFolderItemId?: string;
 }
 
 interface OneDriveFolder {
@@ -76,10 +79,13 @@ interface Settings {
   signaturePosition: SignaturePosition;
   invoiceNoPattern: string;
   collectionDeclarationText: string;
+  vatRatePercent: string;
 }
 
 /** The three folders an ADMIN configures. Collections is a SIBLING of invoices. */
 type FolderTarget = "invoices" | "tripsheets" | "collections";
+/** OneDrive has a fourth: credit notes, also a sibling of invoices. */
+type OnedriveTarget = FolderTarget | "credits";
 
 interface CloudSyncRoot {
   provider: string;
@@ -100,6 +106,7 @@ export default function SettingsPage() {
     signaturePosition: DEFAULT_SIG_POSITION,
     invoiceNoPattern: "",
     collectionDeclarationText: "",
+    vatRatePercent: "",
   });
   const [selectedPath, setSelectedPath] = useState("");
   const [browseData, setBrowseData] = useState<BrowseResult | null>(null);
@@ -142,7 +149,7 @@ export default function SettingsPage() {
   const [onedriveFolders, setOnedriveFolders] = useState<OneDriveFolder[]>([]);
   const [onedriveBrowsing, setOnedriveBrowsing] = useState(false);
   const [onedriveBrowserOpen, setOnedriveBrowserOpen] = useState(false);
-  const [onedriveBrowserTarget, setOnedriveBrowserTarget] = useState<FolderTarget>("tripsheets");
+  const [onedriveBrowserTarget, setOnedriveBrowserTarget] = useState<OnedriveTarget>("tripsheets");
   const [onedriveBreadcrumbs, setOnedriveBreadcrumbs] = useState<{ id: string; name: string }[]>([]);
   const [onedriveFolderSaving, setOnedriveFolderSaving] = useState(false);
   const [onedriveMessage, setOnedriveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -198,6 +205,8 @@ export default function SettingsPage() {
             invoiceFolderItemId: data.account.invoiceFolderItemId,
             collectionsFolderPath: data.account.collectionsFolderPath,
             collectionsFolderItemId: data.account.collectionsFolderItemId,
+            creditsFolderPath: data.account.creditsFolderPath,
+            creditsFolderItemId: data.account.creditsFolderItemId,
           });
         } else {
           setOnedrive(null);
@@ -227,6 +236,8 @@ export default function SettingsPage() {
               invoiceFolderItemId: data.account.invoiceFolderItemId,
               collectionsFolderPath: data.account.collectionsFolderPath,
               collectionsFolderItemId: data.account.collectionsFolderItemId,
+              creditsFolderPath: data.account.creditsFolderPath,
+              creditsFolderItemId: data.account.creditsFolderItemId,
             });
           }
         })
@@ -635,7 +646,7 @@ export default function SettingsPage() {
   };
 
   // OneDrive: open folder browser
-  const openOnedriveBrowser = (target: FolderTarget = "tripsheets") => {
+  const openOnedriveBrowser = (target: OnedriveTarget = "tripsheets") => {
     setOnedriveBrowserTarget(target);
     setOnedriveBrowserOpen(true);
     setOnedriveBreadcrumbs([]);
@@ -677,6 +688,8 @@ export default function SettingsPage() {
           setOnedrive((prev) => prev ? { ...prev, invoiceFolderPath: folderPath, invoiceFolderItemId: folder.id } : prev);
         } else if (onedriveBrowserTarget === "collections") {
           setOnedrive((prev) => prev ? { ...prev, collectionsFolderPath: folderPath, collectionsFolderItemId: folder.id } : prev);
+        } else if (onedriveBrowserTarget === "credits") {
+          setOnedrive((prev) => prev ? { ...prev, creditsFolderPath: folderPath, creditsFolderItemId: folder.id } : prev);
         } else {
           setOnedrive((prev) => prev ? { ...prev, folderPath, folderItemId: folder.id } : prev);
         }
@@ -686,6 +699,8 @@ export default function SettingsPage() {
             ? "Invoice folder"
             : onedriveBrowserTarget === "collections"
             ? "Collections folder"
+            : onedriveBrowserTarget === "credits"
+            ? "Credits folder"
             : "Trip sheet folder";
         setOnedriveMessage({ type: "success", text: `${label} set: ${folderPath}` });
         setTimeout(() => setOnedriveMessage(null), 4000);
@@ -876,6 +891,34 @@ export default function SettingsPage() {
                 </p>
               </div>
 
+              {/* Credits Folder selection — where the accounting software writes
+                  this branch's credit notes. Its own folder, beside Invoices and
+                  Collections: every listing here is by extension. */}
+              <div className="space-y-3">
+                <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
+                  Credits Folder
+                </p>
+                <div className="flex items-center gap-3 p-3 bg-ink-surface border border-ink-border rounded">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={onedrive.creditsFolderPath ? "#00C07F" : "#888580"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                  <span className="flex-1 text-sm font-mono text-ink-black truncate">
+                    {onedrive.creditsFolderPath || "No folder selected"}
+                  </span>
+                  <button
+                    onClick={() => openOnedriveBrowser("credits")}
+                    className="text-xs font-mono text-[#0078D4] hover:text-[#005a9e] transition-colors px-3 py-1.5 border border-[#0078D4]/30 rounded hover:bg-[#0078D4]/5"
+                  >
+                    {onedrive.creditsFolderPath ? "Change" : "Choose Folder"}
+                  </button>
+                </div>
+                <p className="text-[11px] text-ink-muted">
+                  Point the accounting software at this folder (one per branch). Signex reads credit
+                  notes from it and from its <code>Originals</code> subfolder, files signed ones in{" "}
+                  <code>Signed</code> and moves ones it will not sign to <code>Rejected</code>.
+                </p>
+              </div>
+
               {/* Trip Sheet Folder selection */}
               <div className="space-y-3">
                 <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
@@ -949,7 +992,9 @@ export default function SettingsPage() {
                     ? "PDF invoices"
                     : onedriveBrowserTarget === "collections"
                       ? "collection files"
-                      : "trip sheet files"}
+                      : onedriveBrowserTarget === "credits"
+                        ? "credit notes"
+                        : "trip sheet files"}
                 </p>
               </div>
               <button
@@ -1300,6 +1345,12 @@ export default function SettingsPage() {
       <InvoiceNumberSettings
         savedPattern={settings.invoiceNoPattern || ""}
         onSaved={(invoiceNoPattern) => setSettings((prev) => ({ ...prev, invoiceNoPattern }))}
+      />
+
+      {/* ─── Credit notes: the VAT rate their VAT line is checked against ─ */}
+      <CreditNoteSettings
+        savedRate={settings.vatRatePercent || ""}
+        onSaved={(vatRatePercent) => setSettings((prev) => ({ ...prev, vatRatePercent }))}
       />
 
       {/* ─── Collection Receipt declaration ─────────────────────────── */}

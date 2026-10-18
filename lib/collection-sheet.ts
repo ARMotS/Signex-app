@@ -105,7 +105,7 @@ function readHeader(items: TextItem[]): Omit<ParsedSheet, "lines"> {
  * as its own run, so a run IS a cell — far more reliable than re-deriving
  * columns from the gaps between words, which close up whenever a cell is full.
  */
-interface Cell {
+export interface Cell {
   text: string;
   x: number;
   right: number;
@@ -114,7 +114,7 @@ interface Cell {
   height: number;
 }
 
-function toCells(items: TextItem[]): Cell[] {
+export function toCells(items: TextItem[]): Cell[] {
   return items
     .filter((item) => item.str.trim())
     .map((item) => {
@@ -131,7 +131,7 @@ function toCells(items: TextItem[]): Cell[] {
 }
 
 /** The words inside a cell, each with an estimated position. */
-function tokens(cell: Cell): { text: string; x: number }[] {
+export function tokens(cell: Cell): { text: string; x: number }[] {
   const perChar = (cell.right - cell.x) / Math.max(cell.text.length, 1);
   return [...cell.text.matchAll(/\S+/g)].map((m) => ({ text: m[0], x: cell.x + (m.index ?? 0) * perChar }));
 }
@@ -144,7 +144,7 @@ function tokens(cell: Cell): { text: string; x: number }[] {
  * description and the 12pt product no / Qty — about 6pt from top to bottom —
  * while lines are 20pt apart.
  */
-function toRows(cells: Cell[]): Cell[][] {
+export function toRows(cells: Cell[]): Cell[][] {
   const rows: Cell[][] = [];
   let prev: Cell | null = null;
   for (const cell of [...cells].sort((a, b) => a.cy - b.cy)) {
@@ -163,7 +163,7 @@ const isInt = (s: string) => /^\d{1,6}$/.test(s);
  * joined back. A gap under about three-quarters of the text height is a space
  * inside a cell; the client's narrowest column gap is 14pt at 9pt text.
  */
-function joinTouching(cells: Cell[]): { x: number; text: string }[] {
+export function joinTouching(cells: Cell[]): { x: number; text: string }[] {
   const out: { x: number; right: number; text: string; height: number }[] = [];
   for (const c of [...cells].sort((a, b) => a.x - b.x)) {
     const last = out[out.length - 1];

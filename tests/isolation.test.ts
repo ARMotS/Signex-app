@@ -4105,4 +4105,246 @@ suite("cross-ADMIN isolation", () => {
       expect((await db().collection.findUniqueOrThrow({ where: { id: collection.id } })).status).toBe("COLLECTED");
     });
   });
+
+  // ── Credit notes ─────────────────────────────────────────────────────
+  describe("credit notes", () => {
+    /**
+     * A collection against invoice 384281 that has come back: the battery on
+     * CR-407712, one collected. Each scope gets its own — same numbers on
+     * purpose, so a note can only ever find the caller's.
+     */
+    async function collectedAgainst384281(fx: typeof f.a, collectionNo: string) {
+      const { saveTripSheet } = await import("@/lib/trip-data");
+      const trip = await saveTripSheet(fx.tenantId, {
+        driverId: fx.driver.id,
+        driverName: fx.driver.name,
+        regNo: "REG-CN",
+        uploadedBy: fx.admin.id,
+        sourceFilename: `credit-${collectionNo}.csv`,
+        stops: [
+          {
+            stopNumber: 1,
+            invoiceNumber: "",
+            customerName: "HELDERBERG MOTOR SPARES",
+            address: "",
+            nop: 0,
+            status: "PENDING",
+            collections: [
+              {
+                id: "preview-id",
+                collectionNo,
+                type: "CREDIT_RETURN",
+                originalInvoiceNo: "384281",
+                status: "PENDING",
+                expectedQty: 1,
+              },
+            ],
+          },
+        ],
+      });
+      const collection = await db().collection.findFirstOrThrow({ where: { tripSheetId: trip.id, collectionNo } });
+      await db().collectionLine.create({
+        data: {
+          tenantId: fx.tenantId,
+          collectionId: collection.id,
+          lineNo: 1,
+          itemCode: "618ABG",
+          shortName: "BATTERY",
+          description: "BATT BM-618B41LB1 41AH 360CCA",
+          qtyListed: 1,
+          qtyCollected: 1,
+        },
+      });
+      await db().collection.update({
+        where: { id: collection.id },
+        data: { status: "COLLECTED", collectedQty: 1, collectedAt: new Date(), driverId: fx.driver.id },
+      });
+      return collection;
+    }
+
+    const notePdf = async (opts: { creditNo?: string } = {}) => {
+      const { creditNotePdf } = await import("./helpers/credit-note-fixture");
+      return creditNotePdf(opts);
+    };
+
+    const ingest = async (fx: typeof f.a, itemId: string, opts: { creditNo?: string } = {}) => {
+      const { ingestCreditNote } = await import("@/lib/credit-intake");
+      return ingestCreditNote(
+        fx.tenantId,
+        { itemId, filename: `CR-${opts.creditNo ?? "407712"}-C007H014.pdf`, subfolder: "Originals", lastModified: new Date().toISOString() },
+        await notePdf(opts)
+      );
+    };
+
+    beforeAll(async () => {
+      for (const [fx, label] of [[f.a, "A"], [f.b, "B"]] as const) {
+        await db().cloudAccount.updateMany({
+          where: { tenantId: fx.tenantId },
+          data: { creditsFolderItemId: `credits-folder-${label}`, creditsFolderPath: `/Credits-${label}` },
+        });
+      }
+    });
+
+    it("matches a note to the caller's own invoice and collection, never another scope's", async () => {
+      const mine = await collectedAgainst384281(f.a, "CN-1");
+      const theirs = await collectedAgainst384281(f.b, "CN-1");
+
+      const result = await ingest(f.a, "item-a-407712");
+      expect(result).toMatchObject({ outcome: "read", status: "RECEIVED", issues: [] });
+
+      const note = await db().creditNote.findFirstOrThrow({
+        where: { sourceItemId: "item-a-407712" },
+        include: { collections: true, lines: true, invoice: true },
+      });
+      expect(note.tenantId).toBe(f.a.tenantId);
+      expect(note.invoice?.tenantId).toBe(f.a.tenantId);
+      expect(note.collections.map((l) => [l.collectionId, l.source])).toEqual([[mine.id, "AUTO"]]);
+      expect(note.lines).toHaveLength(1);
+      expect(note.lines[0].tenantId).toBe(f.a.tenantId);
+      expect(await db().creditNoteCollection.count({ where: { collectionId: theirs.id } })).toBe(0);
+      expect(await db().creditNote.count({ where: { tenantId: f.b.tenantId } })).toBe(0);
+    });
+
+    it("rejects a second note with a credit number already received — within one scope only", async () => {
+      const first = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-a-407712" } });
+
+      const again = await ingest(f.a, "item-a-407712-copy");
+      expect(again).toMatchObject({ outcome: "duplicate", duplicateOf: first.id });
+      const copy = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-a-407712-copy" } });
+      expect(copy).toMatchObject({ status: "REJECTED", creditNoClaim: null, creditNoNormalized: "407712" });
+
+      // The same number is another scope's own business.
+      const inB = await ingest(f.b, "item-b-407712");
+      expect(inB.outcome).toBe("read");
+      expect(await db().creditNote.count({ where: { tenantId: f.b.tenantId, status: "REJECTED" } })).toBe(0);
+    });
+
+    it("the list carries only the caller's notes, and is closed to drivers", async () => {
+      const { GET } = await import("@/app/api/credit-notes/route");
+
+      useSession(adminSession(f.b));
+      const body = await (await GET(req("/api/credit-notes"))).json();
+      expect(body.creditNotes.map((n: { id: string }) => n.id).sort()).toEqual(
+        (await db().creditNote.findMany({ where: { tenantId: f.b.tenantId }, select: { id: true } })).map((n) => n.id).sort()
+      );
+      expect(body.folder.path).toBe("/Credits-B");
+      expect(body.counts.REJECTED).toBe(0);
+
+      useSession(driverSession(f.a));
+      expect((await GET(req("/api/credit-notes"))).status).toBe(403);
+    });
+
+    it("ADMIN 2 reading, re-reading, linking or opening ADMIN 1's note gets 404 and changes nothing", async () => {
+      const route = await import("@/app/api/credit-notes/[id]/route");
+      const doc = await import("@/app/api/credit-notes/[id]/document/route");
+      const note = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-a-407712" } });
+      const theirCollection = await collectedAgainst384281(f.b, "CN-2");
+
+      useSession(adminSession(f.b));
+      const id = note.id;
+      expect((await route.GET(req(`/api/credit-notes/${id}`), params({ id }))).status).toBe(404);
+      expect(
+        (await route.PUT(req(`/api/credit-notes/${id}`, { method: "PUT", body: { action: "reread" } }), params({ id }))).status
+      ).toBe(404);
+      expect(
+        (
+          await route.PUT(
+            req(`/api/credit-notes/${id}`, { method: "PUT", body: { action: "link", collectionId: theirCollection.id } }),
+            params({ id })
+          )
+        ).status
+      ).toBe(404);
+      expect((await doc.GET(req(`/api/credit-notes/${id}/document`), params({ id }))).status).toBe(404);
+
+      expect(await db().creditNoteCollection.count({ where: { creditNoteId: id, collectionId: theirCollection.id } })).toBe(0);
+      expect(graphCalls.some((c) => c.token === "access-token-B")).toBe(false);
+    });
+
+    it("ADMIN 1 cannot link another scope's collection to their own note", async () => {
+      const { PUT } = await import("@/app/api/credit-notes/[id]/route");
+      const note = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-a-407712" } });
+      const theirCollection = await collectedAgainst384281(f.b, "CN-3");
+
+      useSession(adminSession(f.a));
+      const res = await PUT(
+        req(`/api/credit-notes/${note.id}`, { method: "PUT", body: { action: "link", collectionId: theirCollection.id } }),
+        params({ id: note.id })
+      );
+      expect(res.status).toBe(404);
+      expect(await db().creditNoteCollection.count({ where: { collectionId: theirCollection.id } })).toBe(0);
+    });
+
+    it("an AUTO link the office takes away stays away; a pending collection is not linkable", async () => {
+      const { PUT, GET } = await import("@/app/api/credit-notes/[id]/route");
+      const note = await db().creditNote.findFirstOrThrow({
+        where: { sourceItemId: "item-a-407712" },
+        include: { collections: true },
+      });
+      const collectionId = note.collections[0].collectionId;
+      useSession(adminSession(f.a));
+
+      const unlinked = await PUT(
+        req(`/api/credit-notes/${note.id}`, { method: "PUT", body: { action: "unlink", collectionId } }),
+        params({ id: note.id })
+      );
+      expect(unlinked.status).toBe(200);
+      // Opening the note re-checks it — and must not put the link back.
+      await GET(req(`/api/credit-notes/${note.id}`), params({ id: note.id }));
+      const link = await db().creditNoteCollection.findFirstOrThrow({ where: { creditNoteId: note.id, collectionId } });
+      expect(link.source).toBe("EXCLUDED");
+      expect((await db().creditNote.findUniqueOrThrow({ where: { id: note.id } })).status).toBe("NEEDS_REVIEW");
+
+      const pending = await db().collection.findFirstOrThrow({ where: { tenantId: f.a.tenantId, status: "PENDING" } });
+      const refused = await PUT(
+        req(`/api/credit-notes/${note.id}`, { method: "PUT", body: { action: "link", collectionId: pending.id } }),
+        params({ id: note.id })
+      );
+      expect(refused.status).toBe(409);
+
+      // Put back for the tests after.
+      await PUT(
+        req(`/api/credit-notes/${note.id}`, { method: "PUT", body: { action: "link", collectionId } }),
+        params({ id: note.id })
+      );
+      expect((await db().creditNote.findUniqueOrThrow({ where: { id: note.id } })).status).toBe("RECEIVED");
+    });
+
+    it("a folder check lists and downloads with the caller's own connection only", async () => {
+      const pdf = await notePdf({ creditNo: "407800" });
+      const fetchMock = vi.mocked(fetch);
+      const original = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation(async (url: any, init: any) => {
+        const u = String(url);
+        const auth: string | undefined = init?.headers?.Authorization;
+        graphCalls.push({ url: `${init?.method ?? "GET"} ${u}`, token: auth ? auth.replace("Bearer ", "") : null });
+        if (u.includes("items/credits-folder-A/children")) {
+          return new Response(
+            JSON.stringify({
+              value: [{ id: "folder-cn-1", name: "CR-407800-C007H014.pdf", size: pdf.length, lastModifiedDateTime: new Date().toISOString(), file: { mimeType: "application/pdf" } }],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (u.includes("items/folder-cn-1/content")) {
+          return new Response(new Uint8Array(pdf), { status: 200, headers: { "Content-Type": "application/pdf" } });
+        }
+        return new Response(JSON.stringify({ value: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+      try {
+        const { POST } = await import("@/app/api/credit-notes/sync/route");
+        useSession(adminSession(f.a));
+        const res = await POST(req("/api/credit-notes/sync", { method: "POST" }));
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ outcome: "checked", inFolder: 1, read: 1 });
+      } finally {
+        fetchMock.mockImplementation(original);
+      }
+
+      const tokens = new Set(graphCalls.map((c) => c.token).filter(Boolean));
+      expect([...tokens]).toEqual(["access-token-A"]);
+      const note = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "folder-cn-1" } });
+      expect(note).toMatchObject({ tenantId: f.a.tenantId, creditNo: "407800", sourceFolder: "root" });
+      expect(await db().creditNote.count({ where: { tenantId: f.b.tenantId, sourceItemId: "folder-cn-1" } })).toBe(0);
+    });
+  });
 });

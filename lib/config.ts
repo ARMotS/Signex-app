@@ -56,7 +56,15 @@ export interface SignexConfig {
    * `{companyName}` is filled in. Empty means DEFAULT_COLLECTION_DECLARATION.
    */
   collectionDeclarationText: string;
+  /**
+   * The VAT rate a credit note's VAT line is checked against, in percent
+   * ("15"). Empty means DEFAULT_VAT_RATE_PERCENT. Only ever a check on the
+   * note's own arithmetic — Signex never computes VAT for anyone.
+   */
+  vatRatePercent: string;
 }
+
+export const DEFAULT_VAT_RATE_PERCENT = 15;
 
 const DEFAULT_CONFIG: SignexConfig = {
   invoiceFolderPath: "",
@@ -68,6 +76,7 @@ const DEFAULT_CONFIG: SignexConfig = {
   signaturePosition: DEFAULT_SIGNATURE_POSITION,
   invoiceNoPattern: "",
   collectionDeclarationText: "",
+  vatRatePercent: "",
 };
 
 /**
@@ -94,6 +103,8 @@ export async function readConfig(tenantId: string): Promise<SignexConfig> {
         config.invoiceNoPattern = row.value;
       } else if (row.key === "collectionDeclarationText") {
         config.collectionDeclarationText = row.value;
+      } else if (row.key === "vatRatePercent") {
+        config.vatRatePercent = row.value;
       } else if (row.key === "signaturePosition") {
         try {
           config.signaturePosition = JSON.parse(row.value);
@@ -184,6 +195,20 @@ export async function readCollectionDeclaration(tenantId: string): Promise<strin
   ]);
   const company = process.env.COMPANY_NAME || tenant?.companyName || tenant?.name || "";
   return collectionDeclaration(config.collectionDeclarationText, company);
+}
+
+/** "15" → 15. Blank or out of range is the default. */
+export function parseVatRatePercent(raw: string | null | undefined): number | null {
+  const t = String(raw ?? "").trim().replace(/%$/, "").trim();
+  if (!t) return null;
+  const n = Number(t);
+  return Number.isFinite(n) && n >= 0 && n <= 50 ? n : null;
+}
+
+/** This scope's VAT rate as a fraction (0.15). */
+export async function readVatRate(tenantId: string): Promise<number> {
+  const config = await readConfig(tenantId);
+  return (parseVatRatePercent(config.vatRatePercent) ?? DEFAULT_VAT_RATE_PERCENT) / 100;
 }
 
 /**
