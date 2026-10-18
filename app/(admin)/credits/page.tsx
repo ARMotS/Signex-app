@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import SignaturePad, { type SignaturePadHandle } from "@/components/SignaturePad";
 
 /**
  * Credit notes from the accounting software, read off the branch's credits
@@ -37,6 +38,9 @@ interface CreditRow {
   fileError: string | null;
   readSource: string | null;
   uploadedBy: string | null;
+  signedByName: string | null;
+  signedAt: string | null;
+  filingError: string | null;
   receivedAt: string;
 }
 
@@ -101,6 +105,18 @@ interface CreditDetail {
     lines: { id: string; lineNo: number; itemCode: string | null; description: string; qtyListed: number; qtyCollected: number | null; isExtra: boolean; type: string }[];
   }[];
   candidates: { id: string; collectionNo: string; originalInvoiceNo: string | null; customerName: string | null; collectedAt: string | null; status: string }[];
+  signedByName: string | null;
+  signedByLogin: string | null;
+  signedAt: string | null;
+  acknowledgedIssues: Issue[];
+  acknowledgement: string | null;
+  signedFilename: string | null;
+  filedAt: string | null;
+  filingError: string | null;
+  originalRemoved: boolean;
+  rejectedBy: string | null;
+  rejectedAt: string | null;
+  allocations: { lineNo: number; collectionNo: string; qty: number }[];
 }
 
 const STATUS_LABEL: Record<Status, { text: string; className: string }> = {
@@ -386,7 +402,10 @@ export default function CreditsPage() {
                   <td className="px-4 py-2.5 font-mono text-right whitespace-nowrap">{money(r.total)}</td>
                   <td className="px-4 py-2.5 whitespace-nowrap">
                     <StatusBadge status={r.status} />
-                    {r.status !== "REJECTED" && (r.reviewCount > 0 || r.warningCount > 0) && (
+                    {r.status === "SIGNED" && r.filingError && (
+                      <span className="ml-2 text-[11px] font-mono text-ink-amber" title={r.filingError}>filing pending</span>
+                    )}
+                    {r.status !== "SIGNED" && r.status !== "REJECTED" && (r.reviewCount > 0 || r.warningCount > 0) && (
                       <span className="ml-2 text-[11px] font-mono text-ink-muted">
                         {r.reviewCount > 0 && <span className="text-ink-amber">{r.reviewCount} to check</span>}
                         {r.reviewCount > 0 && r.warningCount > 0 && " · "}
@@ -412,6 +431,8 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
   const [note, setNote] = useState<CreditDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  /** Bumped to load the note again (after signing). */
+  const [version, setVersion] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -426,7 +447,7 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, version]);
 
   const act = async (key: string, body: object) => {
     setBusy(key);
@@ -583,7 +604,16 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
                               {l.discountPct ? <span className="block text-[11px] text-ink-muted">less {l.discountPct}%</span> : null}
                             </td>
                             <td className="px-3 py-2 text-xs font-mono">
-                              {!l.match ? (
+                              {!l.match && note.status === "SIGNED" ? (
+                                // Signed: what it was frozen at, at signing.
+                                note.allocations.some((a) => a.lineNo === l.lineNo) ? (
+                                  <span className="text-ink-green">
+                                    ✓ {note.allocations.filter((a) => a.lineNo === l.lineNo).map((a) => `${a.qty} on ${a.collectionNo}`).join(", ")}
+                                  </span>
+                                ) : (
+                                  <span className="text-ink-muted">not matched</span>
+                                )
+                              ) : !l.match ? (
                                 <span className="text-ink-muted">—</span>
                               ) : l.match.status === "MATCHED" ? (
                                 <span className="text-ink-green">
@@ -690,15 +720,214 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
                 )}
               </div>
 
+              {/* Sign-off: the form while the note waits, the record once signed. */}
               {live && (
-                <p className="text-[11px] text-ink-muted border-t border-ink-border pt-4">
-                  Signing off credit notes comes in the next update. Until then this page checks each note
-                  against its invoice and what came back.
+                <SignOffForm
+                  id={id}
+                  issues={note.issues}
+                  canSign={!note.readError && !!note.creditNo}
+                  onDone={() => {
+                    setVersion((v) => v + 1);
+                    onChanged();
+                  }}
+                  onReject={(reason) => act("reject", { action: "reject", reason })}
+                  busy={!!busy}
+                />
+              )}
+              {note.status === "SIGNED" && (
+                <div className="border-t border-ink-border pt-4 space-y-2">
+                  <h3 className="font-mono text-xs text-ink-muted uppercase tracking-wide">Signed off</h3>
+                  <p className="text-sm text-ink-black">
+                    <span className="font-medium">{note.signedByName}</span>
+                    <span className="text-ink-muted">
+                      {" "}· office login {note.signedByLogin} · {note.signedAt ? ago(note.signedAt) : ""}
+                    </span>
+                  </p>
+                  {note.acknowledgedIssues.length > 0 && (
+                    <div className="text-xs text-ink-muted">
+                      Accepted despite: {note.acknowledgedIssues.map((i) => i.message).join(" ")}
+                      {note.acknowledgement && <span className="block text-ink-black mt-0.5">Reason: {note.acknowledgement}</span>}
+                    </div>
+                  )}
+                  {note.signedFilename ? (
+                    <p className="text-xs font-mono text-ink-muted">
+                      Filed in Signed/ as{" "}
+                      <a href={`/api/credit-notes/${id}/document`} target="_blank" rel="noreferrer" className="text-ink-green hover:underline">
+                        {note.signedFilename}
+                      </a>
+                      {note.originalRemoved ? " · original removed from Originals/" : ""}
+                    </p>
+                  ) : null}
+                  {note.filingError && (
+                    <div className="px-3 py-2 rounded border bg-ink-amber-dim border-ink-amber/20 text-xs text-ink-black flex flex-wrap items-center gap-2">
+                      <span className="flex-1">Filing has not finished: {note.filingError}</span>
+                      <button
+                        onClick={() => act("file", { action: "file" })}
+                        disabled={!!busy}
+                        className="px-2 py-1 font-mono border border-ink-border rounded bg-white hover:bg-ink-surface disabled:opacity-40"
+                      >
+                        {busy === "file" ? "Filing…" : "Retry filing"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+              {note.status === "REJECTED" && note.rejectedBy && (
+                <p className="text-xs font-mono text-ink-muted border-t border-ink-border pt-4">
+                  Rejected by {note.rejectedBy}
+                  {note.rejectedAt ? ` · ${ago(note.rejectedAt)}` : ""}
                 </p>
               )}
             </>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Signing off ─────────────────────────────────────────────────────────
+
+/**
+ * The dispatcher's sign-off: their typed name and drawn signature, under their
+ * own office login. Whatever the check found has to be accepted with a reason
+ * — it is printed on the sign-off page with the signature. Or the note is
+ * rejected, with a reason, and moved to Rejected/.
+ */
+function SignOffForm({
+  id,
+  issues,
+  canSign,
+  onDone,
+  onReject,
+  busy,
+}: {
+  id: string;
+  issues: Issue[];
+  canSign: boolean;
+  onDone: () => void;
+  onReject: (reason: string) => void;
+  busy: boolean;
+}) {
+  const padRef = useRef<SignaturePadHandle>(null);
+  const [name, setName] = useState("");
+  const [ack, setAck] = useState("");
+  const [hasSignature, setHasSignature] = useState(false);
+  const [signing, setSigning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
+
+  const ready = canSign && name.trim().length >= 2 && hasSignature && (issues.length === 0 || ack.trim().length >= 5);
+
+  const sign = async () => {
+    const signatureImage = padRef.current?.toDataURL();
+    if (!signatureImage) {
+      setError("Draw your signature to sign.");
+      return;
+    }
+    setSigning(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/credit-notes/${id}/sign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ signedByName: name.trim(), signatureImage, acknowledgement: ack.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) setError(data.error || "The credit note could not be signed");
+      else onDone();
+    } catch {
+      setError("Network error");
+    } finally {
+      setSigning(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-ink-border pt-4 space-y-3">
+      <h3 className="font-mono text-xs text-ink-muted uppercase tracking-wide">Sign off</h3>
+      {!canSign ? (
+        <p className="text-sm text-ink-amber">
+          This note was not read properly, so it cannot be signed. Read it again, or reject it.
+        </p>
+      ) : (
+        <>
+          {issues.length > 0 && (
+            <label className="block">
+              <span className="text-xs text-ink-black">
+                The check above found {issues.length} thing{issues.length === 1 ? "" : "s"}. Why is it fine to sign anyway?
+              </span>
+              <textarea
+                value={ack}
+                onChange={(e) => setAck(e.target.value)}
+                rows={2}
+                maxLength={600}
+                placeholder="e.g. Customer kept one unit; credit agreed with accounts"
+                className="mt-1 w-full px-3 py-2 text-sm bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-green resize-y"
+              />
+            </label>
+          )}
+          <label className="block">
+            <span className="text-xs text-ink-black">Your name</span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              maxLength={80}
+              placeholder="As it should appear on the sign-off page"
+              className="mt-1 w-full sm:w-80 px-3 py-2 text-sm bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-green"
+            />
+          </label>
+          <div className="max-w-md">
+            <SignaturePad ref={padRef} onChange={setHasSignature} label="Your signature" placeholder="Sign here" height={130} />
+          </div>
+          <p className="text-[11px] text-ink-muted">
+            Signed under your office login. A sign-off page is added to the credit note, the signed copy is filed in
+            Signed/ and the original is removed from Originals/.
+          </p>
+          {error && <p className="text-xs font-mono text-ink-red">{error}</p>}
+        </>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        {canSign && (
+          <button
+            onClick={sign}
+            disabled={!ready || signing || busy}
+            className="px-4 py-2 text-sm font-mono font-medium text-white bg-ink-green rounded hover:bg-ink-green-hover disabled:opacity-40"
+          >
+            {signing ? "Signing…" : "Sign credit note"}
+          </button>
+        )}
+        {!rejecting ? (
+          <button
+            onClick={() => setRejecting(true)}
+            disabled={signing || busy}
+            className="px-3 py-2 text-xs font-mono text-ink-muted hover:text-ink-red hover:underline disabled:opacity-40"
+          >
+            Reject…
+          </button>
+        ) : (
+          <div className="w-full flex flex-wrap items-center gap-2">
+            <input
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              maxLength={600}
+              placeholder="Why it will not be signed (moved to Rejected/)"
+              className="flex-1 min-w-[14rem] px-3 py-2 text-sm bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-red"
+            />
+            <button
+              onClick={() => onReject(rejectReason.trim())}
+              disabled={rejectReason.trim().length < 3 || busy}
+              className="px-3 py-2 text-xs font-mono font-medium text-white bg-ink-red rounded hover:opacity-90 disabled:opacity-40"
+            >
+              Reject credit note
+            </button>
+            <button onClick={() => setRejecting(false)} className="px-2 py-2 text-xs font-mono text-ink-muted hover:text-ink-black">
+              Cancel
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

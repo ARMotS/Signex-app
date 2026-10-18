@@ -888,7 +888,7 @@ const PAGE_HEIGHT = 841.89;
  * whole receipt. Same rule as invoices.ts latin1, keeping the punctuation the
  * receipt itself uses.
  */
-function pdfText(text: string): string {
+export function pdfText(text: string): string {
   return String(text ?? "")
     .replace(/[^\x20-\x7E\xA0-\xFF\u2013\u2014\u2018\u2019\u201C\u201D\u2022\u2026]/g, "")
     .replace(/\s+/g, " ")

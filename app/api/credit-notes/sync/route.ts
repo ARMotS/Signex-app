@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { syncCreditsFolder } from "@/lib/credit-intake";
+import { retryPendingFilings } from "@/lib/credit-signoff";
 
 /**
  * POST /api/credit-notes/sync — "Check folder": look at the credits folder now
@@ -18,7 +19,10 @@ export const POST = withAuth(async () => {
       return NextResponse.json({ error: "Choose a credits folder in Settings → OneDrive first." }, { status: 409 });
     case "error":
       return NextResponse.json({ error: `The credits folder could not be read: ${result.error}` }, { status: 502 });
-    default:
-      return NextResponse.json({ success: true, ...result });
+    default: {
+      // Signed notes whose filing did not finish get another go too.
+      const refiled = result.outcome === "checked" ? await retryPendingFilings(ctx.tenantId) : 0;
+      return NextResponse.json({ success: true, ...result, refiled });
+    }
   }
 });

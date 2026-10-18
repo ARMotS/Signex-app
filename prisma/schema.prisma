@@ -61,6 +61,7 @@ model Tenant {
   creditNotes   CreditNote[]
   creditNoteLines CreditNoteLine[]
   creditNoteCollections CreditNoteCollection[]
+  creditNoteAllocations CreditNoteAllocation[]
 }
 
 model User {
@@ -996,6 +997,35 @@ model CreditNote {
   fileError           String?  @db.Text
   /// Who uploaded it through Signex. Null when it was picked up from the folder.
   uploadedBy          String?
+
+  // ── Sign-off (lib/credit-signoff.ts) ──
+  /// The name the dispatcher typed.
+  signedByName        String?
+  /// The office login that signed — the session's name, not something typed.
+  signedByLogin       String?
+  signedByUserId      String?
+  signedAt            DateTime?
+  /// PNG data URL of the drawn signature. Cleared once the signed copy is
+  /// filed: that PDF is the record. Kept while filing has not succeeded, so
+  /// a retry can still build it.
+  signature           String?  @db.Text
+  /// The issues the dispatcher saw and accepted when signing, and why.
+  acknowledgedIssues  Json?
+  acknowledgement     String?  @db.Text
+  /// The signed copy in Signed/ (original pages + the sign-off page).
+  signedFileId        String?
+  signedFilename      String?
+  filedAt             DateTime?
+  /// Why filing (or removing the original) did not finish — the signature
+  /// stands either way; the office can retry.
+  filingError         String?  @db.Text
+  /// The signed copy really contains the original's pages. Only then may the
+  /// original be removed (as Collection.signedIncludesSource).
+  signedIncludesSource Boolean @default(false)
+  /// The unsigned original was removed from Originals/ after filing.
+  originalRemoved     Boolean  @default(false)
+  rejectedBy          String?
+  rejectedAt          DateTime?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -1003,6 +1033,7 @@ model CreditNote {
   invoice     Invoice?               @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
   lines       CreditNoteLine[]
   collections CreditNoteCollection[]
+  allocations CreditNoteAllocation[]
 
   @@unique([tenantId, sourceItemId])
   @@unique([tenantId, creditNoClaim])
@@ -1052,6 +1083,9 @@ model CreditNoteCollection {
   collectionId String
   source       String
   linkedBy     String?
+  /// The collection's signed receipt got this note's reference page appended.
+  /// Set once, so a retried filing never appends it twice.
+  receiptStampedAt DateTime?
   createdAt    DateTime @default(now())
 
   creditNote CreditNote @relation(fields: [tenantId, creditNoteId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
@@ -1061,5 +1095,29 @@ model CreditNoteCollection {
   collection Collection @relation(fields: [tenantId, collectionId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([tenantId, creditNoteId, collectionId])
+  @@index([tenantId, collectionId])
+}
+
+/// What a SIGNED credit note paid for, frozen at signing: so many of this
+/// collected line. A later note matches against what is left. No FK to the
+/// collection line — like RemovedStop, a record outlives what it describes.
+model CreditNoteAllocation {
+  id               String   @id @default(cuid())
+  tenantId         String   @default("")
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  creditNoteId     String
+  /// The credit note line it came from.
+  lineNo           Int
+  collectionId     String
+  collectionLineId String
+  collectionNo     String
+  itemCode         String?
+  qty              Decimal  @db.Decimal(12, 3)
+  createdAt        DateTime @default(now())
+
+  creditNote CreditNote @relation(fields: [tenantId, creditNoteId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([tenantId, creditNoteId])
+  @@index([tenantId, collectionLineId])
   @@index([tenantId, collectionId])
 }

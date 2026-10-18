@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { reassessCreditNote, rereadCreditNote, setCreditNoteLink } from "@/lib/credit-intake";
+import { fileSignedCreditNote, rejectCreditNote } from "@/lib/credit-signoff";
 import type { CreditIssue, LineMatch } from "@/lib/credit-note";
 
 /**
@@ -29,6 +30,7 @@ async function detail(ctx: Ctx, id: string) {
     where: { id },
     include: {
       lines: { orderBy: { lineNo: "asc" } },
+      allocations: { orderBy: { lineNo: "asc" } },
       invoice: { select: { id: true, invoiceNo: true, customerName: true, invoiceDate: true, pdfFilename: true, isStub: true } },
       collections: {
         include: {
@@ -96,6 +98,19 @@ async function detail(ctx: Ctx, id: string) {
     fileError: note.fileError,
     uploadedBy: note.uploadedBy,
     receivedAt: note.createdAt.toISOString(),
+    signedByName: note.signedByName,
+    signedByLogin: note.signedByLogin,
+    signedAt: note.signedAt?.toISOString() ?? null,
+    acknowledgedIssues: (note.acknowledgedIssues as unknown as CreditIssue[] | null) ?? [],
+    acknowledgement: note.acknowledgement,
+    signedFilename: note.signedFilename,
+    filedAt: note.filedAt?.toISOString() ?? null,
+    filingError: note.filingError,
+    originalRemoved: note.originalRemoved,
+    rejectedBy: note.rejectedBy,
+    rejectedAt: note.rejectedAt?.toISOString() ?? null,
+    // What a signed note paid for, as frozen at signing.
+    allocations: note.allocations.map((a) => ({ lineNo: a.lineNo, collectionNo: a.collectionNo, qty: Number(a.qty) })),
     invoice: note.invoice
       ? { ...note.invoice, invoiceDate: note.invoice.invoiceDate?.toISOString().slice(0, 10) ?? null }
       : null,
@@ -182,6 +197,19 @@ export const PUT = withAuth(async (
         { status: 409 }
       );
     }
+  } else if (body.action === "reject") {
+    const result = await rejectCreditNote(ctx.tenantId, id, body.reason, ctx.name);
+    if (result.outcome === "not_found") return NextResponse.json({ error: "Credit note not found" }, { status: 404 });
+    if (result.outcome === "invalid") return NextResponse.json({ error: result.error }, { status: 400 });
+    if (result.outcome === "closed") {
+      return NextResponse.json({ error: "This credit note has already been signed or rejected." }, { status: 409 });
+    }
+  } else if (body.action === "file") {
+    // Retry whatever filing a signed note has left — never re-signs.
+    const exists = await ctx.db.creditNote.findFirst({ where: { id }, select: { status: true } });
+    if (!exists) return NextResponse.json({ error: "Credit note not found" }, { status: 404 });
+    if (exists.status !== "SIGNED") return NextResponse.json({ error: "Only a signed credit note is filed." }, { status: 409 });
+    await fileSignedCreditNote(ctx.tenantId, id);
   } else {
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   }
