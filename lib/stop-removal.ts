@@ -191,6 +191,114 @@ export async function removeStopFromTrip(
   };
 }
 
+export type RemoveCollectionResult =
+  | { outcome: "removed"; removedCollectionId: string; collectionNo: string; stopRemoved: boolean }
+  | { outcome: "not_found" }
+  /** The driver has already recorded what happened — that is settled. */
+  | { outcome: "done" }
+  /** Its trip has completed and been archived. */
+  | { outcome: "closed" };
+
+/**
+ * Take a collection off a live run before the driver gets to it — the
+ * customer rang to say not to collect.
+ *
+ * Only while the collection is still PENDING on a live trip: once the driver
+ * has recorded an outcome, the goods (or the refusal) are a fact, and the
+ * receipt says so. The delete is conditional on that inside the transaction,
+ * so a driver confirming at the door at the same moment wins cleanly.
+ *
+ * The stop goes too when the collection was all it held: a collection-only
+ * stop with nothing left to collect would sit on the driver's run as an empty
+ * visit. A stop with a delivery or other collections stays.
+ *
+ * The record (RemovedCollection) is written in the same transaction, so the
+ * office always sees what was taken off and why.
+ */
+export async function removeCollectionFromTrip(
+  tenantId: string,
+  collectionId: string,
+  opts: { reason: string; removedBy: string }
+): Promise<RemoveCollectionResult> {
+  const db = scopedPrisma(tenantId);
+
+  const collection = await db.collection.findFirst({
+    where: { id: collectionId },
+    include: {
+      stop: { select: { id: true, stopNumber: true, invoiceNumber: true, customerName: true } },
+      tripSheet: { select: { id: true, driverId: true } },
+      _count: { select: { lines: true } },
+    },
+  });
+  if (!collection) return { outcome: "not_found" };
+  if (!collection.tripSheet || !collection.stop) return { outcome: "closed" };
+  if (collection.status !== "PENDING") return { outcome: "done" };
+
+  const { stop, tripSheet } = collection;
+  const driver = await db.driver.findFirst({ where: { id: tripSheet.driverId }, select: { name: true } });
+
+  const result = await db.$transaction(async (tx) => {
+    const deleted = await tx.collection.deleteMany({
+      where: { id: collectionId, status: "PENDING", tripSheetId: { not: null } },
+    });
+    // Recorded by the driver (or removed) between the read above and now.
+    if (deleted.count === 0) return null;
+
+    // An empty collection-only stop comes off the run with it.
+    let stopRemoved = false;
+    if (!stop.invoiceNumber) {
+      const left = await tx.collection.count({ where: { stopId: stop.id } });
+      if (left === 0) {
+        const gone = await tx.stop.deleteMany({ where: { id: stop.id, invoiceNumber: "" } });
+        stopRemoved = gone.count > 0;
+      }
+    }
+
+    const record = await tx.removedCollection.create({
+      data: {
+        tripSheetId: tripSheet.id,
+        driverId: tripSheet.driverId,
+        driverName: driver?.name ?? "Unknown",
+        stopNumber: stop.stopNumber,
+        collectionNo: collection.collectionNo,
+        type: collection.type,
+        customerName: stop.customerName,
+        originalInvoiceNo: collection.originalInvoiceNo,
+        expectedQty: collection.expectedQty,
+        lineCount: collection._count.lines,
+        stopRemoved,
+        reason: opts.reason,
+        removedBy: opts.removedBy,
+      },
+      select: { id: true },
+    });
+    return { id: record.id, stopRemoved };
+  });
+
+  if (!result) {
+    const now = await db.collection.findFirst({ where: { id: collectionId }, select: { status: true } });
+    return now ? { outcome: "done" } : { outcome: "not_found" };
+  }
+
+  await logAudit({
+    action: "STATUS_CHANGE",
+    entity: "collection",
+    entityId: collectionId,
+    userName: opts.removedBy,
+    details: `Collection ${collection.collectionNo} (${stop.customerName}) removed from stop ${stop.stopNumber} for driver ${
+      driver?.name ?? "Unknown"
+    }${result.stopRemoved ? " — stop removed with it" : ""}: ${opts.reason}`,
+    tenantId,
+  });
+
+  return {
+    outcome: "removed",
+    removedCollectionId: result.id,
+    collectionNo: collection.collectionNo,
+    stopRemoved: result.stopRemoved,
+  };
+}
+
 /** One live stop that uses an invoice PDF — what the Invoices page warns about. */
 export interface InvoiceTripUsage {
   filename: string;

@@ -4026,6 +4026,72 @@ suite("cross-ADMIN isolation", () => {
       expect((await put(withoutLines.id, { mode: "AS_LISTED", signedByName: "J", signatureImage: SIGNATURE })).status).toBe(400);
     });
 
+    // ── Removing a collection from the run ──
+    const removeCollection = async (id: string, body: object) => {
+      const { DELETE } = await import("@/app/api/collections/[id]/route");
+      return DELETE(req(`/api/collections/${id}`, { method: "DELETE", body }), params({ id }));
+    };
+
+    it("removes a pending collection, its empty stop, and keeps a record in the caller's scope", async () => {
+      const collection = await liveCollection(f.a, "1950");
+      useSession(adminSession(f.a));
+
+      const res = await removeCollection(collection.id, { reason: "Customer cancelled the collection" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ outcome: "removed", stopRemoved: true });
+
+      expect(await db().collection.findUnique({ where: { id: collection.id } })).toBeNull();
+      expect(await db().stop.findUnique({ where: { id: collection.stopId! } })).toBeNull();
+      const record = await db().removedCollection.findFirstOrThrow({ where: { collectionNo: "1950" } });
+      expect(record).toMatchObject({
+        tenantId: f.a.tenantId,
+        tripSheetId: collection.tripSheetId,
+        reason: "Customer cancelled the collection",
+        stopRemoved: true,
+        customerName: "VISA AUTO ELECTRICAL",
+      });
+      expect(await db().removedCollection.count({ where: { tenantId: f.b.tenantId } })).toBe(0);
+
+      // A run emptied this way can still be closed out.
+      const { completeTripSheet } = await import("@/lib/trip-data");
+      expect((await completeTripSheet(f.a.tenantId, collection.tripSheetId!, "Admin")).success).toBe(true);
+    });
+
+    it("keeps a stop that still has a delivery", async () => {
+      const collection = await liveCollection(f.a, "1951");
+      await db().stop.update({ where: { id: collection.stopId! }, data: { invoiceNumber: "INV-1951" } });
+      useSession(adminSession(f.a));
+
+      const res = await removeCollection(collection.id, { reason: "Rebooked for another day" });
+      expect(await res.json()).toMatchObject({ outcome: "removed", stopRemoved: false });
+      expect(await db().stop.findUnique({ where: { id: collection.stopId! } })).not.toBeNull();
+    });
+
+    it("ADMIN 2 removing ADMIN 1's collection gets 404 and nothing changes; drivers are refused", async () => {
+      const collection = await liveCollection(f.a, "1952");
+
+      useSession(adminSession(f.b));
+      expect((await removeCollection(collection.id, { reason: "x" })).status).toBe(404);
+      useSession(driverSession(f.a));
+      expect((await removeCollection(collection.id, { reason: "x" })).status).toBe(403);
+
+      expect(await db().collection.findUnique({ where: { id: collection.id } })).not.toBeNull();
+      expect(await db().removedCollection.count({ where: { collectionNo: "1952" } })).toBe(0);
+    });
+
+    it("refuses without a reason, and once the driver has recorded the outcome", async () => {
+      const collection = await liveCollection(f.a, "1953");
+      useSession(adminSession(f.a));
+      expect((await removeCollection(collection.id, { reason: "  " })).status).toBe(400);
+
+      await db().collection.update({
+        where: { id: collection.id },
+        data: { status: "REFUSED", exceptionReason: "Customer refused", collectedAt: new Date() },
+      });
+      expect((await removeCollection(collection.id, { reason: "Customer cancelled" })).status).toBe(409);
+      expect(await db().collection.findUnique({ where: { id: collection.id } })).not.toBeNull();
+    });
+
     it("still accepts the direct outcome from a phone running the previous screen", async () => {
       const collection = await collectionWithLines(f.a, "1905");
       useSession(driverSession(f.a));

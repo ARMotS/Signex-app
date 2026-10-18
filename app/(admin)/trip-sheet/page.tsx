@@ -5,6 +5,7 @@ import { useLiveSync } from "@/hooks/useLiveSync";
 import { FilterSearch } from "@/components/admin/FilterSearch";
 import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 import CollectionSheetPanel, { type SheetCollection } from "@/components/admin/CollectionSheetPanel";
+import RemoveCollectionButton from "@/components/admin/RemoveCollectionButton";
 
 interface TripStop {
   id: string;
@@ -45,6 +46,18 @@ interface RemovedStop {
   removedBy: string;
   removedAt: string;
   keptForCollections: boolean;
+}
+
+/** A collection the office took off the run before it was collected. */
+interface RemovedCollectionRecord {
+  id: string;
+  stopNumber: number;
+  collectionNo: string;
+  customerName: string;
+  reason: string;
+  removedBy: string;
+  removedAt: string;
+  stopRemoved: boolean;
 }
 
 /** A collection hanging off a stop — goods coming back with the driver. */
@@ -129,6 +142,8 @@ interface TripSheet {
   stops: TripStop[];
   /** Invoices taken off this run before they were signed. */
   removedStops?: RemovedStop[];
+  /** Collections taken off this run before they were collected. */
+  removedCollections?: RemovedCollectionRecord[];
   /** Stops handed to another driver. */
   reallocatedOut?: Reallocation[];
   /** Stops taken over from another driver's run. */
@@ -2835,6 +2850,7 @@ export default function TripSheetPage() {
               const signed = deliveries.filter((s) => s.status === "SIGNED").length;
               const total = deliveries.length;
               const removedStops = trip.removedStops ?? [];
+              const removedCollections = trip.removedCollections ?? [];
               const reallocatedOut = trip.reallocatedOut ?? [];
               const reallocatedIn = trip.reallocatedIn ?? [];
               const reallocTargets = [...new Set(reallocatedOut.map((r) => r.toDriverName))];
@@ -2977,6 +2993,16 @@ export default function TripSheetPage() {
                               .join(", ")}. Open the sheet for reasons.`}
                           >
                             {removedStops.length} INVOICE{removedStops.length !== 1 ? "S" : ""} REMOVED
+                          </span>
+                        )}
+                        {removedCollections.length > 0 && (
+                          <span
+                            className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-red-dim text-ink-red border border-ink-red/20"
+                            title={`Taken off this run before collection: ${removedCollections
+                              .map((r) => r.collectionNo)
+                              .join(", ")}. Open the sheet for reasons.`}
+                          >
+                            {removedCollections.length} COLLECTION{removedCollections.length !== 1 ? "S" : ""} REMOVED
                           </span>
                         )}
                         {stopHits > 0 && (
@@ -3290,6 +3316,14 @@ export default function TripSheetPage() {
                                   {/* The office's sheet: read into lines, or
                                       missing, or needing a look. */}
                                   <CollectionSheetPanel collection={c} onChanged={fetchTripSheets} />
+                                  {/* The customer rang to say not to collect. */}
+                                  {c.status === "PENDING" && (
+                                    <RemoveCollectionButton
+                                      collection={{ id: c.id, collectionNo: c.collectionNo, customerName: stop.customerName }}
+                                      stopHasOtherWork={!!stop.invoiceNumber || (stop.collections?.length ?? 0) > 1}
+                                      onRemoved={fetchTripSheets}
+                                    />
+                                  )}
                                 </div>
                               ))}
                             </div>
@@ -3477,6 +3511,32 @@ export default function TripSheetPage() {
                                 <span className="text-ink-muted-light">
                                   {r.removedBy} · {formatDate(r.removedAt)}
                                   {r.keptForCollections && " · collections still on the run"}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {/* Collections taken off this run — the customer said
+                          not to collect. Gone from the driver's phone; this is
+                          where the office sees that it happened, and why. */}
+                      {removedCollections.length > 0 && (
+                        <div className="px-4 py-3 bg-ink-red-dim/20">
+                          <p className="text-[11px] font-mono text-ink-red uppercase tracking-wide mb-1.5">
+                            Collections removed from this run
+                          </p>
+                          <div className="space-y-1">
+                            {removedCollections.map((r) => (
+                              <div key={r.id} className="flex items-center gap-2 flex-wrap text-[12px]">
+                                <span className="font-mono text-ink-muted">#{r.stopNumber}</span>
+                                <span className="font-mono font-medium text-ink-black line-through decoration-ink-red/60">
+                                  {r.collectionNo}
+                                </span>
+                                <span className="text-ink-muted">{r.customerName}</span>
+                                <span className="text-ink-black">{r.reason}</span>
+                                <span className="text-ink-muted-light">
+                                  {r.removedBy} · {formatDate(r.removedAt)}
+                                  {r.stopRemoved && " · stop removed with it"}
                                 </span>
                               </div>
                             ))}

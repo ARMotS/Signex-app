@@ -65,6 +65,7 @@ export async function resetDatabase() {
   await p.invoice.deleteMany();
   await p.rejectedLine.deleteMany();
   await p.removedStop.deleteMany();
+  await p.removedCollection.deleteMany();
   await p.reallocatedStop.deleteMany();
   await p.stop.deleteMany();
   await p.tripSheet.deleteMany();

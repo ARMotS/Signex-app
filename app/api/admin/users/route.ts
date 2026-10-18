@@ -528,6 +528,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
       await tx.tripSheet.deleteMany({ where: { tenantId } });
       // No FK to TripSheet (it outlives the sheet), so it does not cascade.
       await tx.removedStop.deleteMany({ where: { tenantId } });
+      await tx.removedCollection.deleteMany({ where: { tenantId } });
       await tx.reallocatedStop.deleteMany({ where: { tenantId } });
       // The completed-trip archive (its resend records cascade with it). It
       // was never purged, so a workspace that had ever closed out a trip could

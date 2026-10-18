@@ -54,6 +54,7 @@ model Tenant {
   collections   Collection[]
   collectionLines CollectionLine[]
   removedStops  RemovedStop[]
+  removedCollections RemovedCollection[]
   rejectedLines RejectedLine[]
   reallocatedStops ReallocatedStop[]
   invoices      Invoice[]
@@ -822,6 +823,37 @@ model RemovedStop {
   removedAt          DateTime @default(now())
   tenantId           String   @default("")
   tenant             Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, tripSheetId])
+  @@index([tenantId, removedAt])
+}
+
+/// A collection the office took off a live run before the driver got to it —
+/// the customer rang to say not to collect. Written in the same transaction as
+/// the delete, and frozen like RemovedStop: deliberately no FK to TripSheet, so
+/// it outlives the run (completion deletes the sheet). Not cascaded by
+/// anything — the admin-workspace purge deletes it explicitly.
+model RemovedCollection {
+  id                String   @id @default(cuid())
+  tripSheetId       String
+  driverId          String
+  driverName        String
+  stopNumber        Int
+  collectionNo      String
+  type              String
+  customerName      String
+  originalInvoiceNo String?
+  /// The box count from the trip sheet.
+  expectedQty       Int?
+  /// Lines read off the office's sheet, if it had been read.
+  lineCount         Int      @default(0)
+  /// The stop had nothing else on it, so it came off the run too.
+  stopRemoved       Boolean  @default(false)
+  reason            String   @db.Text
+  removedBy         String
+  removedAt         DateTime @default(now())
+  tenantId          String   @default("")
+  tenant            Tenant   @relation(fields: [tenantId], references: [id])
 
   @@index([tenantId, tripSheetId])
   @@index([tenantId, removedAt])
