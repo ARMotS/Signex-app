@@ -6,6 +6,7 @@ import { FilterSearch } from "@/components/admin/FilterSearch";
 import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 import CollectionSheetPanel, { type SheetCollection } from "@/components/admin/CollectionSheetPanel";
 import RemoveCollectionButton from "@/components/admin/RemoveCollectionButton";
+import { DocChip, StatusBadge, collectionKind, collectionTone, invoiceTone } from "@/components/ui/Chips";
 
 interface TripStop {
   id: string;
@@ -110,22 +111,13 @@ const COLLECTION_STATUS_LABEL: Record<string, string> = {
   REFUSED: "Refused",
 };
 
-/**
- * One status palette for the expanded trip view, shared by invoice and
- * collection chips and by the key above them. Colour says how far along a
- * thing is; the chip's text says what it is (INV-123 vs CR · C001). The two
- * "done" colours differ so a signed invoice and a collected collection are
- * never confused: green is only ever a signed invoice, violet a collection.
+/*
+ * One status palette for every document chip and the key above them
+ * (components/ui/Chips.tsx): colour says how far along a thing is, the chip's
+ * prefix says what it is (INV · 900101, CR · 900001). The two "done" colours
+ * differ so a signed invoice and a collected collection are never confused:
+ * green is only ever a signed invoice, violet a collection.
  */
-const invoiceChipClass = (status: string) =>
-  status === "SIGNED" ? "badge-signed" : status === "IN_PROGRESS" ? "badge-progress" : "badge-idle";
-
-const collectionChipClass = (status: string) =>
-  status === "COLLECTED" || status === "PARTIAL"
-    ? "badge-credit"
-    : status === "NOT_AVAILABLE" || status === "REFUSED"
-    ? "badge-pending"
-    : "badge-idle";
 
 /** The three outcomes accounts has to look at before raising a credit. */
 const COLLECTION_EXCEPTIONS = new Set(["PARTIAL", "NOT_AVAILABLE", "REFUSED"]);
@@ -1710,9 +1702,7 @@ export default function TripSheetPage() {
                         {file.filename}
                       </p>
                       {duplicateCloudFilenames.has(file.filename) && (
-                        <span className="inline-flex items-center px-1.5 py-0.5 text-[9px] font-mono font-medium rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20 shrink-0">
-                          DUPLICATE
-                        </span>
+                        <StatusBadge tone="amber" className="shrink-0">Duplicate</StatusBadge>
                       )}
                     </div>
                     <p className="text-xs text-ink-muted">
@@ -1722,8 +1712,8 @@ export default function TripSheetPage() {
 
                   {/* Status / Action */}
                   {file.imported ? (
-                    <span className="badge-signed text-[10px] shrink-0">
-                      <span className="w-1.5 h-1.5 rounded-full bg-ink-green" />
+                    <span className="status tone-green shrink-0">
+                      <span className="status-dot" aria-hidden="true" />
                       Imported{file.importedAt ? ` ${new Date(file.importedAt).toLocaleDateString("en-ZA", { day: "2-digit", month: "short" })}` : ""}
                     </span>
                   ) : (
@@ -2390,10 +2380,7 @@ export default function TripSheetPage() {
                           )}
                         </p>
                       </div>
-                      <span className="badge-signed">
-                        <span className="w-1.5 h-1.5 rounded-full bg-ink-green" />
-                        Matched
-                      </span>
+                      <StatusBadge tone="green" dot>Matched</StatusBadge>
                     </div>
                     {/* Stop details */}
                     <div className="divide-y divide-ink-border">
@@ -2407,18 +2394,18 @@ export default function TripSheetPage() {
                           <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-ink-muted font-medium shrink-0">
                             {stop.stopNumber}
                           </span>
-                          <span className="font-mono font-medium text-ink-black min-w-[100px]">
-                            {stop.invoiceNumber || (
-                              <span className="font-normal text-ink-muted">Collection</span>
+                          <span className="min-w-[120px]">
+                            {stop.invoiceNumber ? (
+                              <DocChip kind="INV" number={stop.invoiceNumber} />
+                            ) : (
+                              <span className="font-mono text-ink-muted">Collection only</span>
                             )}
                           </span>
                           <span className="text-ink-muted truncate flex-1">
                             {stop.customerName}
                           </span>
                           {isSkipped ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-ink-red/10 text-ink-red no-underline">
-                              Skipped
-                            </span>
+                            <StatusBadge tone="red" className="no-underline">Skipped</StatusBadge>
                           ) : (
                             <>
                               {stop.nop > 0 && (
@@ -2429,31 +2416,35 @@ export default function TripSheetPage() {
                               {/* Each collection with whether its office sheet was
                                   found — the document that matters for a
                                   collection. Not finding one never blocks a deploy. */}
+                              {/* Each collection with whether its office sheet
+                                  was found. Not finding one never blocks a deploy. */}
                               {(stop.collections ?? []).map((c) => (
-                                <span
-                                  key={c.id}
-                                  className={`flex items-center gap-1 font-mono ${c.sourceFilePath ? "text-ink-violet" : "text-ink-muted"}`}
-                                  title={
-                                    c.sourceFilePath
-                                      ? `Collection sheet found: ${c.sourceFilePath}`
-                                      : "No collection sheet in the collections folder yet — it is looked for again until the trip starts"
-                                  }
-                                >
-                                  {c.type === "CREDIT_RETURN" ? "CR" : "UPL"} {c.collectionNo}
-                                  <span className="opacity-70">{c.sourceFilePath ? "· sheet ✓" : "· no sheet yet"}</span>
+                                <span key={c.id} className="flex items-center gap-1.5 flex-wrap">
+                                  <DocChip kind={collectionKind(c)} number={c.collectionNo} />
+                                  <StatusBadge
+                                    tone={c.sourceFilePath ? "green" : "idle"}
+                                    title={
+                                      c.sourceFilePath
+                                        ? `Collection sheet found: ${c.sourceFilePath}`
+                                        : "No collection sheet in the collections folder yet — it is looked for again until the trip starts"
+                                    }
+                                  >
+                                    {c.sourceFilePath ? "Sheet found" : "No sheet yet"}
+                                  </StatusBadge>
                                   {/* The invoice this is credited against — NOT a
                                       delivery, so never required; shown so the office
                                       can see the collection will link to its PDF. */}
                                   {c.originalInvoiceNo && (
                                     <span
-                                      className={c.originalInvoiceFile ? "text-ink-green" : "text-ink-muted"}
+                                      className="inline-flex items-center gap-1.5 text-ink-muted"
                                       title={
                                         c.originalInvoiceFile
                                           ? `Credited invoice found: ${c.originalInvoiceFile}`
                                           : "The credited invoice's PDF is not in the invoice folder — not needed to deploy; the collection is linked to the invoice number"
                                       }
                                     >
-                                      · against {c.originalInvoiceNo} {c.originalInvoiceFile ? "· invoice ✓" : "· invoice not on file"}
+                                      against <DocChip kind="INV" number={c.originalInvoiceNo} tone="ref" />
+                                      {c.originalInvoiceFile ? "on file" : "not on file"}
                                     </span>
                                   )}
                                 </span>
@@ -2461,21 +2452,9 @@ export default function TripSheetPage() {
                               {/* A stop with no invoice number delivers nothing, so
                                   there is no invoice PDF to find (collection-only). */}
                               {!stop.invoiceNumber ? null : stop.invoiceFile ? (
-                                <span className="flex items-center gap-1 text-ink-green">
-                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                    <polyline points="20 6 9 17 4 12" />
-                                  </svg>
-                                  PDF
-                                </span>
+                                <StatusBadge tone="green" dot>PDF found</StatusBadge>
                               ) : (
-                                <span className="flex items-center gap-1 text-ink-amber">
-                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                                    <line x1="12" y1="9" x2="12" y2="13" />
-                                    <line x1="12" y1="17" x2="12.01" y2="17" />
-                                  </svg>
-                                  No PDF
-                                </span>
+                                <StatusBadge tone="amber" dot>No PDF</StatusBadge>
                               )}
                             </>
                           )}
@@ -2537,26 +2516,22 @@ export default function TripSheetPage() {
                       <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-ink-muted font-medium shrink-0">
                         {stop.stopNumber}
                       </span>
-                      <span className="font-mono font-medium text-ink-black min-w-[100px]">
-                        {stop.invoiceNumber}
+                      <span className="min-w-[120px]">
+                        {stop.invoiceNumber ? (
+                          <DocChip kind="INV" number={stop.invoiceNumber} />
+                        ) : (
+                          <span className="font-mono text-ink-muted">Collection only</span>
+                        )}
                       </span>
                       <span className="text-ink-muted truncate flex-1">
                         {stop.customerName}
                       </span>
                       {isSkipped ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-ink-red/10 text-ink-red no-underline">
-                          Skipped
-                        </span>
+                        <StatusBadge tone="red" className="no-underline">Skipped</StatusBadge>
                       ) : assignToDriverId ? (
-                        <span className="badge-signed">
-                          <span className="w-1.5 h-1.5 rounded-full bg-ink-green" />
-                          Assigned
-                        </span>
+                        <StatusBadge tone="green" dot>Assigned</StatusBadge>
                       ) : (
-                        <span className="badge-pending">
-                          <span className="w-1.5 h-1.5 rounded-full bg-ink-red" />
-                          No driver
-                        </span>
+                        <StatusBadge tone="red" dot>No driver</StatusBadge>
                       )}
                     </div>
                     );
@@ -2929,86 +2904,71 @@ export default function TripSheetPage() {
                         <p className="text-[15px] sm:text-sm font-medium text-ink-black">
                           {trip.driverName}
                         </p>
-                        {trip.status === "QUEUED" && (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-surface text-ink-muted border border-ink-border">
-                            QUEUED
-                          </span>
-                        )}
+                        {trip.status === "QUEUED" && <StatusBadge tone="idle">Queued</StatusBadge>}
                         <span className="text-[12px] sm:text-xs font-mono text-ink-muted">
                           {trip.regNo}
                         </span>
                         {tripCollections.length > 0 && (
-                          <span
-                            className="badge-credit"
+                          <StatusBadge
+                            tone="violet"
                             title={`${collectionsDone} of ${tripCollections.length} collections have an outcome. All of them need one before this sheet can be archived.`}
                           >
                             {collectionsDone}/{tripCollections.length} collected
-                          </span>
+                          </StatusBadge>
                         )}
                         {collectionExceptions > 0 && (
-                          <span
-                            className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
+                          <StatusBadge
+                            tone="amber"
                             title="Partial, unavailable or refused — accounts needs to look at these before raising a credit"
                           >
-                            {collectionExceptions} EXCEPTION{collectionExceptions !== 1 ? "S" : ""}
-                          </span>
+                            {collectionExceptions} exception{collectionExceptions !== 1 ? "s" : ""}
+                          </StatusBadge>
                         )}
                         {unsent.total > 0 && (
-                          <span
-                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono font-medium rounded border ${
-                              unsent.failed.length > 0
-                                ? "bg-ink-red-dim text-ink-red border-ink-red/20"
-                                : "bg-ink-amber-dim text-ink-amber border-ink-amber/20"
-                            }`}
+                          <StatusBadge
+                            tone={unsent.failed.length > 0 ? "red" : "amber"}
                             title={`Confirmation emails not sent: ${unsentTitle}. Open the sheet to send them, or resend from Completed afterwards.`}
                           >
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
-                              <polyline points="22,6 12,13 2,6" />
-                            </svg>
-                            {unsent.total} EMAIL{unsent.total !== 1 ? "S" : ""} NOT SENT
-                          </span>
+                            {unsent.total} email{unsent.total !== 1 ? "s" : ""} not sent
+                          </StatusBadge>
                         )}
                         {reallocatedOut.length > 0 && (
-                          <span
-                            className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-surface text-ink-black border border-ink-border"
+                          <StatusBadge
+                            tone="idle"
                             title={`Handed to another driver: ${reallocatedOut.map((r) => r.invoiceNumber || `stop ${r.fromStopNumber}`).join(", ")}`}
                           >
-                            {reallocatedOut.length} REALLOCATED → {reallocTargets.join(", ").toUpperCase()}
-                          </span>
+                            {reallocatedOut.length} reallocated → {reallocTargets.join(", ")}
+                          </StatusBadge>
                         )}
                         {reallocatedIn.length > 0 && (
-                          <span
-                            className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-surface text-ink-black border border-ink-border"
-                            title={`Taken over from ${reallocSources.join(", ")}`}
-                          >
-                            FROM {reallocSources.join(", ").toUpperCase()}
-                          </span>
+                          <StatusBadge tone="idle" title={`Taken over from ${reallocSources.join(", ")}`}>
+                            From {reallocSources.join(", ")}
+                          </StatusBadge>
                         )}
                         {removedStops.length > 0 && (
-                          <span
-                            className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-red-dim text-ink-red border border-ink-red/20"
+                          <StatusBadge
+                            tone="red"
                             title={`Taken off this run before signing: ${removedStops
                               .map((r) => r.invoiceNumber)
                               .join(", ")}. Open the sheet for reasons.`}
                           >
-                            {removedStops.length} INVOICE{removedStops.length !== 1 ? "S" : ""} REMOVED
-                          </span>
+                            {removedStops.length} invoice{removedStops.length !== 1 ? "s" : ""} removed
+                          </StatusBadge>
                         )}
                         {removedCollections.length > 0 && (
-                          <span
-                            className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-red-dim text-ink-red border border-ink-red/20"
+                          <StatusBadge
+                            tone="red"
                             title={`Taken off this run before collection: ${removedCollections
                               .map((r) => r.collectionNo)
                               .join(", ")}. Open the sheet for reasons.`}
                           >
-                            {removedCollections.length} COLLECTION{removedCollections.length !== 1 ? "S" : ""} REMOVED
-                          </span>
+                            {removedCollections.length} collection{removedCollections.length !== 1 ? "s" : ""} removed
+                          </StatusBadge>
                         )}
                         {stopHits > 0 && (
-                          <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-green-dim text-ink-green border border-ink-green/20">
+                          <StatusBadge tone="green">
                             {stopHits} stop{stopHits !== 1 ? "s" : ""} match
-                          </span>
+                          </StatusBadge>
                         )}
                       </div>
                       <div className="flex items-center gap-3 mt-1 min-w-0">
@@ -3051,7 +3011,7 @@ export default function TripSheetPage() {
                             e.stopPropagation();
                             openRealloc(trip);
                           }}
-                          className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium border bg-ink-surface text-ink-muted border-ink-border hover:text-ink-black hover:border-ink-muted-light transition-all whitespace-nowrap"
+                          className="act"
                           title="Give unsigned stops on this run to another driver"
                         >
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -3071,11 +3031,7 @@ export default function TripSheetPage() {
                             handleCompleteSingle(trip.id);
                           }}
                           disabled={completingTripId === trip.id}
-                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-medium border transition-all disabled:opacity-50 whitespace-nowrap ${
-                            confirmingComplete
-                              ? "bg-ink-amber text-white border-ink-amber"
-                              : "bg-ink-green-dim text-ink-green border-ink-green/20 hover:bg-ink-green hover:text-white"
-                          }`}
+                          className={`act ${confirmingComplete ? "act-warn" : "act-primary"}`}
                           title={
                             confirmingComplete
                               ? "Click again to complete anyway — the emails can still be resent from Completed"
@@ -3106,11 +3062,12 @@ export default function TripSheetPage() {
                           e.stopPropagation();
                           handleDelete(trip.id);
                         }}
-                        className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-mono transition-all ${
+                        className={
                           pendingDeleteId === trip.id
-                            ? "bg-ink-red text-white animate-pulse"
-                            : "hover:bg-ink-red-dim text-ink-muted hover:text-ink-red"
-                        }`}
+                            ? "act act-danger !border-[color:var(--tone-red-fg)] !text-[color:var(--tone-red-fg)] animate-pulse"
+                            : "act act-icon"
+                        }
+                        aria-label="Remove trip sheet"
                         title={pendingDeleteId === trip.id ? "Click again to confirm" : "Remove trip sheet"}
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -3151,18 +3108,19 @@ export default function TripSheetPage() {
                     <div className="border-t border-ink-border divide-y divide-ink-border animate-fade-in">
                       <div className="grid grid-cols-[2rem_1fr_1fr_3rem] gap-2 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50">
                         <div>#</div>
-                        <div>Invoice</div>
+                        <div>Document</div>
                         <div>Customer</div>
                         <div className="text-right">NOP</div>
                       </div>
-                      {/* Colour key: colour is status, for invoices and
-                          collections alike — see invoiceChipClass. */}
-                      <div className="flex items-center gap-x-3 gap-y-1 flex-wrap px-4 py-1.5 text-[10px] font-mono text-ink-muted bg-ink-surface/30">
-                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-muted-light" />Pending</span>
-                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-amber" />Active</span>
-                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-green" />Invoice signed</span>
-                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-violet" />Collected</span>
-                        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-ink-red" />Not collected</span>
+                      {/* Colour key: colour is status, for every document
+                          alike; the chip's prefix says what it is. */}
+                      <div className="flex items-center gap-x-3 gap-y-1 flex-wrap px-4 py-1.5 text-[11px] font-mono text-ink-muted bg-ink-surface/30">
+                        <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-[3px] tone-idle shadow-[inset_0_0_0_1px_#D3D0C9]" />Pending</span>
+                        <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-[3px] tone-amber shadow-[inset_0_0_0_1px_#E9C083]" />Active</span>
+                        <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-[3px] tone-green shadow-[inset_0_0_0_1px_#8ED3B4]" />Invoice signed</span>
+                        <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-[3px] tone-violet shadow-[inset_0_0_0_1px_#C2AEF7]" />Collected</span>
+                        <span className="inline-flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-[3px] tone-red shadow-[inset_0_0_0_1px_#EFA9A9]" />Not collected</span>
+                        <span className="sm:ml-auto">INV invoice · CR credit return · CO collection · UPL uplift</span>
                       </div>
                       {trip.stops.map((stop) => (
                         <div
@@ -3173,23 +3131,23 @@ export default function TripSheetPage() {
                               : ""
                           }`}
                         >
-                          {/* Line 1: #, Invoice, Customer, NOP */}
+                          {/* Line 1: #, Document, Customer, NOP */}
                           <div className="grid grid-cols-[2rem_1fr_1fr_3rem] gap-2 items-center">
                             <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">
                               {stop.stopNumber}
                             </span>
                             <span className="min-w-0">
                               {stop.invoiceNumber ? (
-                                <span
-                                  className={`${invoiceChipClass(stop.status)} badge-sm max-w-full`}
+                                <DocChip
+                                  kind="INV"
+                                  number={stop.invoiceNumber}
+                                  tone={invoiceTone(stop.status)}
                                   title={`Invoice ${stop.invoiceNumber} — ${
                                     stop.status === "SIGNED" ? "signed" : stop.status === "IN_PROGRESS" ? "active" : "pending"
                                   }`}
-                                >
-                                  <span className="truncate">{stop.invoiceNumber}</span>
-                                </span>
+                                />
                               ) : (
-                                <span className="text-[11px] font-mono text-ink-muted-light">Collection only</span>
+                                <span className="text-[11px] font-mono text-ink-muted">Collection only</span>
                               )}
                             </span>
                             <span className="text-[13px] text-ink-muted truncate">
@@ -3205,9 +3163,7 @@ export default function TripSheetPage() {
                             <div className="mt-2 pl-8 space-y-1">
                               {stop.rejectedLines!.map((l) => (
                                 <div key={l.id} className="flex items-center gap-2 flex-wrap text-[12px]">
-                                  <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-red-dim text-ink-red border border-ink-red/20">
-                                    LINE REMOVED
-                                  </span>
+                                  <StatusBadge tone="red">Line removed</StatusBadge>
                                   <span className="text-ink-black">
                                     {l.quantity != null && <span className="font-mono">{l.quantity} × </span>}
                                     {l.description}
@@ -3222,9 +3178,13 @@ export default function TripSheetPage() {
                                         withdrawRejectedLine(stop.id, l.id);
                                       }}
                                       disabled={withdrawingLine === l.id}
-                                      className="font-mono text-[11px] text-ink-muted hover:text-ink-red hover:underline disabled:opacity-50"
+                                      className="act ml-auto"
                                       title="Put this line back on the delivery"
                                     >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                        <polyline points="1 4 1 10 7 10" />
+                                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                                      </svg>
                                       {withdrawingLine === l.id ? "Putting back…" : "Put back"}
                                     </button>
                                   )}
@@ -3252,46 +3212,43 @@ export default function TripSheetPage() {
                                       ? `${c.expectedQty ?? "—"} box${c.expectedQty === 1 ? "" : "es"}`
                                       : `${c.collectedQty ?? 0} of ${c.expectedQty ?? "—"} boxes`
                                     : null;
+                                const kind = collectionKind(c);
                                 return (
                                   <div
                                     key={c.id}
-                                    className="rounded border border-ink-border bg-white/60 px-3 py-2 text-[12px]"
+                                    className="rounded-md border border-ink-border bg-white/60 px-3 py-2 text-[12px]"
                                   >
                                     {/* What it is, and how far along. */}
                                     <div className="flex items-center gap-x-2 gap-y-1 flex-wrap">
-                                      {/* Type and number in one chip, coloured by
+                                      {/* Kind and number in one chip, tinted by
                                           status to match the key above. */}
-                                      <span
-                                        className={`badge-sm ${collectionChipClass(c.status)}`}
-                                        title={`${c.type === "CREDIT_RETURN" ? "Credit return" : "Non-credit uplift"} — ${
+                                      <DocChip
+                                        kind={kind}
+                                        number={c.collectionNo}
+                                        tone={collectionTone(c.status)}
+                                        title={`${kind === "CR" ? "Credit return" : kind === "CO" ? "Collection (no invoice behind it)" : "Non-credit uplift"} — ${
                                           COLLECTION_STATUS_LABEL[c.status] ?? c.status
                                         }`}
-                                      >
-                                        <span className="font-semibold">{c.type === "CREDIT_RETURN" ? "CR" : "UPL"}</span>
-                                        <span className="opacity-50">·</span>
-                                        {c.collectionNo}
-                                      </span>
+                                      />
                                       {/* Said in words as well, so it never rests on
                                           colour alone. */}
-                                      <span className="text-[11px] font-mono font-medium text-ink-black">
+                                      <StatusBadge tone={collectionTone(c.status)} dot>
                                         {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
-                                      </span>
-                                      {quantity && <span className="font-mono text-ink-muted">· {quantity}</span>}
+                                      </StatusBadge>
+                                      {c.hasVariance && <StatusBadge tone="amber">Not as listed</StatusBadge>}
+                                      {quantity && <span className="font-mono text-ink-muted">{quantity}</span>}
                                       {c.originalInvoiceNo && (
-                                        <span className="text-ink-muted">· against invoice {c.originalInvoiceNo}</span>
-                                      )}
-                                      {c.hasVariance && (
-                                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-amber-dim text-ink-amber">
-                                          NOT AS LISTED
+                                        <span className="inline-flex items-center gap-1.5 text-ink-muted">
+                                          against <DocChip kind="INV" number={c.originalInvoiceNo} tone="ref" />
                                         </span>
                                       )}
                                     </div>
                                     {c.exceptionReason && (
-                                      <p className="mt-1 text-ink-amber">{c.exceptionReason}</p>
+                                      <p className="mt-1 text-[color:var(--tone-amber-fg)]">{c.exceptionReason}</p>
                                     )}
 
                                     {/* The paperwork, and the office's actions. */}
-                                    <div className="mt-1.5 flex items-center gap-x-3 gap-y-1 flex-wrap">
+                                    <div className="mt-2 flex items-center gap-2 flex-wrap">
                                       {/* The office's sheet: read into lines, or
                                           missing, or needing a look. Once the
                                           collection is settled, "No sheet" is
@@ -3308,8 +3265,12 @@ export default function TripSheetPage() {
                                           target="_blank"
                                           rel="noreferrer"
                                           onClick={(e) => e.stopPropagation()}
-                                          className="font-mono text-[11px] text-ink-muted hover:text-ink-black hover:underline"
+                                          className="act"
                                         >
+                                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                            <polyline points="14 2 14 8 20 8" />
+                                          </svg>
                                           Office sheet
                                         </a>
                                       )}
@@ -3319,8 +3280,11 @@ export default function TripSheetPage() {
                                           target="_blank"
                                           rel="noreferrer"
                                           onClick={(e) => e.stopPropagation()}
-                                          className="font-mono text-[11px] text-ink-violet hover:underline"
+                                          className="act"
                                         >
+                                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                            <path d="M20 6 9 17l-5-5" />
+                                          </svg>
                                           Signed receipt
                                         </a>
                                       )}
@@ -3340,11 +3304,24 @@ export default function TripSheetPage() {
                               })}
                             </div>
                           )}
-{/* Line 2: Email button + Status badge.
-                              The confirmation goes out automatically on
-                              signature, so this button is a resend — or the
-                              recovery when the automatic attempt failed. */}
-                          <div className="flex items-center gap-2 mt-1.5 pl-8">
+                          {/* Line 2, for a delivery: its status on the left,
+                              what the office can do on the right. The
+                              confirmation goes out automatically on signature,
+                              so the Email button is a resend — or the recovery
+                              when the automatic attempt failed. A
+                              collection-only stop has no invoice to sign, so it
+                              gets no line rather than a permanent "Pending". */}
+                          {stop.invoiceNumber && (
+                          <div className="flex items-center gap-2 mt-2 pl-8 flex-wrap">
+                            <StatusBadge tone={invoiceTone(stop.status)} dot>
+                              {stop.status === "SIGNED" ? "Signed" : stop.status === "IN_PROGRESS" ? "Active" : "Pending"}
+                            </StatusBadge>
+                            {stop.status === "SIGNED" && !stop.contact?.email && (
+                              <StatusBadge tone="amber" title="No email address on this contact — add one to send a confirmation">
+                                No email on file
+                              </StatusBadge>
+                            )}
+                            <span className="flex-1" />
                             {/* Opens the signed copy directly — no hunting for the
                                 invoice number on the Invoices tab. Addressed by
                                 filename, as that tab's "Signed" button is. */}
@@ -3354,10 +3331,10 @@ export default function TripSheetPage() {
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 onClick={(e) => e.stopPropagation()}
-                                className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono font-medium bg-ink-green-dim text-ink-green border border-ink-green/20 hover:bg-ink-green hover:text-white transition-all"
+                                className="act"
                                 title={`Open the signed invoice (${stop.invoiceFile})`}
                               >
-                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                                   <polyline points="14 2 14 8 20 8" />
                                 </svg>
@@ -3376,15 +3353,7 @@ export default function TripSheetPage() {
                                   handleResendEmail(stop, trip.driverName);
                                 }}
                                 disabled={live === "sending"}
-                                className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono font-medium transition-all ${
-                                  isSent
-                                    ? "bg-ink-green-dim text-ink-green border border-ink-green/20"
-                                    : isFailed
-                                    ? "bg-ink-red-dim text-ink-red border border-ink-red/20 hover:bg-ink-red/10"
-                                    : isSending
-                                    ? "bg-ink-surface text-ink-muted border border-ink-border"
-                                    : "bg-ink-surface text-ink-muted border border-ink-border hover:border-ink-muted-light hover:text-ink-black"
-                                }`}
+                                className={`act ${isSent ? "act-green" : isFailed ? "act-red" : ""}`}
                                 title={
                                   isFailed
                                     ? `Last attempt failed${stop.emailError ? `: ${stop.emailError}` : ""} — click to retry ${stop.contact.email}`
@@ -3400,76 +3369,52 @@ export default function TripSheetPage() {
                                   </>
                                 ) : isSent ? (
                                   <>
-                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                       <polyline points="20 6 9 17 4 12" />
                                     </svg>
-                                    Sent
+                                    Sent · resend
                                   </>
                                 ) : isFailed ? (
                                   <>
-                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                      <circle cx="12" cy="12" r="10" />
-                                      <line x1="15" y1="9" x2="9" y2="15" />
-                                      <line x1="9" y1="9" x2="15" y2="15" />
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                      <polyline points="1 4 1 10 7 10" />
+                                      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
                                     </svg>
-                                    Retry
+                                    Retry email
                                   </>
                                 ) : (
                                   <>
-                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                       <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
                                       <polyline points="22,6 12,13 2,6" />
                                     </svg>
-                                    Email
+                                    Send email
                                   </>
                                 )}
                               </button>
                               );
                             })()}
-                            {stop.status === "SIGNED" && !stop.contact?.email && (
-                              <span
-                                className="inline-flex items-center px-2 py-1 rounded text-[11px] font-mono bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
-                                title="No email address on this contact — add one to send a confirmation"
-                              >
-                                No email
-                              </span>
-                            )}
-                            {stop.status !== "SIGNED" && stop.invoiceNumber && (
+                            {stop.status !== "SIGNED" && (
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   openReject(stop, trip.driverName);
                                 }}
-                                className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono font-medium bg-ink-surface text-ink-muted border border-ink-border hover:border-ink-red/40 hover:text-ink-red transition-all"
+                                className="act act-danger"
                                 title="Take this invoice off the route, or remove one line of it"
                               >
-                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                   <circle cx="12" cy="12" r="10" />
                                   <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
                                 </svg>
                                 Remove…
                               </button>
                             )}
-                            {/* No "N collections" pill: the collections are
-                                listed just above, each with its own chip. */}
-                            {/* The invoice's status, in the same palette as its
-                                chip. A collection-only stop has no invoice to
-                                sign, so it gets no pill rather than a
-                                permanent "Pending". */}
-                            {stop.invoiceNumber && (
-                              <span className={`badge-sm ${invoiceChipClass(stop.status)}`}>
-                                <span className="w-1.5 h-1.5 rounded-full bg-current" />
-                                {stop.status === "SIGNED"
-                                  ? "Signed"
-                                  : stop.status === "IN_PROGRESS"
-                                  ? "Active"
-                                  : "Pending"}
-                              </span>
-                            )}
                           </div>
+                          )}
                         </div>
                       ))}
-                      {/* Reallocations, both ways. The stops themselves now
+{/* Reallocations, both ways. The stops themselves now
                           live on the other run; this says where they went. */}
                       {(reallocatedOut.length > 0 || reallocatedIn.length > 0) && (
                         <div className="px-4 py-3 bg-ink-surface/40">
@@ -3516,9 +3461,9 @@ export default function TripSheetPage() {
                                   {r.invoiceNumber}
                                 </span>
                                 <span className="text-ink-muted">{r.customerName}</span>
-                                <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-surface text-ink-muted border border-ink-border">
-                                  {r.source === "INVOICE_DELETED" ? "INVOICE DELETED" : "REMOVED"}
-                                </span>
+                                <StatusBadge tone="idle">
+                                  {r.source === "INVOICE_DELETED" ? "Invoice deleted" : "Removed"}
+                                </StatusBadge>
                                 <span className="text-ink-black">{r.reason}</span>
                                 <span className="text-ink-muted-light">
                                   {r.removedBy} · {formatDate(r.removedAt)}
@@ -3712,45 +3657,44 @@ export default function TripSheetPage() {
                                   {sheet.regNo}
                                 </span>
                               )}
-                              <span className="badge-signed">
-                                <span className="w-1.5 h-1.5 rounded-full bg-ink-green" />
+                              <StatusBadge tone="green" dot>
                                 {sheet.signedStops}/{sheet.totalStops} delivered
-                              </span>
+                              </StatusBadge>
                               {(sheet.collections?.length ?? 0) > 0 && (
-                                <span className="badge-credit">
+                                <StatusBadge tone="violet">
                                   {sheet.collectedCollections ?? 0}/{sheet.collections!.length} collected
-                                </span>
+                                </StatusBadge>
                               )}
                               {(sheet.collections ?? []).some((c) =>
                                 COLLECTION_EXCEPTIONS.has(c.status)
                               ) && (
-                                <span
-                                  className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
+                                <StatusBadge
+                                  tone="amber"
                                   title="A collection was partial, unavailable or refused — accounts needs to look at it before raising a credit"
                                 >
-                                  COLLECTION EXCEPTION
-                                </span>
+                                  Collection exception
+                                </StatusBadge>
                               )}
                               {unsentArchived > 0 && (
-                                <span
-                                  className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
+                                <StatusBadge
+                                  tone="amber"
                                   title="Confirmation emails that never went out — open the sheet to resend them"
                                 >
-                                  {unsentArchived} EMAIL{unsentArchived !== 1 ? "S" : ""} NOT SENT
-                                </span>
+                                  {unsentArchived} email{unsentArchived !== 1 ? "s" : ""} not sent
+                                </StatusBadge>
                               )}
                               {stopHits > 0 && (
-                                <span className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-ink-green-dim text-ink-green border border-ink-green/20">
+                                <StatusBadge tone="green">
                                   {stopHits} stop{stopHits !== 1 ? "s" : ""} match
-                                </span>
+                                </StatusBadge>
                               )}
                               {!sheet.archivedFile && (
-                                <span
-                                  className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
+                                <StatusBadge
+                                  tone="amber"
                                   title="The source file was not moved to processed/, so it will not appear in backups"
                                 >
-                                  NOT ARCHIVED
-                                </span>
+                                  Not archived
+                                </StatusBadge>
                               )}
                             </div>
                             <p className="text-[12px] sm:text-xs text-ink-muted font-mono mt-1 truncate">
@@ -3777,7 +3721,7 @@ export default function TripSheetPage() {
                           <div className="border-t border-ink-border divide-y divide-ink-border animate-fade-in">
                             <div className="grid grid-cols-[2rem_1fr_1fr_auto] gap-2 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50">
                               <div>#</div>
-                              <div>Invoice</div>
+                              <div>Document</div>
                               <div>Customer</div>
                               <div className="text-right">Signed</div>
                             </div>
@@ -3794,8 +3738,12 @@ export default function TripSheetPage() {
                                   <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">
                                     {stop.stopNumber}
                                   </span>
-                                  <span className="font-mono text-[13px] font-medium text-ink-black truncate">
-                                    {stop.invoiceNumber}
+                                  <span className="min-w-0">
+                                    {stop.invoiceNumber ? (
+                                      <DocChip kind="INV" number={stop.invoiceNumber} tone={stop.signedAt ? "green" : "idle"} />
+                                    ) : (
+                                      <span className="text-[11px] font-mono text-ink-muted">Collection only</span>
+                                    )}
                                   </span>
                                   <span className="text-[13px] text-ink-muted truncate">
                                     {stop.customerName}
@@ -3815,8 +3763,8 @@ export default function TripSheetPage() {
                                 {(stop.rejectedLines?.length ?? 0) > 0 && (
                                   <div className="mt-1.5 pl-8 space-y-0.5">
                                     {stop.rejectedLines!.map((l, i) => (
-                                      <p key={i} className="text-[12px]">
-                                        <span className="font-mono text-[10px] text-ink-red mr-1.5">LINE REMOVED</span>
+                                      <p key={i} className="text-[12px] flex items-center gap-2 flex-wrap">
+                                        <StatusBadge tone="red">Line removed</StatusBadge>
                                         <span className="text-ink-black">
                                           {l.quantity != null ? `${l.quantity} × ` : ""}
                                           {l.description}
@@ -3839,7 +3787,7 @@ export default function TripSheetPage() {
                                       <button
                                         onClick={() => handleArchiveResend(sheet.id, stop.stopNumber)}
                                         disabled={left <= 0 || live?.state === "sending"}
-                                        className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono font-medium bg-ink-surface text-ink-muted border border-ink-border hover:border-ink-muted-light hover:text-ink-black transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-ink-muted disabled:hover:border-ink-border"
+                                        className="act"
                                         title={
                                           left <= 0
                                             ? `Already resent ${ARCHIVE_RESEND_LIMIT} times — the limit for one delivery`
@@ -3944,17 +3892,18 @@ export default function TripSheetPage() {
                                       <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">
                                         {c.stopNumber ?? "—"}
                                       </span>
-                                      <div className="min-w-0">
-                                        <span className="font-mono text-[13px] font-medium text-ink-black truncate block">
-                                          {c.collectionNo}
-                                        </span>
-                                        <span className="text-[11px] text-ink-muted">
-                                          {c.type === "CREDIT_RETURN" ? "Credit Return" : "Uplift"}
-                                          {c.originalInvoiceNo ? ` · against ${c.originalInvoiceNo}` : ""}
-                                          {c.collectedQty != null || c.expectedQty != null
-                                            ? ` · ${c.collectedQty ?? 0} of ${c.expectedQty ?? "—"}`
-                                            : ""}
-                                        </span>
+                                      <div className="min-w-0 flex items-center gap-1.5 flex-wrap">
+                                        <DocChip kind={collectionKind(c)} number={c.collectionNo} tone={collectionTone(c.status)} />
+                                        {c.originalInvoiceNo && (
+                                          <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted">
+                                            against <DocChip kind="INV" number={c.originalInvoiceNo} tone="ref" />
+                                          </span>
+                                        )}
+                                        {(c.collectedQty != null || c.expectedQty != null) && (
+                                          <span className="text-[11px] font-mono text-ink-muted">
+                                            {c.collectedQty ?? 0} of {c.expectedQty ?? "—"}
+                                          </span>
+                                        )}
                                       </div>
                                       <div className="min-w-0">
                                         <span className="text-[13px] text-ink-muted truncate block">
@@ -3967,42 +3916,38 @@ export default function TripSheetPage() {
                                         )}
                                       </div>
                                       <div className="flex items-center gap-2 justify-end">
-                                        <span
-                                          className={
-                                            c.status === "COLLECTED"
-                                              ? "badge-signed"
-                                              : COLLECTION_EXCEPTIONS.has(c.status)
-                                              ? "badge-progress"
-                                              : "badge-pending"
-                                          }
-                                        >
+                                        <StatusBadge tone={collectionTone(c.status)} dot>
                                           {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
-                                        </span>
+                                        </StatusBadge>
                                         {c.signedFilePath ? (
                                           <a
                                             href={`/api/collections/document/${encodeURIComponent(c.signedFilePath)}?signed=true`}
                                             target="_blank"
                                             rel="noreferrer"
-                                            className="text-[11px] font-mono text-ink-violet hover:underline"
+                                            className="act"
                                           >
-                                            Receipt
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                              <path d="M20 6 9 17l-5-5" />
+                                            </svg>
+                                            Signed receipt
                                           </a>
                                         ) : (
-                                          <span
-                                            className="text-[11px] font-mono text-ink-muted-light"
-                                            title="No signed document was written for this collection"
-                                          >
+                                          <StatusBadge tone="idle" title="No signed document was written for this collection">
                                             No receipt
-                                          </span>
+                                          </StatusBadge>
                                         )}
                                         {c.sourceFilePath && (
                                           <a
                                             href={`/api/collections/document/${encodeURIComponent(c.sourceFilePath)}`}
                                             target="_blank"
                                             rel="noreferrer"
-                                            className="text-[11px] font-mono text-ink-muted hover:text-ink-black hover:underline"
+                                            className="act"
                                           >
-                                            Original
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                              <polyline points="14 2 14 8 20 8" />
+                                            </svg>
+                                            Office sheet
                                           </a>
                                         )}
                                       </div>
@@ -4494,43 +4439,19 @@ export default function TripSheetPage() {
  * the send queue on the dashboard is where outstanding mail is dealt with.
  */
 function CompletedEmailPill({ status }: { status: string }) {
-  if (status === "SENT") {
-    return (
-      <span
-        className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-green-dim text-ink-green shrink-0"
-        title="Confirmation email sent"
-      >
-        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-        Emailed
-      </span>
-    );
-  }
-
-  const map: Record<string, { label: string; className: string; title: string }> = {
-    FAILED: {
-      label: "Email failed",
-      className: "bg-ink-red-dim text-ink-red",
-      title: "The confirmation email did not go out",
-    },
-    NO_EMAIL: {
-      label: "No address",
-      className: "bg-ink-amber-dim text-ink-amber",
-      title: "This customer had no email address on file",
-    },
+  const map: Record<string, { label: string; tone: "green" | "red" | "amber"; title: string }> = {
+    SENT: { label: "Emailed", tone: "green", title: "Confirmation email sent" },
+    FAILED: { label: "Email failed", tone: "red", title: "The confirmation email did not go out" },
+    NO_EMAIL: { label: "No address", tone: "amber", title: "This customer had no email address on file" },
   };
 
   const pill = map[status];
   if (!pill) return null;
 
   return (
-    <span
-      className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded shrink-0 ${pill.className}`}
-      title={pill.title}
-    >
+    <StatusBadge tone={pill.tone} title={pill.title} className="shrink-0">
       {pill.label}
-    </span>
+    </StatusBadge>
   );
 }
 

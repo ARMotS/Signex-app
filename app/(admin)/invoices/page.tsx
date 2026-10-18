@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
 
 import { FilterSearch } from "@/components/admin/FilterSearch";
+import { DocChip, StatusBadge } from "@/components/ui/Chips";
 import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 
 interface InvoiceFile {
@@ -693,12 +694,8 @@ export default function InvoicesPage() {
                     </td>
                     <td className="px-5 py-3.5 font-mono font-medium text-ink-black">
                       <div className="flex items-center gap-2">
-                        {inv.invoiceNumber}
-                        {duplicateFilenames.has(inv.filename) && (
-                          <span className="inline-flex items-center px-1.5 py-0.5 text-[9px] font-mono font-medium rounded bg-ink-amber-dim text-ink-amber border border-ink-amber/20">
-                            DUPLICATE
-                          </span>
-                        )}
+                        <DocChip kind="INV" number={inv.invoiceNumber} tone={inv.isSigned ? "green" : "idle"} />
+                        {duplicateFilenames.has(inv.filename) && <StatusBadge tone="amber">Duplicate</StatusBadge>}
                       </div>
                     </td>
                     <td

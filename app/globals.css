@@ -197,6 +197,105 @@ body {
   line-height: 16px;
 }
 
+/* ─── One size for badges, chips and buttons ───────────────────────────────
+   Every badge, document chip and small action is 24px tall, 6px round and
+   11px text, so a row of them lines up. What tells them apart is the EDGE:
+     · status badge — flat tint, no border, UPPERCASE, no hover (information)
+     · document chip — "INV · 900101", "CR · 900001": type prefix, then the
+       number; tint is status (components/ui/Chips.tsx)
+     · action (.act) — white, 1px border, icon first, Sentence case, a darker
+       edge on hover: the only things on a card you can press
+   Text colours are the darker shades of each hue: the brand amber and green
+   on their own tints do not reach a readable contrast at 11px. */
+:root {
+  --tone-idle-bg: #F7F6F3;   --tone-idle-fg: #6E6B66;
+  --tone-amber-bg: #FDF1DC;  --tone-amber-fg: #A15C00;
+  --tone-green-bg: #E6F7EF;  --tone-green-fg: #047A50;
+  --tone-violet-bg: #F0EBFE; --tone-violet-fg: #6D3FE0;
+  --tone-red-bg: #FDE9E9;    --tone-red-fg: #C42B2B;
+  --tone-blue-bg: #E8F0FE;   --tone-blue-fg: #2457C5;
+  --act-border: #D3D0C9;
+}
+
+.badge-signed, .badge-pending, .badge-progress, .badge-credit, .badge-uplift, .badge-idle, .badge-sm, .status, .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border-radius: 6px;
+  border: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.badge-signed, .badge-pending, .badge-progress, .badge-credit, .badge-uplift, .badge-idle, .status {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.chip { gap: 5px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+.chip b { font-weight: 600; }
+.chip .chip-sep { opacity: 0.5; }
+.chip .chip-no { overflow: hidden; text-overflow: ellipsis; }
+
+.badge-signed, .tone-green   { background: var(--tone-green-bg);  color: var(--tone-green-fg); }
+.badge-progress, .tone-amber { background: var(--tone-amber-bg);  color: var(--tone-amber-fg); }
+.badge-pending, .tone-red    { background: var(--tone-red-bg);    color: var(--tone-red-fg); }
+.badge-credit, .tone-violet  { background: var(--tone-violet-bg); color: var(--tone-violet-fg); }
+.badge-uplift, .tone-blue    { background: var(--tone-blue-bg);   color: var(--tone-blue-fg); }
+.badge-idle, .tone-idle      { background: var(--tone-idle-bg);   color: var(--tone-idle-fg); box-shadow: none; }
+/* A pending document chip keeps a hairline so it still reads as a chip. */
+.chip.tone-idle, .badge-idle.badge-sm { box-shadow: inset 0 0 0 1px var(--ink-border); }
+/* A document named for reference ("against INV · 900102"), not a stop. */
+.tone-ref { background: #FFFFFF; color: #4A4844; box-shadow: inset 0 0 0 1px var(--ink-border); }
+
+.status-dot { width: 6px; height: 6px; border-radius: 3px; background: currentColor; flex-shrink: 0; }
+
+.act {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  box-sizing: border-box;
+  border-radius: 6px;
+  border: 1px solid var(--act-border);
+  background: #FFFFFF;
+  color: var(--ink-black);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  text-decoration: none;
+  transition: border-color 0.12s, background-color 0.12s, color 0.12s;
+}
+.act svg { flex-shrink: 0; }
+.act:not(:disabled):hover { border-color: var(--ink-black); background: var(--ink-surface); }
+.act:disabled { opacity: 0.5; cursor: default; }
+.act-danger { color: #4A4844; }
+.act-danger:not(:disabled):hover { border-color: var(--tone-red-fg); color: var(--tone-red-fg); background: #FFF5F5; }
+.act-primary { background: var(--tone-green-fg); border-color: var(--tone-green-fg); color: #FFFFFF; }
+.act-primary:not(:disabled):hover { background: #036340; border-color: #036340; }
+.act-warn { background: var(--ink-amber); border-color: var(--ink-amber); color: #FFFFFF; }
+.act-warn:not(:disabled):hover { background: #D98E12; border-color: #D98E12; }
+.act-green { color: var(--tone-green-fg); border-color: #8ED3B4; }
+.act-green:not(:disabled):hover { border-color: var(--tone-green-fg); background: var(--tone-green-bg); }
+.act-amber { color: var(--tone-amber-fg); border-color: #E9C083; }
+.act-amber:not(:disabled):hover { border-color: var(--tone-amber-fg); background: var(--tone-amber-bg); }
+.act-red { color: var(--tone-red-fg); border-color: #EFA9A9; }
+.act-red:not(:disabled):hover { border-color: var(--tone-red-fg); background: var(--tone-red-bg); }
+.act-violet { color: var(--tone-violet-fg); border-color: #C2AEF7; }
+.act-violet:not(:disabled):hover { border-color: var(--tone-violet-fg); background: var(--tone-violet-bg); }
+/* Icon-only: no edge until hovered, but the same 24px square. */
+.act-icon { width: 24px; padding: 0; justify-content: center; border-color: transparent; background: transparent; color: var(--ink-muted); }
+.act-icon:not(:disabled):hover { border-color: var(--act-border); background: var(--ink-surface); color: var(--ink-black); }
+
 /* ─── Scrollbar Styling ────────────────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 6px;

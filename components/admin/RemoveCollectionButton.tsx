@@ -64,9 +64,13 @@ export default function RemoveCollectionButton({
           e.stopPropagation();
           setOpen(true);
         }}
-        className="font-mono text-[11px] text-ink-muted hover:text-ink-red hover:underline"
+        className="act act-danger"
         title="Take this collection off the run — the customer said not to collect"
       >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="10" />
+          <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+        </svg>
         Remove…
       </button>
 

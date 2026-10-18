@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { DocChip, StatusBadge, collectionKind, collectionTone } from "@/components/ui/Chips";
 
 /**
  * The dispatcher's collections view and the credit-return report accounts
@@ -69,8 +70,6 @@ const SUBTYPE_LABEL: Record<string, string> = {
   DOCUMENTS: "Documents",
   SPECIAL_REQUEST: "Special request",
 };
-
-const EXCEPTIONS = new Set(["PARTIAL", "NOT_AVAILABLE", "REFUSED"]);
 
 /** Outcomes the customer signed for — the only ones a receipt is emailed for. */
 const RECEIPT_STATUSES = new Set(["COLLECTED", "PARTIAL"]);
@@ -224,12 +223,6 @@ function FolderPanel() {
 
 type TypeFilter = "" | "CREDIT_RETURN" | "NON_CREDIT_UPLIFT";
 type StatusFilter = "" | CollectionRecord["status"];
-
-function statusBadgeClass(status: string): string {
-  if (status === "COLLECTED") return "badge-signed";
-  if (EXCEPTIONS.has(status)) return "badge-progress";
-  return "badge-pending";
-}
 
 export default function CollectionsPage() {
   const [records, setRecords] = useState<CollectionRecord[]>([]);
@@ -535,24 +528,14 @@ export default function CollectionsPage() {
                 className="px-4 py-3 hover:bg-ink-surface/30 transition-colors md:grid md:grid-cols-[10rem_1fr_1fr_9rem_12rem] md:gap-3 md:items-center"
               >
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={r.type === "CREDIT_RETURN" ? "badge-credit" : "badge-uplift"}
-                    >
-                      {r.type === "CREDIT_RETURN" ? "Credit" : "Uplift"}
-                    </span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <DocChip kind={collectionKind(r)} number={r.collectionNo} tone={collectionTone(r.status)} />
                     {r.archived && (
-                      <span
-                        className="text-[10px] font-mono text-ink-muted-light"
-                        title="This trip has been closed out — read from the archive"
-                      >
-                        ARCHIVED
-                      </span>
+                      <StatusBadge tone="idle" title="This trip has been closed out — read from the archive">
+                        Archived
+                      </StatusBadge>
                     )}
                   </div>
-                  <p className="font-mono text-[13px] font-medium text-ink-black mt-1 truncate">
-                    {r.collectionNo}
-                  </p>
                 </div>
 
                 <div className="min-w-0 mt-2 md:mt-0">
@@ -569,12 +552,16 @@ export default function CollectionsPage() {
                 </div>
 
                 <div className="min-w-0 mt-2 md:mt-0">
-                  <p className="text-[12px] text-ink-muted truncate">
-                    {r.originalInvoiceNo ? `Against ${r.originalInvoiceNo}` : ""}
-                    {r.upliftSubtype
-                      ? `${r.originalInvoiceNo ? " · " : ""}${SUBTYPE_LABEL[r.upliftSubtype] ?? r.upliftSubtype}`
-                      : ""}
-                  </p>
+                  {(r.originalInvoiceNo || r.upliftSubtype) && (
+                    <p className="text-[12px] text-ink-muted flex items-center gap-1.5 flex-wrap">
+                      {r.originalInvoiceNo && (
+                        <>
+                          against <DocChip kind="INV" number={r.originalInvoiceNo} tone="ref" />
+                        </>
+                      )}
+                      {r.upliftSubtype && <span>{SUBTYPE_LABEL[r.upliftSubtype] ?? r.upliftSubtype}</span>}
+                    </p>
+                  )}
                   {r.itemsListed != null ? (
                     // Items against the office's sheet; the box count is not an item count.
                     <p className="text-[12px] font-mono text-ink-muted">
@@ -596,9 +583,9 @@ export default function CollectionsPage() {
                 </div>
 
                 <div className="mt-2 md:mt-0">
-                  <span className={statusBadgeClass(r.status)}>
+                  <StatusBadge tone={collectionTone(r.status)} dot>
                     {STATUS_LABEL[r.status] ?? r.status}
-                  </span>
+                  </StatusBadge>
                   {RECEIPT_STATUSES.has(r.status) && r.emailStatus && (
                     <p
                       className={`text-[11px] font-mono mt-1 ${EMAIL_LABEL[r.emailStatus]?.tone ?? "text-ink-muted"}`}
@@ -614,18 +601,21 @@ export default function CollectionsPage() {
                   )}
                 </div>
 
-                <div className="flex items-center gap-3 mt-2 md:mt-0 md:justify-end">
+                <div className="flex items-center gap-2 flex-wrap mt-2 md:mt-0 md:justify-end">
                   {r.signedFilePath ? (
                     <a
                       href={`/api/collections/document/${encodeURIComponent(r.signedFilePath)}?signed=true`}
                       target="_blank"
                       rel="noreferrer"
-                      className="text-[11px] font-mono text-ink-violet hover:underline"
+                      className="act"
                     >
-                      Receipt
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M20 6 9 17l-5-5" />
+                      </svg>
+                      Signed receipt
                     </a>
                   ) : (
-                    <span className="text-[11px] font-mono text-ink-muted-light">No receipt</span>
+                    <StatusBadge tone="idle">No receipt</StatusBadge>
                   )}
                   {/* Only for a receipt that did not go out: the email is sent
                       when the driver confirms, and this is the fallback. */}
@@ -633,27 +623,35 @@ export default function CollectionsPage() {
                     <button
                       onClick={() => sendReceipt(r.id!)}
                       disabled={sendingId === r.id || r.emailStatus === "SENDING"}
-                      className="text-[11px] font-mono text-ink-muted hover:text-ink-black hover:underline disabled:opacity-40"
+                      className={`act ${r.emailStatus === "FAILED" ? "act-red" : ""}`}
                       title="Email the signed receipt to the customer"
                     >
-                      {sendingId === r.id ? "Sending…" : r.emailStatus === "FAILED" ? "Resend" : "Send"}
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+                        <polyline points="22,6 12,13 2,6" />
+                      </svg>
+                      {sendingId === r.id ? "Sending…" : r.emailStatus === "FAILED" ? "Retry email" : "Send email"}
                     </button>
                   )}
-                  {/* A live collection always gets the link: the route finds a
-                      document added after import. An archived one has no row
+                  {/* Only when there is a sheet to open (as on the trip card).
+                      A live one is fetched by id; an archived one has no row
                       left, so it needs the filename frozen with it. */}
-                  {(r.id || r.sourceFilePath) && (
+                  {r.sourceFilePath && (
                     <a
                       href={
                         r.id
                           ? `/api/collections/${r.id}/source`
-                          : `/api/collections/document/${encodeURIComponent(r.sourceFilePath!)}`
+                          : `/api/collections/document/${encodeURIComponent(r.sourceFilePath)}`
                       }
                       target="_blank"
                       rel="noreferrer"
-                      className="text-[11px] font-mono text-ink-muted hover:text-ink-black hover:underline"
+                      className="act"
                     >
-                      Original
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                      </svg>
+                      Office sheet
                     </a>
                   )}
                 </div>
