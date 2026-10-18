@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import InvoiceNumberSettings from "@/components/admin/InvoiceNumberSettings";
+import CollectionDeclarationSettings from "@/components/admin/CollectionDeclarationSettings";
 
 interface OneDriveAccount {
   connected: boolean;
@@ -74,6 +75,7 @@ interface Settings {
   collectionsFolderType: string;
   signaturePosition: SignaturePosition;
   invoiceNoPattern: string;
+  collectionDeclarationText: string;
 }
 
 /** The three folders an ADMIN configures. Collections is a SIBLING of invoices. */
@@ -97,6 +99,7 @@ export default function SettingsPage() {
     collectionsFolderType: "local",
     signaturePosition: DEFAULT_SIG_POSITION,
     invoiceNoPattern: "",
+    collectionDeclarationText: "",
   });
   const [selectedPath, setSelectedPath] = useState("");
   const [browseData, setBrowseData] = useState<BrowseResult | null>(null);
@@ -1297,6 +1300,12 @@ export default function SettingsPage() {
       <InvoiceNumberSettings
         savedPattern={settings.invoiceNoPattern || ""}
         onSaved={(invoiceNoPattern) => setSettings((prev) => ({ ...prev, invoiceNoPattern }))}
+      />
+
+      {/* ─── Collection Receipt declaration ─────────────────────────── */}
+      <CollectionDeclarationSettings
+        savedText={settings.collectionDeclarationText || ""}
+        onSaved={(collectionDeclarationText) => setSettings((prev) => ({ ...prev, collectionDeclarationText }))}
       />
 
       {/* ─── Invoice Folder Path ────────────────────────────────────── */}

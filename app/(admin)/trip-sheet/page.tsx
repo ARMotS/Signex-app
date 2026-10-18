@@ -63,6 +63,7 @@ interface TripCollection {
   sheetStatus?: SheetCollection["sheetStatus"];
   sheetIssues?: SheetCollection["sheetIssues"];
   lines?: SheetCollection["lines"];
+  hasVariance?: boolean;
 }
 
 /** One collection frozen into a completed sheet's snapshot. */
@@ -3174,9 +3175,25 @@ export default function TripSheetPage() {
                                       against {c.originalInvoiceNo}
                                     </span>
                                   )}
-                                  {(c.collectedQty != null || c.expectedQty != null) && (
+                                  {(c.lines?.length ?? 0) > 0 ? (
+                                    // Items against the office's sheet, once it was read.
                                     <span className="font-mono text-ink-muted">
-                                      {c.collectedQty ?? 0} of {c.expectedQty ?? "—"}
+                                      {c.status === "PENDING"
+                                        ? `${c.lines!.filter((l) => !l.isExtra).reduce((n, l) => n + l.qtyListed, 0)} items`
+                                        : `${c.lines!.reduce((n, l) => n + (l.qtyCollected ?? 0), 0)} of ${c.lines!
+                                            .filter((l) => !l.isExtra)
+                                            .reduce((n, l) => n + l.qtyListed, 0)} items`}
+                                    </span>
+                                  ) : (
+                                    (c.collectedQty != null || c.expectedQty != null) && (
+                                      <span className="font-mono text-ink-muted">
+                                        {c.collectedQty ?? 0} of {c.expectedQty ?? "—"}
+                                      </span>
+                                    )
+                                  )}
+                                  {c.hasVariance && (
+                                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-ink-amber-dim text-ink-amber">
+                                      NOT AS LISTED
                                     </span>
                                   )}
                                   {/* Said in words as well, so it never rests on

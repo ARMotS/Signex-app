@@ -9,9 +9,16 @@ import {
   validateCollectionOutcome,
   validateCollectionType,
   isTerminalStatus,
+  type ReceiptLine,
 } from "@/lib/collections";
+import {
+  DIFF_REASON_LABEL,
+  resolveConfirmation,
+  type Confirmation,
+  type ConfirmInput,
+} from "@/lib/collection-confirm";
 import { logAudit } from "@/lib/audit";
-import { readInvoiceNoPattern } from "@/lib/config";
+import { readCollectionDeclaration, readInvoiceNoPattern } from "@/lib/config";
 import { normalizedInvoiceNoOrNull } from "@/lib/invoice-number";
 import { RECEIPT_STATUSES, sendCollectionReceiptEmail } from "@/lib/collection-notify";
 import { getScope, requireRole } from "@/lib/tenant";
@@ -52,7 +59,15 @@ async function loadCollection(
       // sheet carries no prices, and nothing priced is selected here.
       lines: {
         orderBy: { lineNo: "asc" },
-        select: { lineNo: true, itemCode: true, shortName: true, description: true, qtyListed: true, type: true },
+        select: {
+          lineNo: true,
+          itemCode: true,
+          shortName: true,
+          description: true,
+          qtyListed: true,
+          type: true,
+          isExtra: true,
+        },
       },
     },
   });
@@ -137,25 +152,49 @@ export const PUT = withAuth(async (
   const tripDriverId = collection.tripSheet.driverId;
 
   const body = await request.json();
-  const {
-    status,
-    exceptionReason,
-    collectedQty,
-    signedByName,
-    signatureImage,
-  } = body as {
-    status: CollectionStatus;
-    exceptionReason?: string;
-    collectedQty?: number | null;
+  const { signedByName, signatureImage } = body as {
     signedByName?: string;
     signatureImage?: string;
   };
 
+  // Two shapes. With `mode`, the driver confirmed against the office's sheet
+  // (confirm-by-exception) and the outcome is derived from the lines. Without
+  // it, the outcome is given directly — a collection whose sheet was never
+  // read, and any phone still running the previous version of the screen.
+  const listedLines = collection.lines.filter((l) => !l.isExtra);
+  let status: CollectionStatus;
+  let exceptionReason: string | null;
+  let collectedQty: number | null;
+  let confirmation: Extract<Confirmation, { ok: true }> | null = null;
+
+  if (body.mode !== undefined) {
+    if (listedLines.length === 0) {
+      return NextResponse.json(
+        { error: "This collection has no sheet lines to confirm against — record the outcome directly." },
+        { status: 400 }
+      );
+    }
+    const resolved = resolveConfirmation(listedLines, body as ConfirmInput);
+    if (!resolved.ok) {
+      return NextResponse.json({ error: resolved.error }, { status: 400 });
+    }
+    confirmation = resolved;
+    status = resolved.status;
+    exceptionReason = resolved.exceptionReason;
+    collectedQty = resolved.collectedItems;
+  } else {
+    status = body.status as CollectionStatus;
+    exceptionReason = typeof body.exceptionReason === "string" ? body.exceptionReason.trim() || null : null;
+    collectedQty = body.collectedQty ?? null;
+  }
+
   const validation = validateCollectionOutcome({
     status,
     exceptionReason,
-    collectedQty: collectedQty ?? null,
-    expectedQty: collection.expectedQty,
+    // Line counts are checked line by line above; the box count is not an
+    // item count, so it is only compared on the direct path.
+    collectedQty: confirmation ? null : collectedQty,
+    expectedQty: confirmation ? null : collection.expectedQty,
     signedByName,
     signatureImage,
   });
@@ -172,19 +211,77 @@ export const PUT = withAuth(async (
 
   const collectedAt = new Date();
 
-  // 1. The record first. Everything below can fail without costing a signature.
-  const updated = await ctx.db.collection.update({
-    where: { id },
-    data: {
-      status,
-      exceptionReason: exceptionReason?.trim() || null,
-      collectedQty: collectedQty ?? null,
-      signedByName: signedByName?.trim() || null,
-      signature: signatureImage || null,
-      collectedAt,
-      driverId: driver?.id ?? null,
-    },
+  // 1. The record first, lines and all, in one transaction. Everything below
+  //    can fail without costing a signature.
+  const lineType = listedLines[0]?.type ?? "CREDIT_RETURN";
+  const updated = await ctx.db.$transaction(async (tx) => {
+    const row = await tx.collection.update({
+      where: { id },
+      data: {
+        status,
+        exceptionReason,
+        collectedQty,
+        signedByName: signedByName?.trim() || null,
+        signature: signatureImage || null,
+        collectedAt,
+        driverId: driver?.id ?? null,
+        hasVariance: confirmation?.hasVariance ?? false,
+        failReason: confirmation?.failReason ?? null,
+      },
+    });
+    if (confirmation) {
+      for (const u of confirmation.lineUpdates) {
+        await tx.collectionLine.updateMany({
+          where: { collectionId: id, lineNo: u.lineNo, isExtra: false },
+          data: { qtyCollected: u.qtyCollected, diffReason: u.diffReason, diffNote: u.diffNote },
+        });
+      }
+      // An office re-record replaces the extras rather than adding to them.
+      await tx.collectionLine.deleteMany({ where: { collectionId: id, isExtra: true } });
+      const lastLineNo = Math.max(...listedLines.map((l) => l.lineNo));
+      if (confirmation.extras.length > 0) {
+        await tx.collectionLine.createMany({
+          data: confirmation.extras.map((e, i) => ({
+            collectionId: id,
+            lineNo: lastLineNo + i + 1,
+            description: e.description,
+            qtyListed: 0,
+            qtyCollected: e.qty,
+            isExtra: true,
+            type: lineType,
+          })),
+        });
+      }
+    }
+    return row;
   });
+
+  // The receipt's item table, straight from what was just recorded.
+  const receiptLines: ReceiptLine[] | undefined = confirmation
+    ? [
+        ...listedLines.map((l) => {
+          const u = confirmation!.lineUpdates.find((x) => x.lineNo === l.lineNo)!;
+          return {
+            itemCode: l.itemCode,
+            description: l.description,
+            qtyListed: l.qtyListed,
+            qtyCollected: u.qtyCollected,
+            diffReason: u.diffReason ? DIFF_REASON_LABEL[u.diffReason] : null,
+            diffNote: u.diffNote,
+            isExtra: false,
+          };
+        }),
+        ...confirmation.extras.map((e) => ({
+          itemCode: null,
+          description: e.description,
+          qtyListed: 0,
+          qtyCollected: e.qty,
+          diffReason: null,
+          diffNote: null,
+          isExtra: true,
+        })),
+      ]
+    : undefined;
 
   // 2. The document. A NOT_AVAILABLE or REFUSED collection still produces one —
   //    "we went and it was not there" is a result accounts needs on paper too.
@@ -222,13 +319,15 @@ export const PUT = withAuth(async (
         originalInvoiceNo: collection.originalInvoiceNo,
         status,
         expectedQty: collection.expectedQty,
-        collectedQty: collectedQty ?? null,
-        exceptionReason: exceptionReason?.trim() || null,
+        collectedQty,
+        exceptionReason,
         notes: collection.notes,
         customerName: collection.stop?.customerName ?? collection.customerName ?? "Unknown",
         signedByName: signedByName?.trim() || null,
         driverName: driver?.name ?? null,
         collectedAt,
+        lines: receiptLines,
+        declaration: await readCollectionDeclaration(ctx.tenantId),
       },
       signatureBytes
     );

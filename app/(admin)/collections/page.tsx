@@ -33,6 +33,11 @@ interface CollectionRecord {
   driverName: string | null;
   emailStatus: "NOT_SENT" | "SENDING" | "SENT" | "FAILED" | "NO_EMAIL" | null;
   emailError: string | null;
+  /** The driver recorded "Not as listed". */
+  hasVariance?: boolean;
+  /** Items on the office's sheet / items back — null when no sheet was read. */
+  itemsListed?: number | null;
+  itemsCollected?: number | null;
   tripSheetId: string;
   archived: boolean;
   completedTripSheetId: string | null;
@@ -570,10 +575,18 @@ export default function CollectionsPage() {
                       ? `${r.originalInvoiceNo ? " · " : ""}${SUBTYPE_LABEL[r.upliftSubtype] ?? r.upliftSubtype}`
                       : ""}
                   </p>
-                  {(r.collectedQty != null || r.expectedQty != null) && (
+                  {r.itemsListed != null ? (
+                    // Items against the office's sheet; the box count is not an item count.
                     <p className="text-[12px] font-mono text-ink-muted">
-                      {r.collectedQty ?? 0} of {r.expectedQty ?? "—"}
+                      {r.itemsCollected != null ? `${r.itemsCollected} of ${r.itemsListed} items` : `${r.itemsListed} items listed`}
+                      {r.hasVariance && <span className="ml-2 text-ink-amber">· not as listed</span>}
                     </p>
+                  ) : (
+                    (r.collectedQty != null || r.expectedQty != null) && (
+                      <p className="text-[12px] font-mono text-ink-muted">
+                        {r.collectedQty ?? 0} of {r.expectedQty ?? "—"}
+                      </p>
+                    )
                   )}
                   {r.exceptionReason && (
                     <p className="text-[12px] text-ink-amber truncate" title={r.exceptionReason}>

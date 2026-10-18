@@ -65,6 +65,9 @@ export interface TripCollection {
   sheetIssues?: { code: string; level: "review" | "warning"; message: string }[] | null;
   /** What the office's sheet lists — the driver brings these back. Never priced. */
   lines?: TripCollectionLine[];
+  /** The driver recorded "Not as listed". */
+  hasVariance?: boolean;
+  failReason?: string | null;
 }
 
 export interface TripCollectionLine {
@@ -75,6 +78,12 @@ export interface TripCollectionLine {
   qtyListed: number;
   reasonCode: string | null;
   type: CollectionType;
+  /** Set at the door; null until the collection has an outcome. */
+  qtyCollected?: number | null;
+  diffReason?: string | null;
+  diffNote?: string | null;
+  /** Handed over but not on the sheet. */
+  isExtra?: boolean;
 }
 
 export interface TripStop {
@@ -218,6 +227,12 @@ export interface ArchivedCollection {
   signedFilePath: string | null;
   /** Absent on snapshots taken before receipts were emailed. */
   emailStatus?: string | null;
+  /** The driver recorded "Not as listed". Absent before confirm-by-exception. */
+  hasVariance?: boolean;
+  failReason?: string | null;
+  /** Items on the sheet / items that came back; null when the sheet was never read. */
+  itemsListed?: number | null;
+  itemsCollected?: number | null;
 }
 
 export interface CompletedTripSheet {
@@ -788,6 +803,7 @@ export async function completeTripSheet(
     const collections = await db.collection.findMany({
       where: { tripSheetId: tripId },
       orderBy: { collectionNo: "asc" },
+      include: { lines: { select: { qtyListed: true, qtyCollected: true, isExtra: true } } },
     });
 
     const outstanding = collections.filter((c) => !isTerminalStatus(c.status));
@@ -894,6 +910,9 @@ export async function completeTripSheet(
             signedFileId: c.signedFileId,
             signedFilePath: c.signedFilePath,
             emailStatus: c.emailStatus,
+            hasVariance: c.hasVariance,
+            failReason: c.failReason,
+            ...lineTotals(c.lines),
           };
         }),
       },
@@ -1289,6 +1308,8 @@ interface RawCollection {
   sheetStatus?: "MISSING" | "READY" | "NEEDS_REVIEW";
   sheetIssues?: unknown;
   lines?: TripCollectionLine[];
+  hasVariance?: boolean;
+  failReason?: string | null;
 }
 
 /**
@@ -1327,7 +1348,28 @@ function mapCollection(collection: RawCollection): TripCollection {
       qtyListed: l.qtyListed,
       reasonCode: l.reasonCode,
       type: l.type,
+      qtyCollected: l.qtyCollected,
+      diffReason: l.diffReason,
+      diffNote: l.diffNote,
+      isExtra: l.isExtra,
     })),
+    hasVariance: collection.hasVariance,
+    failReason: collection.failReason,
+  };
+}
+
+/**
+ * Items listed on the office's sheet and items that came back. Null when the
+ * sheet was never read, so readers fall back to the box count.
+ */
+function lineTotals(
+  lines: { qtyListed: number; qtyCollected: number | null; isExtra: boolean }[]
+): { itemsListed: number | null; itemsCollected: number | null } {
+  if (lines.length === 0) return { itemsListed: null, itemsCollected: null };
+  const anyCollected = lines.some((l) => l.qtyCollected !== null);
+  return {
+    itemsListed: lines.filter((l) => !l.isExtra).reduce((n, l) => n + l.qtyListed, 0),
+    itemsCollected: anyCollected ? lines.reduce((n, l) => n + (l.qtyCollected ?? 0), 0) : null,
   };
 }
 
@@ -1374,6 +1416,14 @@ export interface CollectionRecord {
   archived: boolean;
   /** The archive row it came from, for linking back to the completed trip. */
   completedTripSheetId: string | null;
+  /** The driver recorded "Not as listed" — what came back differs from the sheet. */
+  hasVariance: boolean;
+  /**
+   * Items on the office's sheet, and items that came back — null when the
+   * sheet was never read (then expectedQty / collectedQty are the box count).
+   */
+  itemsListed: number | null;
+  itemsCollected: number | null;
 }
 
 export interface CollectionQuery {
@@ -1450,6 +1500,7 @@ export async function listCollections(
     include: {
       stop: { select: { customerName: true, stopNumber: true } },
       tripSheet: { select: { driverId: true, driver: { select: { name: true } } } },
+      lines: { select: { qtyListed: true, qtyCollected: true, isExtra: true } },
     },
     orderBy: { createdAt: "desc" },
     take: cap,
@@ -1475,6 +1526,8 @@ export async function listCollections(
     signedFilePath: c.signedFilePath,
     driverId: c.tripSheet?.driverId ?? c.driverId,
     driverName: c.tripSheet?.driver?.name ?? null,
+    hasVariance: c.hasVariance,
+    ...lineTotals(c.lines),
     emailStatus: c.emailStatus,
     emailError: c.emailError,
     // Filtered to attached rows above.
@@ -1539,6 +1592,9 @@ export async function listCollections(
         tripSheetId: archive.tripSheetId,
         archived: true,
         completedTripSheetId: archive.id,
+        hasVariance: c.hasVariance ?? false,
+        itemsListed: c.itemsListed ?? null,
+        itemsCollected: c.itemsCollected ?? null,
       });
     }
   }
