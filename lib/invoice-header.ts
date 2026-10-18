@@ -67,7 +67,7 @@ export function parseInvoiceDate(text: string): Date | null {
 // ─── Layout ───────────────────────────────────────────────────────────────
 
 /** A run of words on one line, separated from its neighbours by a column gap. */
-interface Segment {
+export interface Segment {
   text: string;
   x: number;
   right: number;
@@ -124,7 +124,7 @@ const ALL_LABELS = [...INVOICE_DATE_LABELS, ...DELIVER_TO_LABELS, ...BILL_TO_LAB
  * a bare label — else null. A label and its value written close together
  * ("Invoice Date: 14/10/2026") arrive as one segment.
  */
-function afterLabel(text: string, labels: string[]): string | null {
+export function afterLabel(text: string, labels: string[]): string | null {
   const t = text.replace(/\s+/g, " ").trim();
   const lower = t.toLowerCase();
   for (const l of labels) {
@@ -134,8 +134,6 @@ function afterLabel(text: string, labels: string[]): string | null {
   }
   return null;
 }
-
-const isLabel = (s: Segment) => afterLabel(s.text, ALL_LABELS) !== null;
 
 const centre = (s: Segment) => (s.x + s.right) / 2;
 
@@ -171,11 +169,17 @@ function findInvoiceDate(lines: Segment[][]): Date | null {
 }
 
 /**
- * The first line written under a party label ("Deliver to:"), within that
- * label's column — bounded on the right by the next label on its row, so the
- * side-by-side "Invoice to" / "Deliver to" boxes do not read each other.
+ * The first line written under a label ("Deliver to:", "Collection Address:"),
+ * within that label's column — bounded on the right by the next label on its
+ * row, so side-by-side boxes do not read each other. `allLabels` is every
+ * label the document uses, so a label is never mistaken for a value.
  */
-function findParty(lines: Segment[][], labels: string[]): string | null {
+export function firstLineUnder(
+  lines: Segment[][],
+  labels: string[],
+  allLabels: string[] = labels
+): string | null {
+  const labelled = (s: Segment) => afterLabel(s.text, allLabels) !== null;
   for (let li = 0; li < lines.length; li++) {
     const row = lines[li];
     for (const seg of row) {
@@ -183,13 +187,18 @@ function findParty(lines: Segment[][], labels: string[]): string | null {
       if (rest === null) continue;
       if (rest) return rest; // "Deliver to: ACME MOTORS" on one line
 
-      const nextLabel = row.filter((s) => s.x > seg.right && isLabel(s)).sort((a, b) => a.x - b.x)[0];
+      const nextLabel = row.filter((s) => s.x > seg.right && labelled(s)).sort((a, b) => a.x - b.x)[0];
       const left = seg.x - 20;
       const right = nextLabel ? nextLabel.x - 5 : Infinity;
 
       for (const line of lines.slice(li + 1)) {
         if (line[0].y - seg.y > seg.height * 8) break;
-        const inColumn = line.filter((s) => s.x >= left && s.x < right && !isLabel(s));
+        // A box's content starts where its label does. Without this, a value
+        // printed far to the right on the same line (a collection sheet's
+        // "Account no  V002") reads as the first line of the box.
+        const inColumn = line.filter(
+          (s) => s.x >= left && s.x < right && s.x - seg.x <= 40 && !labelled(s)
+        );
         const text = inColumn.map((s) => s.text).join(" ").trim();
         if (text) return text;
       }
@@ -197,6 +206,27 @@ function findParty(lines: Segment[][], labels: string[]): string | null {
   }
   return null;
 }
+
+/**
+ * The value written beside a label on the same line ("Invoice No.  130522"),
+ * or inside the label's own segment ("Invoice No: 130522").
+ */
+export function textBeside(lines: Segment[][], labels: string[], maxGap = 160): string | null {
+  for (const row of lines) {
+    for (const seg of row) {
+      const rest = afterLabel(seg.text, labels);
+      if (rest === null) continue;
+      if (rest) return rest;
+      const next = row
+        .filter((s) => s.x > seg.right && s.x - seg.right < maxGap)
+        .sort((a, b) => a.x - b.x)[0];
+      if (next) return next.text;
+    }
+  }
+  return null;
+}
+
+const findParty = (lines: Segment[][], labels: string[]) => firstLineUnder(lines, labels, ALL_LABELS);
 
 /** The header, read from the first page's text items. Pure — see the tests. */
 export function readHeaderFromItems(items: TextItem[]): InvoiceHeader {
@@ -210,10 +240,20 @@ export function readHeaderFromItems(items: TextItem[]): InvoiceHeader {
 
 /** First-page text items, or [] for a PDF with no text layer. */
 export async function extractFirstPageItems(pdf: Buffer): Promise<TextItem[]> {
+  return (await extractPageItems(pdf, 1))[0] ?? [];
+}
+
+/** Text items per page (all pages, or the first `maxPages`); [] pages for a scan. */
+export async function extractPageItems(pdf: Buffer, maxPages?: number): Promise<TextItem[][]> {
   // Dynamic import, as lib/contact-parser.ts: the package is ESM-first.
   const { PDFExtract } = await import("pdf.js-extract");
-  const data = await new PDFExtract().extractBuffer(pdf, { firstPage: 1, lastPage: 1 });
-  return (data.pages[0]?.content ?? []).map(({ x, y, str, width, height }) => ({ x, y, str, width, height }));
+  const data = await new PDFExtract().extractBuffer(
+    pdf,
+    maxPages ? { firstPage: 1, lastPage: maxPages } : {}
+  );
+  return data.pages.map((page) =>
+    page.content.map(({ x, y, str, width, height }) => ({ x, y, str, width, height }))
+  );
 }
 
 // ─── Scanned PDFs ─────────────────────────────────────────────────────────

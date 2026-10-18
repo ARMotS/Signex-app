@@ -953,6 +953,36 @@ export async function getOneDriveCollectionsSource(tenantId: string): Promise<{
  * Returns the created item so the caller can record its id — the archive view
  * resolves a signed collection by id first and falls back to the path.
  */
+/**
+ * Upload an office collection sheet into Collections/Pending — the "Attach
+ * collection sheet" fallback, for a sheet that never reached the folder.
+ */
+export async function uploadPendingCollectionToOneDrive(
+  tenantId: string,
+  filename: string,
+  buffer: Buffer
+): Promise<OneDriveItem> {
+  const account = await getAccount(tenantId);
+
+  if (!account?.collectionsFolderItemId) {
+    throw new Error("OneDrive collections folder not configured");
+  }
+
+  const pendingFolderId = await ensureSubfolder(
+    tenantId,
+    account.collectionsFolderItemId,
+    COLLECTIONS_PENDING_SUBFOLDER
+  );
+
+  return uploadFileToFolder(
+    tenantId,
+    pendingFolderId,
+    assertSafeItemName(filename),
+    buffer,
+    "application/pdf"
+  );
+}
+
 export async function uploadSignedCollectionToOneDrive(
   tenantId: string,
   filename: string,

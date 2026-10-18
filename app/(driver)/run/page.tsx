@@ -466,9 +466,10 @@ export default function RunPage() {
                           <div className="flex-1 min-w-0">
                             <p className="font-mono text-xs text-ink-black">
                               {c.collectionNo}
+                              {/* NOP on a collection row counts boxes. */}
                               {c.expectedQty != null && (
                                 <span className="ml-2 text-ink-muted">
-                                  ×{c.expectedQty}
+                                  📦 {c.expectedQty} {c.expectedQty === 1 ? "box" : "boxes"}
                                 </span>
                               )}
                             </p>

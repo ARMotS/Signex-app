@@ -13,6 +13,7 @@ import { matchStopsToContacts, applyContactMatches } from "@/lib/contact-matcher
 import { saveUploadedFile } from "@/lib/trip-sheet-folder";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { scheduleCollectionSheets } from "@/lib/collection-sheet-sync";
 
 /**
  * Parsing a spreadsheet, and batch-completing a day's trip sheets, both do real
@@ -192,6 +193,10 @@ export const GET = withAuth(async () => {
 
   const tripSheets = await getAllTripSheets(ctx.tenantId);
   const stats = await getTripStats(ctx.tenantId);
+  // This page polls, so it carries the re-check for collection sheets the
+  // office saves after a trip went out (throttled per collection, after the
+  // response — see lib/collection-sheet-sync.ts).
+  scheduleCollectionSheets(ctx.tenantId);
 
   return NextResponse.json({
     tripSheets,

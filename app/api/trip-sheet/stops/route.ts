@@ -5,6 +5,7 @@ import { scheduleDeliveryConfirmation } from "@/lib/delivery-notify";
 import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { readInvoiceNoPattern } from "@/lib/config";
+import { scheduleCollectionSheets } from "@/lib/collection-sheet-sync";
 import { normalizeInvoiceNo } from "@/lib/invoice-number";
 
 /**
@@ -45,6 +46,11 @@ export const GET = withAuth(async (request: NextRequest) => {
 
   const tripSheets = await getTripSheetsForDriver(ctx.tenantId, driverId);
   const activeSheets = tripSheets.filter((t) => t.status === "ACTIVE");
+  // A sheet the office saved since this run went out is picked up when the
+  // driver loads it — the moment it matters (throttled, after the response).
+  if (activeSheets.length > 0) {
+    scheduleCollectionSheets(ctx.tenantId, { tripSheetIds: activeSheets.map((t) => t.id) });
+  }
   // The invoice's own date, from the registry, so the driver can tell two
   // invoices for one customer apart at the door. Date only — nothing priced
   // ever reaches a driver.

@@ -39,6 +39,7 @@ import {
   uploadSignedCollectionToOneDrive,
   getCollectionItemByName,
   deleteFileById,
+  uploadPendingCollectionToOneDrive,
 } from "./microsoft-graph";
 
 /** Default fallback folder (relative to project root), as invoices does. */
@@ -128,13 +129,19 @@ export function assertCollectionsFolderIsSibling(
 // ─── Collection number normalisation ──────────────────────────────────────
 
 /**
- * Prefixes an office writes in front of a collection number, on the sheet or
- * in the document's filename: Collection # 001, Col 001, COLL-001, CO-001,
- * CO 001, C001, CR-001, UPL-001. Only stripped when digits follow, so a
- * collection number that merely starts with these letters survives.
+ * Whatever an office writes in front of a collection number, on the trip
+ * sheet or in the document's filename: Collection # 001, Col 001, COLL-001,
+ * CO 001, C001, CR-001, UPL-001, CRCOL-1797, CR COL 1797, "Credit Collection
+ * Sheet No. 1797". Any run of up to five lettered words, stripped only when a
+ * digit follows — so the number itself is never touched, and letters AFTER it
+ * still count: C001A stays 001A and never answers to C001.
+ *
+ * Deliberately wide (the client asked for it): the sheet writes 1797, the
+ * file is CRCOL-1797, the printed sheet says 001797, and other offices will
+ * write it their own way. The cost is that two numbers differing only in a
+ * letter PREFIX (AB12 / CD12) read as one — acceptable for numbered sheets.
  */
-const COLLECTION_PREFIX =
-  /^(?:COLLECTION|COLLECT|COLL|COL|CO|CR|C|UPLIFT|UPL)\s*(?:NO\.?|NUMBER|NUM\.?)?\s*[#:]?[\s\-_.#:]*(?=\d)/;
+const COLLECTION_PREFIX = /^(?:[A-Z]+[\s\-_.#:/]*){1,5}(?=\d)/;
 
 /** Marks a duplicated file rather than a different collection: "C001 (1)", "C001 copy". */
 const COPY_SUFFIX = /(?:\s*\(\d+\)|[\s_\-]*COPY(?:\s*\d+)?)$/;
@@ -164,6 +171,18 @@ export function collectionMatchKeys(raw: string): [string, string | null, string
   const unpadded = /^\d+$/.test(exact) ? exact.replace(/^0+(?=\d)/, "") : null;
 
   return [exact, digits, unpadded];
+}
+
+/**
+ * Whether two writings name the same collection — strictly: exact key or
+ * zero-stripped number, never the digits-only fallback. That fallback is fine
+ * for finding a document when nothing closer exists, but too loose for
+ * confirming a sheet IS this row's collection: C001A is not C001.
+ */
+export function sameCollectionNumber(a: string, b: string): boolean {
+  const [exactA, , unpaddedA] = collectionMatchKeys(a);
+  const [exactB, , unpaddedB] = collectionMatchKeys(b);
+  return (!!exactA && exactA === exactB) || (!!unpaddedA && unpaddedA === unpaddedB);
 }
 
 /** Normalise a collection number for filename matching (its exact key). */
@@ -541,6 +560,36 @@ export async function saveSignedCollection(
   const resolved = resolveWithinFolder(folderPath, SIGNED_SUBFOLDER, filename);
   fs.writeFileSync(resolved, pdfBuffer);
   return { filePath: resolved };
+}
+
+/**
+ * Store an office collection sheet in Pending/ — the "Attach collection sheet"
+ * fallback. Like saveInvoiceFile and unlike saveSignedCollection, it never
+ * replaces a document silently: the office's sheet is the source of truth for
+ * what the driver brings back, so swapping it is a deliberate act (overwrite).
+ */
+export async function saveCollectionDocument(
+  tenantId: string,
+  filename: string,
+  pdfBuffer: Buffer,
+  { overwrite = false }: { overwrite?: boolean } = {}
+): Promise<{ success: true; fileId?: string } | { success: false; conflict: true }> {
+  const onedrive = await getOneDriveCollectionsSource(tenantId);
+  if (onedrive) {
+    if (!overwrite && (await getCollectionItemByName(tenantId, filename))?.id) {
+      return { success: false, conflict: true };
+    }
+    const item = await uploadPendingCollectionToOneDrive(tenantId, filename, pdfBuffer);
+    return { success: true, fileId: item.id };
+  }
+
+  const folderPath = await getCollectionsFolderPath(tenantId);
+  const pendingFolder = path.join(folderPath, PENDING_SUBFOLDER);
+  if (!fs.existsSync(pendingFolder)) fs.mkdirSync(pendingFolder, { recursive: true });
+  const resolved = resolveWithinFolder(folderPath, PENDING_SUBFOLDER, filename);
+  if (!overwrite && fs.existsSync(resolved)) return { success: false, conflict: true };
+  fs.writeFileSync(resolved, pdfBuffer);
+  return { success: true };
 }
 
 /** Resolve the id of a pending document, for recording on the Collection row. */

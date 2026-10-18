@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useLiveSync } from "@/hooks/useLiveSync";
 import { FilterSearch } from "@/components/admin/FilterSearch";
 import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
+import CollectionSheetPanel, { type SheetCollection } from "@/components/admin/CollectionSheetPanel";
 
 interface TripStop {
   id: string;
@@ -59,6 +60,9 @@ interface TripCollection {
   collectedQty?: number | null;
   sourceFilePath?: string | null;
   signedFilePath?: string | null;
+  sheetStatus?: SheetCollection["sheetStatus"];
+  sheetIssues?: SheetCollection["sheetIssues"];
+  lines?: SheetCollection["lines"];
 }
 
 /** One collection frozen into a completed sheet's snapshot. */
@@ -3207,6 +3211,9 @@ export default function TripSheetPage() {
                                     >
                                       Document
                                     </a>
+                                  {/* The office's sheet: read into lines, or
+                                      missing, or needing a look. */}
+                                  <CollectionSheetPanel collection={c} onChanged={fetchTripSheets} />
                                 </div>
                               ))}
                             </div>
