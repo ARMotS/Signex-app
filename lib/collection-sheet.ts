@@ -72,6 +72,7 @@ const HEADER_LABELS = [...CUSTOMER_LABELS, ...INVOICE_LABELS, ...ACCOUNT_LABELS,
  * before the number is never swallowed into it.
  */
 const TITLE_NUMBER = /\bCOLLECTION\b.*?\b([A-Z]{0,6}-?\d[\d-]*)\s*$/i;
+const TITLE_NUMBER_ALONE = /^(?:no\.?\s*|#\s*)?[A-Z]{0,6}-?\d[\d-]*$/i;
 
 function readHeader(items: TextItem[]): Omit<ParsedSheet, "lines"> {
   const lines = segmentLines(items);
@@ -79,11 +80,24 @@ function readHeader(items: TextItem[]): Omit<ParsedSheet, "lines"> {
 
   let collectionNo = blank(textBeside(lines, NUMBER_LABELS));
   if (!collectionNo) {
-    for (const seg of lines.flat()) {
-      const m = seg.text.match(TITLE_NUMBER);
-      if (m) {
-        collectionNo = m[1].trim();
-        break;
+    find: for (const row of lines) {
+      for (const seg of row) {
+        const m = seg.text.match(TITLE_NUMBER);
+        if (m) {
+          collectionNo = m[1].trim();
+          break find;
+        }
+        // The number printed as its own run beside the title, further along
+        // the line than a space — as other generators lay it out.
+        if (/\bCOLLECTION\b/i.test(seg.text)) {
+          const beside = row
+            .filter((s) => s.x > seg.right && s.x - seg.right < 250 && TITLE_NUMBER_ALONE.test(s.text))
+            .sort((a, b) => a.x - b.x)[0];
+          if (beside) {
+            collectionNo = beside.text.replace(/^(?:no\.?|#)\s*/i, "").trim();
+            break find;
+          }
+        }
       }
     }
   }

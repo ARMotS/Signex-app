@@ -35,6 +35,8 @@ export async function collectionSheetPdf(
     invoiceNo?: string | null;
     customer?: string;
     pages?: FixtureLine[][];
+    /** Print the number as its own run, well clear of the title (other generators do). */
+    numberApart?: boolean;
   } = {}
 ): Promise<Buffer> {
   const doc = await PDFDocument.create();
@@ -47,7 +49,12 @@ export async function collectionSheetPdf(
     const page = doc.addPage([595, HEIGHT]);
     text(page, bold, "ELECTRO CITY CC", 29, 34, 16);
     text(page, bold, "COPY", 137, 157, 12);
-    text(page, bold, `CREDIT COLLECTION SHHET ${opts.number ?? "001797"}`, 195, 159, 12);
+    if (opts.numberApart) {
+      text(page, bold, "CREDIT COLLECTION SHEET", 195, 159, 12);
+      text(page, mono, opts.number ?? "001797", 420, 159, 12);
+    } else {
+      text(page, bold, `CREDIT COLLECTION SHHET ${opts.number ?? "001797"}`, 195, 159, 12);
+    }
 
     text(page, bold, "Collection Address:", 49, 184, 10);
     text(page, sans, "Account no", 353, 192, 8);
