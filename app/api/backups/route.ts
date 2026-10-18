@@ -29,12 +29,14 @@ export const POST = withAuth(async (request: NextRequest) => {
     invoiceFilenames = [],
     tripSheetFilenames = [],
     collectionFilenames = [],
+    creditNoteFilenames = [],
   } = body;
 
   if (
     invoiceFilenames.length === 0 &&
     tripSheetFilenames.length === 0 &&
-    collectionFilenames.length === 0
+    collectionFilenames.length === 0 &&
+    creditNoteFilenames.length === 0
   ) {
     return NextResponse.json(
       { error: "No items selected for backup" },
@@ -46,7 +48,8 @@ export const POST = withAuth(async (request: NextRequest) => {
     ctx.tenantId,
     invoiceFilenames,
     tripSheetFilenames,
-    collectionFilenames
+    collectionFilenames,
+    creditNoteFilenames
   );
 
   const datestamp = new Date().toISOString().slice(0, 10);
@@ -62,6 +65,11 @@ export const POST = withAuth(async (request: NextRequest) => {
   });
 });
 
+/**
+ * Purge signed invoices and processed trip sheets only. Collection receipts
+ * and signed credit notes are never purged — their Signed/ folders are the
+ * record a credit is reconciled against — so those names are not accepted.
+ */
 export const DELETE = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");

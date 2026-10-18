@@ -6,28 +6,37 @@
  *   - Completed trip sheets: source files moved to the trip-sheet processed/
  *     subfolder when a trip sheet is completed/archived
  *   - Signed collections: stamped receipts in the collections Signed/ subfolder
+ *   - Signed credit notes: the credits folder's Signed/ subfolder
  *
  * The ZIP archive layout:
  *   backup-YYYY-MM-DD/
  *     signed-invoices/     ← signed PDF files
  *     trip-sheets/         ← completed trip sheet source files (csv/xlsx)
  *     Collections/         ← stamped collection receipts
+ *     Credit-Notes/        ← signed credit notes, and credit-register.csv
  *     manifest.json        ← summary + timestamps
+ *
+ * Collection receipts and signed credit notes are DOWNLOAD-ONLY: nothing is
+ * deleted out of either Signed/ folder — they are the record a credit is
+ * reconciled against. Only signed invoices and processed trip sheets purge.
  *
  * Collections get their own top-level folder rather than being mixed in with
  * the invoices: they are a different kind of document going to a different
  * department, and a credit clerk should not have to tell them apart by filename.
  *
  * Scoped throughout: `tenantId` is required and is the first argument to every
- * function. Nothing here touches the database — the archive is assembled from
- * the invoice `signed/` and trip-sheet `processed/` folders, and those resolve
- * per scope (each ADMIN has its own folder config and OneDrive connection). So a
- * backup can only ever contain one ADMIN's files, and a purge only theirs.
+ * function. The files come from folders that resolve per scope (each ADMIN has
+ * its own folder config and OneDrive connection), and the only database reads —
+ * the credit notes' details and the credit register — go through the scoped
+ * client. So a backup can only ever contain one ADMIN's files, and a purge
+ * only theirs.
  */
 
 import fs from "fs";
 import path from "path";
 import JSZip from "jszip";
+import { scopedPrisma } from "./db-scoped";
+import { creditRegisterCsv, creditRegisterRows } from "./credit-register";
 import { getInvoiceFolderPath } from "./invoices";
 import {
   getCollectionsFolderPath,
@@ -41,6 +50,7 @@ import {
   listOneDriveSignedInvoices,
   listOneDriveSignedCollections,
   listOneDriveProcessedTripSheets,
+  listOneDriveSignedCreditNotes,
   downloadFileById,
   deleteFileById,
 } from "./microsoft-graph";
@@ -70,13 +80,27 @@ export interface BackupableCollection {
   signedAt: string;
 }
 
+export interface BackupableCreditNote {
+  /** The signed copy's filename in the credits Signed/ folder */
+  filename: string;
+  sizeBytes: number;
+  /** When it was filed (last-modified time) */
+  signedAt: string;
+  /** From the credit note's record, when Signex holds one for this file. */
+  creditNo: string | null;
+  invoiceNo: string | null;
+  customerName: string | null;
+}
+
 export interface BackupSummary {
   invoices: BackupableInvoice[];
   tripSheets: BackupableTripSheet[];
   collections: BackupableCollection[];
+  creditNotes: BackupableCreditNote[];
   totalInvoices: number;
   totalTripSheets: number;
   totalCollections: number;
+  totalCreditNotes: number;
 }
 
 // ─── Query backupable items ───────────────────────────────────────────────
@@ -271,25 +295,66 @@ export async function getBackupableCollections(
 }
 
 /**
+ * List signed credit notes eligible for backup: the credits folder's Signed/
+ * (OneDrive only — the credits folder has no local form), each named with
+ * its credit number, invoice and customer from the scope's own records.
+ */
+export async function getBackupableCreditNotes(
+  tenantId: string,
+  beforeDate?: Date
+): Promise<BackupableCreditNote[]> {
+  const items = await listOneDriveSignedCreditNotes(tenantId);
+  const inRange = items.filter((item) => !beforeDate || new Date(item.lastModifiedDateTime) < beforeDate);
+  if (inRange.length === 0) return [];
+
+  const notes = await scopedPrisma(tenantId).creditNote.findMany({
+    where: { status: "SIGNED", signedFilename: { in: inRange.map((i) => i.name) } },
+    select: { signedFilename: true, creditNo: true, invoiceNo: true, deliverToName: true, billToName: true },
+  });
+  const byName = new Map(notes.map((n) => [n.signedFilename!.toLowerCase(), n]));
+
+  return inRange
+    .map((item) => {
+      const note = byName.get(item.name.toLowerCase());
+      return {
+        filename: item.name,
+        sizeBytes: item.size,
+        signedAt: new Date(item.lastModifiedDateTime).toISOString(),
+        creditNo: note?.creditNo ?? null,
+        invoiceNo: note?.invoiceNo ?? null,
+        customerName: note?.deliverToName ?? note?.billToName ?? null,
+      };
+    })
+    .sort((a, b) => new Date(a.signedAt).getTime() - new Date(b.signedAt).getTime());
+}
+
+/**
  * Get a combined summary of all backupable items.
  */
 export async function getBackupSummary(
   tenantId: string,
   beforeDate?: Date
 ): Promise<BackupSummary> {
-  const [invoices, tripSheets, collections] = await Promise.all([
+  const [invoices, tripSheets, collections, creditNotes] = await Promise.all([
     getBackupableInvoices(tenantId, beforeDate),
     getBackupableTripSheets(tenantId, beforeDate),
     getBackupableCollections(tenantId, beforeDate),
+    // A credits folder that cannot be read must not take the whole page down.
+    getBackupableCreditNotes(tenantId, beforeDate).catch((err) => {
+      console.error(`Credit notes could not be listed for backup in scope ${tenantId}:`, err);
+      return [] as BackupableCreditNote[];
+    }),
   ]);
 
   return {
     invoices,
     tripSheets,
     collections,
+    creditNotes,
     totalInvoices: invoices.length,
     totalTripSheets: tripSheets.length,
     totalCollections: collections.length,
+    totalCreditNotes: creditNotes.length,
   };
 }
 
@@ -303,7 +368,8 @@ export async function createBackupZip(
   tenantId: string,
   invoiceFilenames: string[],
   tripSheetFilenames: string[],
-  collectionFilenames: string[] = []
+  collectionFilenames: string[] = [],
+  creditNoteFilenames: string[] = []
 ): Promise<Buffer> {
   const zip = new JSZip();
   const datestamp = new Date().toISOString().slice(0, 10);
@@ -412,20 +478,43 @@ export async function createBackupZip(
     }
   }
 
+  // ── Signed credit notes, and the register tracing each one back ──
+  // Files are matched against THIS scope's Signed/ listing by name, so a
+  // filename from anywhere else resolves to nothing.
+  const creditNotesIncluded: string[] = [];
+  if (creditNoteFilenames.length > 0) {
+    const items = await listOneDriveSignedCreditNotes(tenantId);
+    for (const filename of creditNoteFilenames) {
+      const item = items.find((i) => i.name === filename);
+      if (!item) continue;
+      try {
+        const fileData = await downloadFileById(tenantId, item.id);
+        zip.file(`${prefix}/Credit-Notes/${filename}`, fileData);
+        creditNotesIncluded.push(filename);
+      } catch {
+        // skip files we can't download
+      }
+    }
+    const register = await creditRegisterRows(tenantId, creditNotesIncluded);
+    zip.file(`${prefix}/Credit-Notes/credit-register.csv`, creditRegisterCsv(register));
+  }
+
   // ── Manifest ─────────────────────────────────────────────────────
   const manifest = {
     createdAt: new Date().toISOString(),
-    // Bumped because the shape gained a section. A reader of an old archive
-    // must not conclude "no Collections folder" means "no collections".
-    version: "1.1",
+    // Bumped whenever the shape gains a section. A reader of an old archive
+    // must not conclude "no Credit-Notes folder" means "no credit notes".
+    version: "1.2",
     contents: {
       signedInvoices: invoiceFilenames.length,
       tripSheets: tripSheetFilenames.length,
       collections: collectionFilenames.length,
+      creditNotes: creditNotesIncluded.length,
     },
     invoiceFilenames,
     tripSheetFilenames,
     collectionFilenames,
+    creditNoteFilenames: creditNotesIncluded,
   };
 
   zip.file(`${prefix}/manifest.json`, JSON.stringify(manifest, null, 2));

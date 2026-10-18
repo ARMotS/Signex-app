@@ -1114,6 +1114,26 @@ export async function uploadSignedCreditNote(
   return uploadFileToFolder(tenantId, signedId, assertSafeItemName(filename), buffer, "application/pdf");
 }
 
+/**
+ * Signed credit notes in this scope's credits Signed/ folder — what the
+ * Backups page offers. Nothing is deleted out of Signed/: it is the record
+ * accounts reconciles against. [] when there is no credits folder or no
+ * Signed/ in it yet.
+ */
+export async function listOneDriveSignedCreditNotes(tenantId: string): Promise<OneDriveItem[]> {
+  const account = await getAccount(tenantId);
+  if (!account?.creditsFolderItemId) return [];
+
+  const children = await listFolderById(tenantId, account.creditsFolderItemId);
+  const signedFolder = children.find(
+    (item) => item.folder && item.name.toLowerCase() === CREDITS_SUBFOLDERS.signed.toLowerCase()
+  );
+  if (!signedFolder) return [];
+
+  const items = await listFolderById(tenantId, signedFolder.id);
+  return items.filter((item) => !item.folder && item.name.toLowerCase().endsWith(".pdf"));
+}
+
 /** Move a credit note into Signed/ or Rejected/ (renamed on a clash, never overwritten). */
 export async function moveCreditNoteFile(
   tenantId: string,
