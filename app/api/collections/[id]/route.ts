@@ -48,6 +48,12 @@ async function loadCollection(
     include: {
       stop: { select: { id: true, customerName: true, stopNumber: true } },
       tripSheet: { select: { driverId: true } },
+      // What the office's sheet lists — shown to the driver read-only. The
+      // sheet carries no prices, and nothing priced is selected here.
+      lines: {
+        orderBy: { lineNo: "asc" },
+        select: { lineNo: true, itemCode: true, shortName: true, description: true, qtyListed: true, type: true },
+      },
     },
   });
 

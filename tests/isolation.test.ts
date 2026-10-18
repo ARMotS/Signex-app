@@ -3772,4 +3772,174 @@ suite("cross-ADMIN isolation", () => {
       expect(await db().invoice.count({ where: { tenantId } })).toBe(0);
     });
   });
+
+  // ── Collection sheets ───────────────────────────────────────────────
+  describe("collection sheets", () => {
+    /** A live run in `fx`'s scope carrying collection 1797 against invoice 130522. */
+    async function liveCollection(fx: typeof f.a, collectionNo = "1797") {
+      const { saveTripSheet } = await import("@/lib/trip-data");
+      const trip = await saveTripSheet(fx.tenantId, {
+        driverId: fx.driver.id,
+        driverName: fx.driver.name,
+        regNo: "REG-S",
+        uploadedBy: fx.admin.id,
+        sourceFilename: `sheet-${collectionNo}.csv`,
+        stops: [
+          {
+            stopNumber: 1,
+            invoiceNumber: "",
+            customerName: "VISA AUTO ELECTRICAL",
+            address: "",
+            nop: 0,
+            status: "PENDING",
+            collections: [
+              {
+                id: "preview-id",
+                collectionNo,
+                type: "CREDIT_RETURN",
+                originalInvoiceNo: "130522",
+                status: "PENDING",
+                expectedQty: 1,
+              },
+            ],
+          },
+        ],
+      });
+      return db().collection.findFirstOrThrow({ where: { tripSheetId: trip.id, collectionNo } });
+    }
+
+    /** Graph serves the fixture sheet for downloads from Pending/, and records every call. */
+    async function withSheetOnGraph<T>(run: () => Promise<T>): Promise<T> {
+      const { collectionSheetPdf } = await import("./helpers/collection-sheet-fixture");
+      const pdf = await collectionSheetPdf();
+      const fetchMock = vi.mocked(fetch);
+      const original = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation(async (url: any, init: any) => {
+        const u = String(url);
+        const auth: string | undefined = init?.headers?.Authorization;
+        if (u.includes("Pending")) {
+          graphCalls.push({ url: `${init?.method ?? "GET"} ${u}`, token: auth ? auth.replace("Bearer ", "") : null });
+          if (init?.method === "PUT") {
+            return new Response(JSON.stringify({ id: "uploaded-sheet", name: "1797.pdf" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (u.includes(":/content")) {
+            return new Response(new Uint8Array(pdf), { status: 200, headers: { "Content-Type": "application/pdf" } });
+          }
+          // The "is a sheet already there?" check: no.
+          return new Response("{}", { status: 404 });
+        }
+        return original(url, init);
+      });
+      try {
+        return await run();
+      } finally {
+        fetchMock.mockImplementation(original);
+      }
+    }
+
+    const sheetForm = async () => {
+      const { collectionSheetPdf } = await import("./helpers/collection-sheet-fixture");
+      const form = new FormData();
+      form.append("file", new File([new Uint8Array(await collectionSheetPdf())], "scan.pdf", { type: "application/pdf" }));
+      return form;
+    };
+
+    it("an attached sheet is stored through the caller's own connection and read into the caller's scope", async () => {
+      const collection = await liveCollection(f.a);
+      const { POST } = await import("@/app/api/collections/[id]/sheet/route");
+      useSession(adminSession(f.a));
+
+      const res = await withSheetOnGraph(async () =>
+        POST(formReq(`/api/collections/${collection.id}/sheet`, await sheetForm()), params({ id: collection.id }))
+      );
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ outcome: "read", status: "READY", lines: 3 });
+
+      const pendingCalls = graphCalls.filter((c) => c.url.includes("Pending"));
+      expect(pendingCalls.length).toBeGreaterThan(0);
+      for (const call of pendingCalls) {
+        expect(call.token).toBe("access-token-A");
+        expect(call.url).toContain("collections-folder-A");
+      }
+
+      const lines = await db().collectionLine.findMany({ where: { collectionId: collection.id }, orderBy: { lineNo: "asc" } });
+      expect(lines.map((l) => [l.tenantId, l.description, l.qtyListed, l.type])).toEqual([
+        [f.a.tenantId, "0.75MM 7COR CABLE P/30MR", 1, "CREDIT_RETURN"],
+        [f.a.tenantId, "12V HYBRID REG (MONARK)", 1, "CREDIT_RETURN"],
+        [f.a.tenantId, "12V 5PIN 30A BOSCH RELAY", 2, "CREDIT_RETURN"],
+      ]);
+      expect(await db().collectionLine.count({ where: { tenantId: f.b.tenantId } })).toBe(0);
+    });
+
+    it("ADMIN 2 cannot attach, re-read or approve ADMIN 1's sheet — 404, nothing written", async () => {
+      const collection = await liveCollection(f.a, "1798");
+      const { POST, PUT } = await import("@/app/api/collections/[id]/sheet/route");
+      useSession(adminSession(f.b));
+
+      const attach = await withSheetOnGraph(async () =>
+        POST(formReq(`/api/collections/${collection.id}/sheet`, await sheetForm()), params({ id: collection.id }))
+      );
+      expect(attach.status).toBe(404);
+      for (const action of ["reread", "approve"]) {
+        const res = await PUT(
+          req(`/api/collections/${collection.id}/sheet`, { method: "PUT", body: { action } }),
+          params({ id: collection.id })
+        );
+        expect(res.status).toBe(404);
+      }
+      expect(graphCalls.some((c) => c.url.includes("Pending"))).toBe(false);
+      expect(await db().collectionLine.count({ where: { collectionId: collection.id } })).toBe(0);
+    });
+
+    it("is closed to drivers", async () => {
+      const collection = await liveCollection(f.a, "1799");
+      const { PUT } = await import("@/app/api/collections/[id]/sheet/route");
+      useSession(driverSession(f.a));
+      const res = await PUT(
+        req(`/api/collections/${collection.id}/sheet`, { method: "PUT", body: { action: "reread" } }),
+        params({ id: collection.id })
+      );
+      expect(res.status).toBe(403);
+    });
+
+    it("refuses a collection whose outcome is already recorded", async () => {
+      const collection = await liveCollection(f.a, "1800");
+      await db().collection.update({
+        where: { id: collection.id },
+        data: { status: "REFUSED", exceptionReason: "Customer refused", collectedAt: new Date() },
+      });
+      const { POST } = await import("@/app/api/collections/[id]/sheet/route");
+      useSession(adminSession(f.a));
+      const res = await withSheetOnGraph(async () =>
+        POST(formReq(`/api/collections/${collection.id}/sheet`, await sheetForm()), params({ id: collection.id }))
+      );
+      expect(res.status).toBe(409);
+    });
+
+    it("a driver sees the lines read-only on their own collection", async () => {
+      const collection = await liveCollection(f.a, "1801");
+      await db().collectionLine.create({
+        data: { tenantId: f.a.tenantId, collectionId: collection.id, lineNo: 1, description: "12V REG", qtyListed: 2 },
+      });
+      const { GET } = await import("@/app/api/collections/[id]/route");
+
+      useSession(driverSession(f.a));
+      const body = await (await GET(req(`/api/collections/${collection.id}`), params({ id: collection.id }))).json();
+      expect(body.collection.lines).toEqual([
+        { lineNo: 1, itemCode: null, shortName: null, description: "12V REG", qtyListed: 2, type: "CREDIT_RETURN" },
+      ]);
+    });
+
+    it("a line cannot be attached to another scope's collection", async () => {
+      const collection = await liveCollection(f.a, "1802");
+      await expect(
+        db().collectionLine.create({
+          data: { tenantId: f.b.tenantId, collectionId: collection.id, lineNo: 1, description: "X", qtyListed: 1 },
+        })
+      ).rejects.toThrow();
+    });
+  });
 });

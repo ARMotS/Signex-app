@@ -22,6 +22,7 @@ import { mapWithConcurrency } from "./concurrency";
 import { readInvoiceNoPattern } from "./config";
 import { normalizeInvoiceNo, normalizedInvoiceNoOrNull, type InvoiceNoPattern } from "./invoice-number";
 import { ensureInvoices, scheduleInvoiceHeaders } from "./invoice-registry";
+import { scheduleCollectionSheets } from "./collection-sheet-sync";
 
 export type StopStatus = "PENDING" | "IN_PROGRESS" | "SIGNED";
 
@@ -59,6 +60,21 @@ export interface TripCollection {
   signedByName?: string | null;
   collectedAt?: Date | null;
   driverId?: string | null;
+  /** Whether the office's sheet has been read into lines (lib/collection-sheet.ts). */
+  sheetStatus?: "MISSING" | "READY" | "NEEDS_REVIEW";
+  sheetIssues?: { code: string; level: "review" | "warning"; message: string }[] | null;
+  /** What the office's sheet lists — the driver brings these back. Never priced. */
+  lines?: TripCollectionLine[];
+}
+
+export interface TripCollectionLine {
+  lineNo: number;
+  itemCode: string | null;
+  shortName: string | null;
+  description: string;
+  qtyListed: number;
+  reasonCode: string | null;
+  type: CollectionType;
 }
 
 export interface TripStop {
@@ -356,6 +372,8 @@ export async function saveTripSheet(
   let collections: Awaited<ReturnType<typeof db.collection.findMany>> = [];
   if (collectionRows.length > 0) {
     await db.collection.createMany({ data: collectionRows });
+    // Each collection's office sheet, read into lines after the response.
+    scheduleCollectionSheets(tenantId, { tripSheetIds: [created.id], minIntervalMs: 0 });
     collections = await db.collection.findMany({
       where: { tripSheetId: created.id },
       orderBy: { collectionNo: "asc" },
@@ -423,7 +441,11 @@ export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
         // driver's run sheet, the dispatcher's trip view and the completion
         // guard all need them, and a stop whose collections were silently
         // absent would look finished when it is not.
-        collections: { orderBy: { collectionNo: "asc" } },
+        collections: {
+          orderBy: { collectionNo: "asc" },
+          // The office sheet's lines: small, never priced, read by the trip view.
+          include: { lines: { orderBy: { lineNo: "asc" } } },
+        },
         // Lines the customer refused — the driver must not hand them over.
         rejectedLines: { orderBy: { createdAt: "asc" } },
       },
@@ -487,7 +509,11 @@ export async function getTripSheet(
         // driver's run sheet, the dispatcher's trip view and the completion
         // guard all need them, and a stop whose collections were silently
         // absent would look finished when it is not.
-        collections: { orderBy: { collectionNo: "asc" } },
+        collections: {
+          orderBy: { collectionNo: "asc" },
+          // The office sheet's lines: small, never priced, read by the trip view.
+          include: { lines: { orderBy: { lineNo: "asc" } } },
+        },
         // Lines the customer refused — the driver must not hand them over.
         rejectedLines: { orderBy: { createdAt: "asc" } },
       },
@@ -542,7 +568,11 @@ export async function getTripSheetsForDriver(
         // driver's run sheet, the dispatcher's trip view and the completion
         // guard all need them, and a stop whose collections were silently
         // absent would look finished when it is not.
-        collections: { orderBy: { collectionNo: "asc" } },
+        collections: {
+          orderBy: { collectionNo: "asc" },
+          // The office sheet's lines: small, never priced, read by the trip view.
+          include: { lines: { orderBy: { lineNo: "asc" } } },
+        },
         // Lines the customer refused — the driver must not hand them over.
         rejectedLines: { orderBy: { createdAt: "asc" } },
       },
@@ -1256,6 +1286,9 @@ interface RawCollection {
   signedByName: string | null;
   collectedAt: Date | null;
   driverId: string | null;
+  sheetStatus?: "MISSING" | "READY" | "NEEDS_REVIEW";
+  sheetIssues?: unknown;
+  lines?: TripCollectionLine[];
 }
 
 /**
@@ -1282,6 +1315,19 @@ function mapCollection(collection: RawCollection): TripCollection {
     signedByName: collection.signedByName,
     collectedAt: collection.collectedAt,
     driverId: collection.driverId,
+    sheetStatus: collection.sheetStatus,
+    sheetIssues: Array.isArray(collection.sheetIssues)
+      ? (collection.sheetIssues as TripCollection["sheetIssues"])
+      : null,
+    lines: collection.lines?.map((l) => ({
+      lineNo: l.lineNo,
+      itemCode: l.itemCode,
+      shortName: l.shortName,
+      description: l.description,
+      qtyListed: l.qtyListed,
+      reasonCode: l.reasonCode,
+      type: l.type,
+    })),
   };
 }
 

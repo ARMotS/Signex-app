@@ -18,6 +18,14 @@ interface CollectionData {
   expectedQty: number | null;
   sourceFilePath: string | null;
   stop: { customerName: string; stopNumber: number };
+  /** The office's sheet, read into lines. Empty until the sheet is on file. */
+  lines?: {
+    lineNo: number;
+    itemCode: string | null;
+    shortName: string | null;
+    description: string;
+    qtyListed: number;
+  }[];
 }
 
 const TYPE_LABEL: Record<CollectionData["type"], string> = {
@@ -295,6 +303,32 @@ export default function CollectPage() {
       </div>
 
       <div className="flex-1 overflow-y-auto">
+        {/* What the office's sheet lists — read-only. The sheet is the source
+            of truth for what to bring back; there is nothing to pick here. */}
+        {(collection?.lines?.length ?? 0) > 0 && (
+          <div className="px-4 py-3 border-b border-ink-border">
+            <p className="text-[10px] font-mono uppercase tracking-wide text-ink-muted-light mb-2">
+              To collect · {collection!.lines!.reduce((n, l) => n + l.qtyListed, 0)} item
+              {collection!.lines!.reduce((n, l) => n + l.qtyListed, 0) === 1 ? "" : "s"}
+            </p>
+            <ul className="space-y-1.5">
+              {collection!.lines!.map((line) => (
+                <li key={line.lineNo} className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm text-ink-black leading-snug">{line.description}</p>
+                    {(line.itemCode || line.shortName) && (
+                      <p className="text-[11px] font-mono text-ink-muted-light truncate">
+                        {line.itemCode ?? line.shortName}
+                      </p>
+                    )}
+                  </div>
+                  <span className="shrink-0 font-mono text-sm font-medium text-ink-black">×{line.qtyListed}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* Source document — collapsed by default. A driver wants the outcome
             buttons first; the paperwork is there to check against, not to read. */}
         {collection?.sourceFilePath ? (

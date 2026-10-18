@@ -52,6 +52,7 @@ model Tenant {
   importedFiles ImportedFile[]
   auditLogs     AuditLog[]
   collections   Collection[]
+  collectionLines CollectionLine[]
   removedStops  RemovedStop[]
   rejectedLines RejectedLine[]
   reallocatedStops ReallocatedStop[]
@@ -338,6 +339,16 @@ enum CollectionStatus {
   REFUSED
 }
 
+/// Whether the office's collection sheet has been read into lines.
+/// MISSING: no sheet found yet (the driver can still collect against the NOP
+/// count). READY: lines read and consistent with the trip sheet row.
+/// NEEDS_REVIEW: read, but something disagrees — the office should look.
+enum CollectionSheetStatus {
+  MISSING
+  READY
+  NEEDS_REVIEW
+}
+
 model Collection {
   id                String           @id @default(cuid())
   /// The number on the trip sheet's COLLECTNO column. Unique per trip within a
@@ -423,6 +434,26 @@ model Collection {
   // is never deleted while anything points at it.
   invoice   Invoice?  @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
 
+  // ── The office's collection sheet, read into lines (lib/collection-sheet.ts)
+  sheetStatus       CollectionSheetStatus @default(MISSING)
+  /// What disagreed on the last read — shown to the office. [{code, message}]
+  sheetIssues       Json?
+  /// The sheet's own header as read (collection no, invoice no, customer,
+  /// date, account) — what the office compares against the trip sheet row.
+  sheetHeader       Json?
+  /// TEXT (the PDF's text layer, by position) or AI (a scan read by Claude).
+  sheetSource       String?
+  sheetReadAt       DateTime?
+  /// The document's last-modified time when it was read: a sheet re-saved by
+  /// the office before the trip starts is read again.
+  sheetFileModified DateTime?
+  /// Last look for a sheet, read or not — throttles the re-checks.
+  sheetCheckedAt    DateTime?
+  sheetError        String?   @db.Text
+  sheetReviewedBy   String?
+  sheetReviewedAt   DateTime?
+  lines             CollectionLine[]
+
   @@unique([tenantId, tripSheetId, collectionNo])
   @@index([tenantId])
   @@index([tripSheetId])
@@ -433,6 +464,43 @@ model Collection {
   @@index([tenantId, type, collectedAt])
   @@index([tenantId, invoiceNoNormalized])
   @@index([tenantId, completedTripSheetId])
+  // Composite-FK target, so a CollectionLine cannot hang off another scope's collection.
+  @@unique([tenantId, id])
+}
+
+/// One line of the office's collection sheet — what the driver is expected to
+/// bring back. Read off the sheet, never typed by the driver: the sheet is the
+/// source of truth, and the driver records only differences (step 5).
+model CollectionLine {
+  id           String   @id @default(cuid())
+  tenantId     String   @default("")
+  tenant       Tenant   @relation(fields: [tenantId], references: [id])
+  collectionId String
+  /// Position on the sheet, 1-based, across pages.
+  lineNo       Int
+  /// The sheet's "Product no".
+  itemCode     String?
+  /// The unlabelled short-name column between Product no and Description.
+  shortName    String?
+  description  String
+  /// The sheet's Qty: the count the office expects back.
+  qtyListed    Int
+  /// The sheet's Returned column as printed — 0 on the office's copy. What
+  /// the driver actually collects is recorded at the door (step 5).
+  qtyReturnedPrinted Int?
+  /// The sheet's Reason cell, as printed (a code on the client's sheet).
+  reasonCode   String?
+  /// Credit return or non-credit uplift. The sheet has no Type column: a sheet
+  /// that names an invoice is a credit return against it; one with no invoice
+  /// (or a row the trip sheet marks as an uplift) is crates, parcels or
+  /// documents — never matched to a credit note.
+  type         CollectionType @default(CREDIT_RETURN)
+  createdAt    DateTime @default(now())
+
+  collection Collection @relation(fields: [tenantId, collectionId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenantId, collectionId, lineNo])
+  @@index([tenantId, collectionId])
 }
 
 // ─── Completed Trip Sheets (archive) ──────────────────────────────────────
