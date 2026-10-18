@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useLiveSync } from "@/hooks/useLiveSync";
+import { DocChip } from "@/components/ui/Chips";
 
 interface TripStop {
   id: string;
@@ -788,8 +789,12 @@ export default function DashboardPage() {
                                 <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-ink-muted font-medium shrink-0">
                                   {stop.stopNumber}
                                 </span>
-                                <span className="font-mono font-medium text-ink-black min-w-[92px]">
-                                  {stop.invoiceNumber}
+                                <span className="min-w-[120px]">
+                                  {stop.invoiceNumber ? (
+                                    <DocChip kind="INV" number={stop.invoiceNumber} />
+                                  ) : (
+                                    <span className="font-mono text-ink-muted">Collection only</span>
+                                  )}
                                 </span>
                                 <span className="text-ink-muted truncate flex-1">
                                   {stop.customerName}
@@ -1266,13 +1271,10 @@ function MiniStat({ label, value, tone }: { label: string; value: number; tone: 
 function StatusBadge({ status }: { status: string }) {
   const signed = status === "SIGNED";
   const active = status === "IN_PROGRESS";
+  // Pending is neutral, as on the trip card: red is kept for what went wrong.
   return (
-    <span className={signed ? "badge-signed" : active ? "badge-progress" : "badge-pending"}>
-      <span
-        className={`w-1.5 h-1.5 rounded-full ${
-          signed ? "bg-ink-green" : active ? "bg-ink-amber" : "bg-ink-red"
-        }`}
-      />
+    <span className={`status ${signed ? "tone-green" : active ? "tone-amber" : "tone-idle"}`}>
+      <span className="status-dot" aria-hidden="true" />
       {signed ? "Signed" : active ? "Active" : "Pending"}
     </span>
   );
@@ -1280,51 +1282,19 @@ function StatusBadge({ status }: { status: string }) {
 
 /** Where the customer's confirmation email got to, at a glance. */
 function EmailPill({ status }: { status?: string }) {
-  if (status === "SENT") {
-    return (
-      <span
-        className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono rounded bg-ink-green-dim text-ink-green shrink-0"
-        title="Confirmation email sent"
-      >
-        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-        Emailed
-      </span>
-    );
-  }
-
-  const map: Record<string, { label: string; className: string; title: string }> = {
-    SENDING: {
-      label: "Sending",
-      className: "bg-ink-surface text-ink-muted",
-      title: "Confirmation email is being sent",
-    },
-    FAILED: {
-      label: "Failed",
-      className: "bg-ink-red-dim text-ink-red",
-      title: "Confirmation email failed — send it from the queue",
-    },
-    NO_EMAIL: {
-      label: "No address",
-      className: "bg-ink-amber-dim text-ink-amber",
-      title: "This customer has no email address on file",
-    },
-    NOT_SENT: {
-      label: "Not sent",
-      className: "bg-ink-surface text-ink-muted",
-      title: "No confirmation has gone out yet",
-    },
+  const map: Record<string, { label: string; tone: string; title: string }> = {
+    SENT: { label: "Emailed", tone: "tone-green", title: "Confirmation email sent" },
+    SENDING: { label: "Sending", tone: "tone-idle", title: "Confirmation email is being sent" },
+    FAILED: { label: "Failed", tone: "tone-red", title: "Confirmation email failed — send it from the queue" },
+    NO_EMAIL: { label: "No address", tone: "tone-amber", title: "This customer has no email address on file" },
+    NOT_SENT: { label: "Not sent", tone: "tone-idle", title: "No confirmation has gone out yet" },
   };
 
   // An unrecognised or absent status is "we have no evidence it went" — never
   // silently rendered as sent.
   const pill = (status && map[status]) || map.NOT_SENT;
   return (
-    <span
-      className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono rounded shrink-0 ${pill.className}`}
-      title={pill.title}
-    >
+    <span className={`status ${pill.tone} shrink-0`} title={pill.title}>
       {pill.label}
     </span>
   );
@@ -1344,7 +1314,7 @@ function EmailQueueRow({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <p className="text-sm font-medium text-ink-black truncate">{item.customerName}</p>
-          <span className="font-mono text-xs text-ink-muted">{item.invoiceNumber}</span>
+          <DocChip kind="INV" number={item.invoiceNumber} tone="green" />
           <EmailPill status={item.emailStatus} />
         </div>
         <p className="text-xs text-ink-muted mt-0.5 truncate">

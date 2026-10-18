@@ -38,6 +38,7 @@ async function detail(ctx: Ctx, id: string) {
             select: {
               id: true,
               collectionNo: true,
+              originalInvoiceNo: true,
               status: true,
               customerName: true,
               collectedAt: true,

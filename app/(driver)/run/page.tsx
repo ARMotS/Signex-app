@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useCallback } from "react";
 import { useLiveSync } from "@/hooks/useLiveSync";
+import { DocChip, collectionKind, collectionTone, invoiceTone } from "@/components/ui/Chips";
 
 interface DriverInfo {
   id: string;
@@ -263,9 +264,9 @@ export default function RunPage() {
             Removed by the office — do not deliver
           </p>
           {removed.map((r) => (
-            <p key={r.id} className="text-xs text-ink-black py-0.5">
-              <span className="font-mono">{r.invoiceNumber}</span>
-              <span className="text-ink-muted"> · {r.customerName} — {r.reason}</span>
+            <p key={r.id} className="text-xs text-ink-black py-0.5 flex items-center gap-1.5 flex-wrap">
+              <DocChip kind="INV" number={r.invoiceNumber} tone="ref" />
+              <span className="text-ink-muted">{r.customerName} — {r.reason}</span>
               {r.keptForCollections && (
                 <span className="text-ink-violet"> (collection still on your run)</span>
               )}
@@ -281,9 +282,13 @@ export default function RunPage() {
             Moved to another driver — not yours to deliver
           </p>
           {movedAway.map((r) => (
-            <p key={r.id} className="text-xs text-ink-black py-0.5">
-              <span className="font-mono">{r.invoiceNumber || "Collection"}</span>
-              <span className="text-ink-muted"> · {r.customerName} → {r.toDriverName}</span>
+            <p key={r.id} className="text-xs text-ink-black py-0.5 flex items-center gap-1.5 flex-wrap">
+              {r.invoiceNumber ? (
+                <DocChip kind="INV" number={r.invoiceNumber} tone="ref" />
+              ) : (
+                <span className="font-mono">Collection</span>
+              )}
+              <span className="text-ink-muted">{r.customerName} → {r.toDriverName}</span>
             </p>
           ))}
         </div>
@@ -377,8 +382,8 @@ export default function RunPage() {
                       Deliveries
                     </p>
                     <div className="flex items-center gap-2 flex-wrap">
+                      <DocChip kind="INV" number={stop.invoiceNumber} tone={invoiceTone(stop.status)} />
                       <span className="font-mono text-xs text-ink-black">
-                        {stop.invoiceNumber}
                         {stop.invoiceDate && (
                           <span className="text-ink-muted">
                             {" · "}
@@ -387,8 +392,8 @@ export default function RunPage() {
                         )}
                       </span>
                       {stop.nop > 0 && (
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-ink-surface rounded text-[10px] font-mono">
-                          📦 {stop.nop} {stop.nop === 1 ? "parcel" : "parcels"}
+                        <span className="font-mono text-xs text-ink-muted">
+                          {stop.nop} {stop.nop === 1 ? "parcel" : "parcels"}
                         </span>
                       )}
                       {stop.status === "SIGNED" && (
@@ -457,29 +462,27 @@ export default function RunPage() {
                     <div className="space-y-2">
                       {collections.map((c) => (
                         <div key={c.id} className="flex items-start gap-2 flex-wrap">
-                          <span
-                            className={c.type === "CREDIT_RETURN" ? "badge-credit" : "badge-uplift"}
-                          >
-                            {c.type === "CREDIT_RETURN" ? "Credit Return" : "Uplift"}
-                          </span>
-
                           <div className="flex-1 min-w-0">
-                            <p className="font-mono text-xs text-ink-black">
-                              {c.collectionNo}
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <DocChip kind={collectionKind(c)} number={c.collectionNo} tone={collectionTone(c.status)} />
                               {/* NOP on a collection row counts boxes. */}
                               {c.expectedQty != null && (
-                                <span className="ml-2 text-ink-muted">
-                                  📦 {c.expectedQty} {c.expectedQty === 1 ? "box" : "boxes"}
+                                <span className="font-mono text-xs text-ink-muted">
+                                  {c.expectedQty} {c.expectedQty === 1 ? "box" : "boxes"}
                                 </span>
                               )}
-                            </p>
-                            <p className="text-[10px] text-ink-muted mt-0.5">
-                              {c.upliftSubtype
-                                ? SUBTYPE_LABEL[c.upliftSubtype] ?? c.upliftSubtype
-                                : c.originalInvoiceNo
-                                ? `Against ${c.originalInvoiceNo}`
-                                : null}
-                            </p>
+                            </div>
+                            {(c.upliftSubtype || c.originalInvoiceNo) && (
+                              <p className="text-[11px] text-ink-muted mt-1 flex items-center gap-1.5 flex-wrap">
+                                {c.upliftSubtype ? (
+                                  SUBTYPE_LABEL[c.upliftSubtype] ?? c.upliftSubtype
+                                ) : (
+                                  <>
+                                    against <DocChip kind="INV" number={c.originalInvoiceNo!} tone="ref" />
+                                  </>
+                                )}
+                              </p>
+                            )}
                             {isCollectionDone(c) && (
                               <p className="text-[10px] font-mono mt-0.5 text-ink-muted">
                                 {COLLECTION_STATUS_LABEL[c.status]}

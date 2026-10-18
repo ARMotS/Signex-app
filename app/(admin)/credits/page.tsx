@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import SignaturePad, { type SignaturePadHandle } from "@/components/SignaturePad";
+import { DocChip, StatusBadge as Badge, collectionKind, collectionTone, creditNoteTone } from "@/components/ui/Chips";
 
 /**
  * Credit notes from the accounting software, read off the branch's credits
@@ -98,6 +99,7 @@ interface CreditDetail {
     linkedBy: string | null;
     id: string;
     collectionNo: string;
+    originalInvoiceNo: string | null;
     status: string;
     customerName: string | null;
     collectedAt: string | null;
@@ -119,11 +121,11 @@ interface CreditDetail {
   allocations: { lineNo: number; collectionNo: string; qty: number }[];
 }
 
-const STATUS_LABEL: Record<Status, { text: string; className: string }> = {
-  RECEIVED: { text: "Ready to sign", className: "bg-ink-green-dim text-ink-green border-ink-green/20" },
-  NEEDS_REVIEW: { text: "Needs review", className: "bg-ink-amber-dim text-ink-amber border-ink-amber/20" },
-  SIGNED: { text: "Signed", className: "bg-ink-blue-dim text-ink-blue border-ink-blue/20" },
-  REJECTED: { text: "Rejected", className: "bg-ink-red-dim text-ink-red border-ink-red/20" },
+const STATUS_LABEL: Record<Status, string> = {
+  RECEIVED: "Ready to sign",
+  NEEDS_REVIEW: "Needs review",
+  SIGNED: "Signed",
+  REJECTED: "Rejected",
 };
 
 const TABS: { key: "" | Status; label: string }[] = [
@@ -147,8 +149,11 @@ const ago = (iso: string | null) => {
 };
 
 function StatusBadge({ status }: { status: Status }) {
-  const s = STATUS_LABEL[status];
-  return <span className={`inline-block px-2 py-0.5 rounded border text-[11px] font-mono ${s.className}`}>{s.text}</span>;
+  return (
+    <Badge tone={creditNoteTone(status)} dot>
+      {STATUS_LABEL[status]}
+    </Badge>
+  );
 }
 
 /** Poll every 30s while the tab is visible — that is also what keeps the folder looked at. */
@@ -268,15 +273,24 @@ export default function CreditsPage() {
           <button
             onClick={() => fileInput.current?.click()}
             disabled={uploading || !folder?.path}
-            className="px-3 py-2 text-xs font-mono border border-ink-border rounded hover:bg-ink-surface transition-colors disabled:opacity-40"
+            className="act"
           >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
             {uploading ? "Uploading…" : "Upload credit note"}
           </button>
           <button
             onClick={checkFolder}
             disabled={checking || !folder?.path}
-            className="px-3 py-2 text-xs font-mono font-medium text-white bg-ink-green rounded hover:bg-ink-green-hover transition-colors disabled:opacity-40"
+            className="act act-primary"
           >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
             {checking ? "Checking…" : "Check folder"}
           </button>
         </div>
@@ -389,12 +403,18 @@ export default function CreditsPage() {
                   onClick={() => setOpenId(r.id)}
                   className="border-b border-ink-border last:border-0 hover:bg-ink-surface cursor-pointer"
                 >
-                  <td className="px-4 py-2.5 font-mono text-ink-black">
-                    {r.creditNo ?? <span className="text-ink-muted">{r.sourceFilename}</span>}
+                  <td className="px-4 py-2.5 font-mono text-ink-black whitespace-nowrap">
+                    {r.creditNo ? (
+                      <DocChip kind="CN" number={r.creditNo} tone={creditNoteTone(r.status)} />
+                    ) : (
+                      <span className="text-ink-muted">{r.sourceFilename}</span>
+                    )}
                     {r.fileError && <span className="ml-1 text-ink-red" title={r.fileError}>!</span>}
                   </td>
                   <td className="px-4 py-2.5 font-mono text-ink-muted whitespace-nowrap">{formatDate(r.creditDate)}</td>
-                  <td className="px-4 py-2.5 font-mono">{r.invoiceNo ?? "—"}</td>
+                  <td className="px-4 py-2.5 whitespace-nowrap">
+                    {r.invoiceNo ? <DocChip kind="INV" number={r.invoiceNo} tone="ref" /> : "—"}
+                  </td>
                   <td className="px-4 py-2.5">{r.customerName ?? "—"}</td>
                   <td className="px-4 py-2.5 font-mono text-xs">
                     {r.collectionNos.length ? r.collectionNos.join(", ") : <span className="text-ink-muted">none</span>}
@@ -403,7 +423,7 @@ export default function CreditsPage() {
                   <td className="px-4 py-2.5 whitespace-nowrap">
                     <StatusBadge status={r.status} />
                     {r.status === "SIGNED" && r.filingError && (
-                      <span className="ml-2 text-[11px] font-mono text-ink-amber" title={r.filingError}>filing pending</span>
+                      <Badge tone="amber" title={r.filingError} className="ml-2">Filing pending</Badge>
                     )}
                     {r.status !== "SIGNED" && r.status !== "REJECTED" && (r.reviewCount > 0 || r.warningCount > 0) && (
                       <span className="ml-2 text-[11px] font-mono text-ink-muted">
@@ -484,7 +504,13 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
         <div className="sticky top-0 z-10 bg-white border-b border-ink-border px-4 sm:px-6 py-4 flex flex-wrap items-center gap-3">
           <div className="flex-1 min-w-0">
             <h2 className="font-mono text-base font-medium text-ink-black truncate">
-              {note ? (note.creditNo ? `Credit note ${note.creditNo}` : note.sourceFilename) : "Credit note"}
+              {note?.creditNo ? (
+                <span className="inline-flex items-center gap-2">
+                  Credit note <DocChip kind="CN" number={note.creditNo} tone={creditNoteTone(note.status)} />
+                </span>
+              ) : (
+                note?.sourceFilename ?? "Credit note"
+              )}
             </h2>
             {note && <p className="text-xs text-ink-muted font-mono truncate">{note.sourceFilename}</p>}
           </div>
@@ -493,21 +519,32 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
             href={`/api/credit-notes/${id}/document`}
             target="_blank"
             rel="noreferrer"
-            className="px-3 py-1.5 text-xs font-mono border border-ink-border rounded hover:bg-ink-surface"
+            className="act"
           >
-            Open PDF
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+            {note?.status === "SIGNED" ? "Open signed copy" : "Open PDF"}
           </a>
           {live && (
             <button
               onClick={() => act("reread", { action: "reread" })}
               disabled={!!busy}
-              className="px-3 py-1.5 text-xs font-mono border border-ink-border rounded hover:bg-ink-surface disabled:opacity-40"
+              className="act"
             >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
               {busy === "reread" ? "Reading…" : "Read again"}
             </button>
           )}
-          <button onClick={onClose} className="px-2 py-1 text-ink-muted hover:text-ink-black" aria-label="Close">
-            ✕
+          <button onClick={onClose} className="act act-icon" aria-label="Close">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
           </button>
         </div>
 
@@ -663,7 +700,7 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
                         className={`border rounded px-3 py-2 ${c.source === "EXCLUDED" ? "border-dashed border-ink-border opacity-60" : "border-ink-border"}`}
                       >
                         <div className="flex flex-wrap items-center gap-2 text-sm">
-                          <span className="font-mono text-ink-black">Collection {c.collectionNo}</span>
+                          <DocChip kind={collectionKind({ type: "CREDIT_RETURN", originalInvoiceNo: c.originalInvoiceNo })} number={c.collectionNo} tone={collectionTone(c.status)} />
                           <span className="text-[11px] font-mono text-ink-muted">
                             {c.status.toLowerCase()} {c.collectedAt ? `· ${ago(c.collectedAt)}` : ""}
                             {" · "}
@@ -673,7 +710,7 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
                             <button
                               onClick={() => act(c.linkId, { action: c.source === "EXCLUDED" ? "link" : "unlink", collectionId: c.id })}
                               disabled={!!busy}
-                              className="ml-auto text-[11px] font-mono text-ink-muted hover:text-ink-black hover:underline disabled:opacity-40"
+                              className={`act ml-auto ${c.source === "EXCLUDED" ? "" : "act-danger"}`}
                             >
                               {c.source === "EXCLUDED" ? "Put back" : "Not this one"}
                             </button>
@@ -700,16 +737,20 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
                     <ul className="space-y-1">
                       {note.candidates.map((c) => (
                         <li key={c.id} className="flex flex-wrap items-center gap-2 text-sm">
-                          <span className="font-mono">Collection {c.collectionNo}</span>
-                          <span className="text-[11px] font-mono text-ink-muted">
+                          <DocChip kind={collectionKind({ type: "CREDIT_RETURN", originalInvoiceNo: c.originalInvoiceNo })} number={c.collectionNo} tone={collectionTone(c.status)} />
+                          <span className="text-[11px] font-mono text-ink-muted inline-flex items-center gap-1.5 flex-wrap">
                             {c.customerName}
-                            {c.originalInvoiceNo ? ` · against ${c.originalInvoiceNo}` : ""}
+                            {c.originalInvoiceNo && (
+                              <>
+                                · against <DocChip kind="INV" number={c.originalInvoiceNo} tone="ref" />
+                              </>
+                            )}
                             {c.collectedAt ? ` · ${ago(c.collectedAt)}` : ""}
                           </span>
                           <button
                             onClick={() => act(c.id, { action: "link", collectionId: c.id })}
                             disabled={!!busy}
-                            className="ml-auto text-[11px] font-mono text-ink-green hover:underline disabled:opacity-40"
+                            className="act act-green ml-auto"
                           >
                             Link
                           </button>
@@ -750,12 +791,18 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
                     </div>
                   )}
                   {note.signedFilename ? (
-                    <p className="text-xs font-mono text-ink-muted">
-                      Filed in Signed/ as{" "}
-                      <a href={`/api/credit-notes/${id}/document`} target="_blank" rel="noreferrer" className="text-ink-green hover:underline">
-                        {note.signedFilename}
+                    <p className="text-xs font-mono text-ink-muted flex items-center gap-2 flex-wrap">
+                      <span>
+                        Filed in Signed/ as {note.signedFilename}
+                        {note.originalRemoved ? " · original removed from Originals/" : ""}
+                      </span>
+                      <a href={`/api/credit-notes/${id}/document`} target="_blank" rel="noreferrer" className="act">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                          <polyline points="14 2 14 8 20 8" />
+                        </svg>
+                        Open signed copy
                       </a>
-                      {note.originalRemoved ? " · original removed from Originals/" : ""}
                     </p>
                   ) : null}
                   {note.filingError && (
@@ -764,7 +811,7 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
                       <button
                         onClick={() => act("file", { action: "file" })}
                         disabled={!!busy}
-                        className="px-2 py-1 font-mono border border-ink-border rounded bg-white hover:bg-ink-surface disabled:opacity-40"
+                        className="act act-amber"
                       >
                         {busy === "file" ? "Filing…" : "Retry filing"}
                       </button>
@@ -894,8 +941,11 @@ function SignOffForm({
           <button
             onClick={sign}
             disabled={!ready || signing || busy}
-            className="px-4 py-2 text-sm font-mono font-medium text-white bg-ink-green rounded hover:bg-ink-green-hover disabled:opacity-40"
+            className="act act-primary"
           >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+            </svg>
             {signing ? "Signing…" : "Sign credit note"}
           </button>
         )}
@@ -903,8 +953,12 @@ function SignOffForm({
           <button
             onClick={() => setRejecting(true)}
             disabled={signing || busy}
-            className="px-3 py-2 text-xs font-mono text-ink-muted hover:text-ink-red hover:underline disabled:opacity-40"
+            className="act act-danger"
           >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+            </svg>
             Reject…
           </button>
         ) : (
@@ -919,11 +973,11 @@ function SignOffForm({
             <button
               onClick={() => onReject(rejectReason.trim())}
               disabled={rejectReason.trim().length < 3 || busy}
-              className="px-3 py-2 text-xs font-mono font-medium text-white bg-ink-red rounded hover:opacity-90 disabled:opacity-40"
+              className="act act-red"
             >
               Reject credit note
             </button>
-            <button onClick={() => setRejecting(false)} className="px-2 py-2 text-xs font-mono text-ink-muted hover:text-ink-black">
+            <button onClick={() => setRejecting(false)} className="act">
               Cancel
             </button>
           </div>

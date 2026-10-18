@@ -39,10 +39,11 @@ export interface SheetCollection {
   lines?: SheetLine[];
 }
 
+/** A button, not a badge: it opens the sheet panel. Its tint still says how the sheet stands. */
 const BADGE: Record<NonNullable<SheetCollection["sheetStatus"]>, { label: string; className: string }> = {
-  READY: { label: "Sheet", className: "bg-ink-green-dim text-ink-green border-ink-green/20" },
-  NEEDS_REVIEW: { label: "Sheet: review", className: "bg-ink-amber-dim text-ink-amber border-ink-amber/20" },
-  MISSING: { label: "No sheet", className: "bg-ink-surface text-ink-muted border-ink-border" },
+  READY: { label: "Sheet", className: "act act-green" },
+  NEEDS_REVIEW: { label: "Sheet · review", className: "act act-amber" },
+  MISSING: { label: "No sheet — look", className: "act" },
 };
 
 export default function CollectionSheetPanel({
@@ -124,7 +125,7 @@ export default function CollectionSheetPanel({
           e.stopPropagation();
           setOpen(true);
         }}
-        className={`font-mono text-[11px] px-1.5 py-0.5 rounded border ${badge.className}`}
+        className={badge.className}
         title={
           status === "MISSING"
             ? collection.sheetError
@@ -133,8 +134,16 @@ export default function CollectionSheetPanel({
             : `${lines.length} line(s) read from the office's sheet`
         }
       >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <line x1="8" y1="6" x2="21" y2="6" />
+          <line x1="8" y1="12" x2="21" y2="12" />
+          <line x1="8" y1="18" x2="21" y2="18" />
+          <line x1="3" y1="6" x2="3.01" y2="6" />
+          <line x1="3" y1="12" x2="3.01" y2="12" />
+          <line x1="3" y1="18" x2="3.01" y2="18" />
+        </svg>
         {badge.label}
-        {status !== "MISSING" && ` · ${lines.length}`}
+        {status === "READY" && ` · ${lines.length} line${lines.length === 1 ? "" : "s"}`}
       </button>
 
       {/* Rendered on the page body, not inside the trip card: the card's
