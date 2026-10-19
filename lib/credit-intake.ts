@@ -319,7 +319,7 @@ export async function reassessCreditNote(tenantId: string, creditNoteId: string)
   const linkedRows = linkedIds.length
     ? await db.collection.findMany({
         where: { id: { in: linkedIds } },
-        select: { id: true, collectionNo: true, lines: true, creditReview: true, creditReviewReason: true, tripSheetId: true },
+        select: { id: true, collectionNo: true, lines: true, creditReview: true, creditReviewReason: true },
         orderBy: { collectedAt: "asc" },
       })
     : [];
@@ -412,9 +412,8 @@ export async function reassessCreditNote(tenantId: string, creditNoteId: string)
       collectedLines,
       alreadyCredited,
       rejectedCollections: [...rejected.values()],
-      // Live collections only: one archived with no decision closed out
-      // before approvals existed, and can never be approved now.
-      unapprovedCollectionNos: linked.filter((c) => !c.creditReview && c.tripSheetId !== null).map((c) => c.collectionNo),
+      // Decided on the Collections tab, before or after the trip closes.
+      unapprovedCollectionNos: linked.filter((c) => !c.creditReview).map((c) => c.collectionNo),
     },
     note.readSource === "AI" ? "AI" : "TEXT"
   );

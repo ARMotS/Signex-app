@@ -7,11 +7,11 @@ import { reviewCreditCollection } from "@/lib/collection-review";
  * PUT /api/collections/[id]/review  { decision: "APPROVE" | "REJECT", reason? }
  *
  * The office approves a credit return that came back for credit, or rejects
- * it (reason required). Until it does, the trip cannot be completed.
+ * it (reason required), from the Collections tab — while its trip is live or
+ * after it closed. Until it does, a credit note for it cannot be signed.
  *
  * ADMIN only — the dispatcher's decision, never the driver's. Another scope's
- * collection is 404; one that needs no decision, or whose trip is completed,
- * is 409.
+ * collection is 404; one that needs no decision is 409.
  */
 export const PUT = withAuth(async (
   request: NextRequest,
@@ -29,7 +29,7 @@ export const PUT = withAuth(async (
     case "invalid":
       return NextResponse.json({ error: result.error }, { status: 400 });
     case "not_reviewable":
-    case "archived":
+    case "conflict":
       return NextResponse.json({ error: result.error }, { status: 409 });
     default:
       return NextResponse.json({ success: true, creditReview: result.creditReview });

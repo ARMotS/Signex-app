@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { DocChip, StatusBadge, collectionKind, collectionTone } from "@/components/ui/Chips";
-import { awaitingCreditReview } from "@/lib/collection-confirm";
+import { creditReviewRequired } from "@/lib/collection-confirm";
+import CreditReviewControl from "@/components/admin/CreditReviewControl";
 import RecordFilterBar, { Highlight, type FilterBarConfig } from "@/components/admin/RecordFilterBar";
 import { usePagedRecords, useRecordFilters } from "@/hooks/useRecordFilters";
 
@@ -46,6 +47,9 @@ interface CollectionRecord {
   /** The office's decision on a CR that came back; null when none (yet). */
   creditReview?: "APPROVED" | "REJECTED" | null;
   creditReviewReason?: string | null;
+  creditReviewedBy?: string | null;
+  /** The Collection row behind it (archived entries too) — what an approval acts on. */
+  rowId?: string | null;
   /** The invoice registry row it is credited against — its chain page. */
   invoiceId?: string | null;
   tripSheetId: string;
@@ -61,6 +65,8 @@ interface Counts {
   creditReturns: number;
   uplifts: number;
   exceptions: number;
+  /** Across the whole scope — a to-do count, not the filtered view. */
+  awaitingApproval?: number;
 }
 
 interface PageExtra {
@@ -246,7 +252,10 @@ export default function CollectionsPage() {
     noun: "collection",
     dateLabel: "Collected",
     tripDate: true,
-    statusOptions: (Object.keys(STATUS_LABEL) as CollectionRecord["status"][]).map((s) => ({ value: s, label: STATUS_LABEL[s] })),
+    statusOptions: [
+      { value: "AWAITING_APPROVAL", label: "Awaiting approval" },
+      ...(Object.keys(STATUS_LABEL) as CollectionRecord["status"][]).map((s) => ({ value: s, label: STATUS_LABEL[s] })),
+    ],
     typeOptions: [
       { value: "CREDIT_RETURN", label: "Credit returns" },
       { value: "NON_CREDIT_UPLIFT", label: "Uplifts" },
@@ -299,6 +308,23 @@ export default function CollectionsPage() {
       <FolderPanel />
 
       {/* ── Summary ─────────────────────────────────────────── */}
+      {/* Credit returns waiting on the office — the action this tab owns.
+          Accounts makes the credit note only once one is approved. */}
+      {(counts?.awaitingApproval ?? 0) > 0 && (
+        <button
+          type="button"
+          onClick={() => setFilters({ ...filters, status: ["AWAITING_APPROVAL"] })}
+          className="w-full mb-4 flex items-center gap-3 px-4 py-3 rounded border border-[color:var(--tone-amber-fg)]/25 bg-ink-amber-dim text-left hover:border-[color:var(--tone-amber-fg)]/50 transition-colors"
+        >
+          <span className="font-mono text-xl font-medium text-[color:var(--tone-amber-fg)]">{counts!.awaitingApproval}</span>
+          <span className="text-sm text-ink-black">
+            credit return{counts!.awaitingApproval === 1 ? "" : "s"} awaiting approval
+            <span className="block text-xs text-ink-muted">Approve or reject each one — accounts makes the credit note once it is approved.</span>
+          </span>
+          <span className="ml-auto act">Show them</span>
+        </button>
+      )}
+
       {counts && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
           {[
@@ -424,21 +450,14 @@ export default function CollectionsPage() {
                     <StatusBadge tone={collectionTone(r.status)} dot>
                       {STATUS_LABEL[r.status] ?? r.status}
                     </StatusBadge>
-                    {/* The office's decision on a CR that came back. */}
-                    {r.creditReview ? (
+                    {/* A decision with no row to act on (very old archive). */}
+                    {!r.rowId && r.creditReview && (
                       <StatusBadge
                         tone={r.creditReview === "APPROVED" ? "green" : "red"}
                         title={r.creditReviewReason ?? undefined}
                       >
                         {r.creditReview === "APPROVED" ? "Approved" : "Rejected"}
                       </StatusBadge>
-                    ) : (
-                      // Live only: a trip closed before approvals existed has none.
-                      !r.archived && awaitingCreditReview(r) && (
-                        <StatusBadge tone="amber" title="Approve or reject it on the trip card">
-                          Awaiting approval
-                        </StatusBadge>
-                      )
                     )}
                   </div>
                   {RECEIPT_STATUSES.has(r.status) && r.emailStatus && (
@@ -520,6 +539,28 @@ export default function CollectionsPage() {
                     </a>
                   )}
                 </div>
+
+                {/* The office's decision on a credit return that came back —
+                    made here, before or after its trip closes. Accounts makes
+                    the credit note once it is approved. */}
+                {r.rowId && creditReviewRequired(r) && (
+                  <div className="mt-2 md:col-span-5 flex items-center gap-2 flex-wrap rounded-md bg-ink-surface/60 px-2 py-1.5">
+                    <span className="text-[11px] font-mono text-ink-muted">Credit</span>
+                    <CreditReviewControl
+                      collection={{
+                        id: r.rowId,
+                        collectionNo: r.collectionNo,
+                        creditReview: r.creditReview ?? null,
+                        creditReviewReason: r.creditReviewReason ?? null,
+                        creditReviewedBy: r.creditReviewedBy ?? null,
+                      }}
+                      onChanged={list.reload}
+                    />
+                    {r.creditReview === "REJECTED" && r.creditReviewReason && (
+                      <span className="text-[11px] text-ink-muted">— {r.creditReviewReason}</span>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
           </div>

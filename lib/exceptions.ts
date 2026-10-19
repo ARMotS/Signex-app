@@ -144,7 +144,7 @@ export async function loadExceptions(
   const customerOf = (c: C) => c.stop?.customerName ?? c.customerName ?? null;
   const collectionHref = (c: C) =>
     c.invoiceId ? `/invoices/${c.invoiceId}` : c.tripSheetId ? "/trip-sheet" : "/collections";
-  const collectionRow = (c: C, detail: string): ExceptionRow => ({
+  const collectionRow = (c: C, detail: string, href?: string): ExceptionRow => ({
     id: `c-${c.id}`,
     kind: "collection",
     number: c.collectionNo,
@@ -153,7 +153,7 @@ export async function loadExceptions(
     customer: customerOf(c),
     date: iso(c.collectedAt ?? c.createdAt),
     detail,
-    href: collectionHref(c),
+    href: href ?? collectionHref(c),
     status: c.status,
   });
   const isCR = (c: C) => c.type === "CREDIT_RETURN" && !!c.originalInvoiceNo;
@@ -202,10 +202,16 @@ export async function loadExceptions(
     list(
       "awaiting_approval",
       "Credit returns awaiting approval",
-      "Came back on a live run; the trip cannot be completed until each is approved or rejected.",
+      "Came back; accounts makes the credit note only once each is approved.",
       scoped
-        .filter((c) => isCR(c) && came(c) && !c.creditReview && !!c.tripSheetId)
-        .map((c) => collectionRow(c, "Approve or reject it on the trip card"))
+        .filter((c) => isCR(c) && came(c) && !c.creditReview)
+        .map((c) =>
+          collectionRow(
+            c,
+            "Approve or reject it on the Collections tab",
+            `/collections?status=AWAITING_APPROVAL&q=${encodeURIComponent(c.collectionNo)}`
+          )
+        )
     ),
     list(
       "note_no_collection",
