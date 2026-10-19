@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { DocChip, StatusBadge, collectionKind, collectionTone } from "@/components/ui/Chips";
 import { awaitingCreditReview } from "@/lib/collection-confirm";
 
@@ -43,6 +44,8 @@ interface CollectionRecord {
   /** The office's decision on a CR that came back; null when none (yet). */
   creditReview?: "APPROVED" | "REJECTED" | null;
   creditReviewReason?: string | null;
+  /** The invoice registry row it is credited against — its chain page. */
+  invoiceId?: string | null;
   tripSheetId: string;
   archived: boolean;
   completedTripSheetId: string | null;
@@ -654,6 +657,16 @@ export default function CollectionsPage() {
                       </svg>
                       {sendingId === r.id ? "Sending…" : r.emailStatus === "FAILED" ? "Retry email" : "Send email"}
                     </button>
+                  )}
+                  {/* The invoice it is credited against, the whole chain. */}
+                  {r.invoiceId && (
+                    <Link href={`/invoices/${r.invoiceId}`} className="act" title="Delivery, collections and credit notes for this invoice">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="18" r="2.5" />
+                        <path d="M6 8.5v7M8.5 18h7" />
+                      </svg>
+                      Invoice chain
+                    </Link>
                   )}
                   {/* Only when there is a sheet to open (as on the trip card).
                       A live one is fetched by id; an archived one has no row

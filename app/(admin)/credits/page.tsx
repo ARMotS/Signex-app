@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import SignaturePad, { type SignaturePadHandle } from "@/components/SignaturePad";
 import { DocChip, StatusBadge as Badge, collectionKind, collectionTone, creditNoteTone } from "@/components/ui/Chips";
 
@@ -202,6 +203,15 @@ export default function CreditsPage() {
       clearInterval(timer);
     };
   }, [load, query]);
+
+  // /credits?note=<id> (from an invoice's chain) opens that note. Read after
+  // mount, so the server-rendered page and the first client render agree.
+  useEffect(() => {
+    const note = new URLSearchParams(window.location.search).get("note");
+    if (!note) return;
+    const t = setTimeout(() => setOpenId(note), 0);
+    return () => clearTimeout(t);
+  }, []);
 
   const flash = (ok: boolean, text: string) => {
     setMessage({ ok, text });
@@ -578,6 +588,17 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
                 </div>
               )}
               {note.fileError && <p className="text-xs font-mono text-ink-red">{note.fileError}</p>}
+
+              {/* The invoice this note credits — its whole chain, one tap away. */}
+              {note.invoice && (
+                <Link href={`/invoices/${note.invoice.id}`} className="act" title="Delivery, collections and credit notes for this invoice">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="18" r="2.5" />
+                    <path d="M6 8.5v7M8.5 18h7" />
+                  </svg>
+                  Invoice chain
+                </Link>
+              )}
 
               {/* Header */}
               <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">

@@ -4671,4 +4671,55 @@ suite("cross-ADMIN isolation", () => {
       expect(JSON.stringify(after.issues)).toContain("COLLECTION_REJECTED");
     });
   });
+  // ── The invoice chain ────────────────────────────────────────────────
+  describe("the invoice chain", () => {
+    it("shows only the caller's own collections and credit notes, and is 404 to another scope", async () => {
+      const { saveTripSheet } = await import("@/lib/trip-data");
+      // The same invoice number collected in both scopes.
+      for (const [fx, no] of [[f.a, "CH-A"], [f.b, "CH-B"]] as const) {
+        await saveTripSheet(fx.tenantId, {
+          driverId: fx.driver.id,
+          driverName: fx.driver.name,
+          regNo: "REG-CH",
+          uploadedBy: fx.admin.id,
+          sourceFilename: `chain-${no}.csv`,
+          stops: [
+            {
+              stopNumber: 1,
+              invoiceNumber: "",
+              customerName: "CHAIN MOTORS",
+              address: "",
+              nop: 0,
+              status: "PENDING",
+              collections: [{ id: "preview-id", collectionNo: no, type: "CREDIT_RETURN", originalInvoiceNo: "777001", status: "PENDING", expectedQty: 1 }],
+            },
+          ],
+        });
+      }
+      const invA = await db().invoice.findFirstOrThrow({ where: { tenantId: f.a.tenantId, invoiceNoNormalized: "777001" } });
+
+      const { GET } = await import("@/app/api/invoice-records/[id]/route");
+      useSession(adminSession(f.a));
+      const res = await GET(req(`/api/invoice-records/${invA.id}`), params({ id: invA.id }));
+      expect(res.status).toBe(200);
+      const chain = await res.json();
+      expect(chain.collections.map((c: { collectionNo: string }) => c.collectionNo)).toEqual(["CH-A"]);
+      expect(chain.status).toBe("COLLECTION_PENDING");
+
+      useSession(adminSession(f.b));
+      expect((await GET(req(`/api/invoice-records/${invA.id}`), params({ id: invA.id }))).status).toBe(404);
+      useSession(driverSession(f.a));
+      expect((await GET(req(`/api/invoice-records/${invA.id}`), params({ id: invA.id }))).status).toBe(403);
+    });
+
+    it("chain statuses for a page of invoices read only the caller's scope", async () => {
+      const { chainStatuses } = await import("@/lib/invoice-chain");
+      const invA = await db().invoice.findFirstOrThrow({ where: { tenantId: f.a.tenantId, invoiceNoNormalized: "777001" } });
+      // B asking about A's invoice id sees nothing of it.
+      const forB = await chainStatuses(f.b.tenantId, [invA.id], new Map([[invA.id, true]]));
+      expect(forB.get(invA.id)).toBe("DELIVERED");
+      const forA = await chainStatuses(f.a.tenantId, [invA.id], new Map([[invA.id, true]]));
+      expect(forA.get(invA.id)).toBe("COLLECTION_PENDING");
+    });
+  });
 });
