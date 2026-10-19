@@ -3626,6 +3626,11 @@ suite("cross-ADMIN isolation", () => {
           signedFilePath: opts.signedFilePath === undefined ? `${opts.collectionNo}_signed.pdf` : opts.signedFilePath,
           signedIncludesSource: opts.signedIncludesSource ?? false,
           sourceFilePath: opts.sourceFilePath ?? null,
+          // The office has approved it for credit — a CR that came back holds
+          // its trip open until it does.
+          creditReview: "APPROVED",
+          creditReviewedBy: "Admin",
+          creditReviewedAt: new Date(),
         },
       });
 
@@ -4157,7 +4162,16 @@ suite("cross-ADMIN isolation", () => {
       });
       await db().collection.update({
         where: { id: collection.id },
-        data: { status: "COLLECTED", collectedQty: 1, collectedAt: new Date(), driverId: fx.driver.id },
+        data: {
+          status: "COLLECTED",
+          collectedQty: 1,
+          collectedAt: new Date(),
+          driverId: fx.driver.id,
+          // Approved for credit by the office, as it would be before a note is signed.
+          creditReview: "APPROVED",
+          creditReviewedBy: fx.admin.name,
+          creditReviewedAt: new Date(),
+        },
       });
       return collection;
     }
@@ -4526,6 +4540,135 @@ suite("cross-ADMIN isolation", () => {
       expect(lines).toHaveLength(2); // header + A's one note
       expect(register).toContain("Thabo Mokoena");
       expect(register).not.toContain("Someone In B");
+    });
+  });
+  // ── The office's decision on a credit return ─────────────────────────
+  describe("approving or rejecting a credit collection", () => {
+    /** A one-stop run whose CR collection the driver has just brought back. */
+    async function collectedCR(fx: typeof f.a, collectionNo: string, originalInvoiceNo: string | null = "555001") {
+      const { saveTripSheet } = await import("@/lib/trip-data");
+      const trip = await saveTripSheet(fx.tenantId, {
+        driverId: fx.driver.id,
+        driverName: fx.driver.name,
+        regNo: "REG-RV",
+        uploadedBy: fx.admin.id,
+        sourceFilename: `review-${collectionNo}.csv`,
+        stops: [
+          {
+            stopNumber: 1,
+            invoiceNumber: "",
+            customerName: "REVIEW MOTORS",
+            address: "",
+            nop: 0,
+            status: "PENDING",
+            collections: [
+              { id: "preview-id", collectionNo, type: "CREDIT_RETURN", originalInvoiceNo, status: "PENDING", expectedQty: 1 },
+            ],
+          },
+        ],
+      });
+      const collection = await db().collection.findFirstOrThrow({ where: { tripSheetId: trip.id, collectionNo } });
+      await db().collection.update({
+        where: { id: collection.id },
+        data: { status: "COLLECTED", collectedQty: 1, collectedAt: new Date(), driverId: fx.driver.id, signedByName: "Customer" },
+      });
+      return { trip, collection };
+    }
+
+    const review = async (id: string, body: object) => {
+      const { PUT } = await import("@/app/api/collections/[id]/review/route");
+      return PUT(req(`/api/collections/${id}/review`, { method: "PUT", body }), params({ id }));
+    };
+
+    it("the trip cannot be completed until the collection is approved", async () => {
+      const { trip, collection } = await collectedCR(f.a, "RV-1");
+      const { completeTripSheet } = await import("@/lib/trip-data");
+
+      const blocked = await completeTripSheet(f.a.tenantId, trip.id, "Admin");
+      expect(blocked.success).toBe(false);
+      expect(blocked.error).toContain("approving or rejecting");
+
+      useSession(adminSession(f.a));
+      expect((await review(collection.id, { decision: "APPROVE" })).status).toBe(200);
+      expect(await db().collection.findUniqueOrThrow({ where: { id: collection.id } })).toMatchObject({
+        creditReview: "APPROVED",
+        creditReviewedBy: f.a.admin.name,
+      });
+
+      expect((await completeTripSheet(f.a.tenantId, trip.id, "Admin")).success).toBe(true);
+      // Archived with the trip: its decision is frozen, and can no longer change.
+      expect((await review(collection.id, { decision: "REJECT", reason: "Changed my mind" })).status).toBe(409);
+      const archive = await db().completedTripSheet.findFirstOrThrow({ where: { tripSheetId: trip.id } });
+      expect(JSON.stringify(archive.collections)).toContain('"creditReview":"APPROVED"');
+    });
+
+    it("rejecting needs a reason, also lets the trip close, and the decision can change while live", async () => {
+      const { trip, collection } = await collectedCR(f.a, "RV-2");
+      useSession(adminSession(f.a));
+
+      expect((await review(collection.id, { decision: "REJECT", reason: " " })).status).toBe(400);
+      expect((await review(collection.id, { decision: "REJECT", reason: "Goods damaged by the customer" })).status).toBe(200);
+      expect((await review(collection.id, { decision: "APPROVE" })).status).toBe(200);
+      expect((await review(collection.id, { decision: "REJECT", reason: "Wrong item returned" })).status).toBe(200);
+      expect(await db().collection.findUniqueOrThrow({ where: { id: collection.id } })).toMatchObject({
+        creditReview: "REJECTED",
+        creditReviewReason: "Wrong item returned",
+      });
+
+      const { completeTripSheet } = await import("@/lib/trip-data");
+      expect((await completeTripSheet(f.a.tenantId, trip.id, "Admin")).success).toBe(true);
+    });
+
+    it("ADMIN 2 deciding on ADMIN 1's collection gets 404, a driver 403, and nothing changes", async () => {
+      const { collection } = await collectedCR(f.a, "RV-3");
+
+      useSession(adminSession(f.b));
+      expect((await review(collection.id, { decision: "APPROVE" })).status).toBe(404);
+      useSession(driverSession(f.a));
+      expect((await review(collection.id, { decision: "APPROVE" })).status).toBe(403);
+
+      expect((await db().collection.findUniqueOrThrow({ where: { id: collection.id } })).creditReview).toBeNull();
+    });
+
+    it("a collection with nothing to credit needs no decision and refuses one", async () => {
+      const { trip, collection } = await collectedCR(f.a, "RV-4", null); // CO: no invoice behind it
+      useSession(adminSession(f.a));
+      expect((await review(collection.id, { decision: "APPROVE" })).status).toBe(409);
+
+      const { completeTripSheet } = await import("@/lib/trip-data");
+      expect((await completeTripSheet(f.a.tenantId, trip.id, "Admin")).success).toBe(true);
+    });
+
+    it("rejecting a collection takes it off the credit note that was paying for it", async () => {
+      const { collection } = await collectedCR(f.a, "RV-5", "384299");
+      await db().collectionLine.create({
+        data: {
+          tenantId: f.a.tenantId,
+          collectionId: collection.id,
+          lineNo: 1,
+          itemCode: "618ABG",
+          description: "BATT BM-618B41LB1 41AH 360CCA",
+          qtyListed: 1,
+          qtyCollected: 1,
+        },
+      });
+      const { ingestCreditNote } = await import("@/lib/credit-intake");
+      const { creditNotePdf } = await import("./helpers/credit-note-fixture");
+      await ingestCreditNote(
+        f.a.tenantId,
+        { itemId: "item-rv5", filename: "CR-407950.pdf", subfolder: "Originals", lastModified: new Date().toISOString() },
+        await creditNotePdf({ creditNo: "407950", invoiceNo: "384299" })
+      );
+      const note = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-rv5" }, include: { collections: true } });
+      expect(note.collections.map((l) => l.collectionId)).toEqual([collection.id]);
+
+      useSession(adminSession(f.a));
+      expect((await review(collection.id, { decision: "REJECT", reason: "Not our stock" })).status).toBe(200);
+
+      const after = await db().creditNote.findUniqueOrThrow({ where: { id: note.id }, include: { collections: true } });
+      expect(after.collections).toHaveLength(0);
+      expect(after.status).toBe("NEEDS_REVIEW");
+      expect(JSON.stringify(after.issues)).toContain("COLLECTION_REJECTED");
     });
   });
 });

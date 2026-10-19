@@ -202,3 +202,25 @@ describe("the signed receipt", () => {
     expect((await text(pdf))[0]).not.toContain("DECLARATION TEXT");
   });
 });
+
+describe("the office's decision on a credit return", () => {
+  const cr = { type: "CREDIT_RETURN", originalInvoiceNo: "130522", status: "COLLECTED" };
+
+  it("is needed for a CR that came back, collected or partly", async () => {
+    const { creditReviewRequired, awaitingCreditReview } = await import("@/lib/collection-confirm");
+    expect(creditReviewRequired(cr)).toBe(true);
+    expect(creditReviewRequired({ ...cr, status: "PARTIAL" })).toBe(true);
+    expect(awaitingCreditReview(cr)).toBe(true);
+    expect(awaitingCreditReview({ ...cr, creditReview: "APPROVED" })).toBe(false);
+    expect(awaitingCreditReview({ ...cr, creditReview: "REJECTED" })).toBe(false);
+  });
+
+  it("is not needed for CO, an uplift, a failed collection or one still pending", async () => {
+    const { creditReviewRequired } = await import("@/lib/collection-confirm");
+    expect(creditReviewRequired({ ...cr, originalInvoiceNo: null })).toBe(false);
+    expect(creditReviewRequired({ ...cr, type: "NON_CREDIT_UPLIFT" })).toBe(false);
+    expect(creditReviewRequired({ ...cr, status: "NOT_AVAILABLE" })).toBe(false);
+    expect(creditReviewRequired({ ...cr, status: "REFUSED" })).toBe(false);
+    expect(creditReviewRequired({ ...cr, status: "PENDING" })).toBe(false);
+  });
+});

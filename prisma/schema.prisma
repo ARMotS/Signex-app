@@ -348,6 +348,14 @@ enum CollectionStatus {
 /// MISSING: no sheet found yet (the driver can still collect against the NOP
 /// count). READY: lines read and consistent with the trip sheet row.
 /// NEEDS_REVIEW: read, but something disagrees — the office should look.
+/// The office's decision on a credit return that came back (CR, COLLECTED or
+/// PARTIAL): cleared for credit, or not creditable. Null until decided — and
+/// the trip cannot be completed while any such collection is undecided.
+enum CreditReview {
+  APPROVED
+  REJECTED
+}
+
 enum CollectionSheetStatus {
   MISSING
   READY
@@ -465,6 +473,14 @@ model Collection {
   /// CUSTOMER_REFUSED · OTHER. The status (NOT_AVAILABLE / REFUSED) says what
   /// accounts does about it; this says what happened at the door.
   failReason        String?
+
+  // ── The office's decision on a credit return (lib/collection-review.ts) ──
+  /// Only a CR (credit return against an invoice) that came back needs one.
+  /// REJECTED: kept on record, never matched to a credit note.
+  creditReview       CreditReview?
+  creditReviewReason String?   @db.Text
+  creditReviewedBy   String?
+  creditReviewedAt   DateTime?
 
   @@unique([tenantId, tripSheetId, collectionNo])
   @@index([tenantId])

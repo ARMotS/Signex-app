@@ -619,6 +619,10 @@ export interface CreditContext {
   pendingCollectionNos: string[];
   collectedLines: CollectedLine[];
   alreadyCredited: Map<string, number>;
+  /** Collections against the invoice the office rejected for credit. */
+  rejectedCollections?: { collectionNo: string; reason: string | null }[];
+  /** Linked collections the office has not approved yet. */
+  unapprovedCollectionNos?: string[];
 }
 
 export interface CreditAssessment {
@@ -654,7 +658,26 @@ export function assessCreditNote(
   }
 
   let matches: LineMatch[] = [];
-  if (ctx.invoice && ctx.collections.length === 0) {
+  // The office looked at the goods and said no: nothing is credited against
+  // them, and a note that would pay for them is not signed without a look.
+  const rejectedCols = ctx.rejectedCollections ?? [];
+  for (const r of rejectedCols) {
+    review(
+      "COLLECTION_REJECTED",
+      `Collection ${r.collectionNo} was rejected for credit by the office${r.reason ? `: ${r.reason}` : ""}.`
+    );
+  }
+  const unapproved = ctx.unapprovedCollectionNos ?? [];
+  if (unapproved.length > 0) {
+    warn(
+      "COLLECTION_NOT_APPROVED",
+      `Collection ${unapproved.join(", ")} has not been approved for credit by the office yet.`
+    );
+  }
+
+  if (ctx.invoice && ctx.collections.length === 0 && rejectedCols.length > 0) {
+    // Said above, in so many words.
+  } else if (ctx.invoice && ctx.collections.length === 0) {
     if (ctx.pendingCollectionNos.length > 0) {
       review(
         "COLLECTION_PENDING",

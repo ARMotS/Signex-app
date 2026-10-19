@@ -227,3 +227,42 @@ export function collectionDeclaration(template: string | null | undefined, compa
   const text = (template && template.trim()) || DEFAULT_COLLECTION_DECLARATION;
   return text.replace(/\{companyName\}/g, companyName.trim() || "the company");
 }
+
+// ─── The office's decision on a credit return ────────────────────────────
+
+interface ReviewableCollection {
+  type: string;
+  originalInvoiceNo?: string | null;
+  status: string;
+  creditReview?: string | null;
+}
+
+/**
+ * A credit return against an invoice (CR) that came back — COLLECTED or
+ * PARTIAL — needs the office to approve it for credit or reject it. CO (no
+ * invoice behind it), uplifts, and collections that failed at the door have
+ * nothing to credit and need no decision (the client's rule).
+ *
+ * One rulebook for the trip card (Complete button, badges) and the server
+ * (completeTripSheet, the review route).
+ */
+export function creditReviewRequired(c: ReviewableCollection): boolean {
+  return (
+    c.type === "CREDIT_RETURN" &&
+    !!c.originalInvoiceNo &&
+    (c.status === "COLLECTED" || c.status === "PARTIAL")
+  );
+}
+
+/** Needs a decision and has none yet — holds its trip open. */
+export function awaitingCreditReview(c: ReviewableCollection): boolean {
+  return creditReviewRequired(c) && !c.creditReview;
+}
+
+/** Quick reasons offered when rejecting; any other reason can be typed. */
+export const CREDIT_REJECT_REASONS = [
+  "Goods damaged by the customer",
+  "Wrong item returned",
+  "Not our stock",
+  "Outside the return period",
+];
