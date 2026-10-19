@@ -3,21 +3,27 @@
 import { useState } from "react";
 
 /**
- * The VAT rate a credit note's VAT line is checked against when it is read.
- * Only a check on the note's own arithmetic — Signex never works VAT out for
- * anyone. Blank means the standard 15%.
+ * Credit note settings:
+ *   - the VAT rate a credit note's VAT line is checked against when it is
+ *     read (a check on the note's own arithmetic — Signex never works VAT out
+ *     for anyone). Blank means the standard 15%.
+ *   - how many days a credit return may sit collected with no signed credit
+ *     note before the Exceptions screen lists it. Blank means 7.
  */
 export default function CreditNoteSettings({
   savedRate,
+  savedDays,
   onSaved,
 }: {
   savedRate: string;
-  onSaved: (rate: string) => void;
+  savedDays: string;
+  onSaved: (saved: { vatRatePercent: string; uncreditedAlertDays: string }) => void;
 }) {
-  const [draft, setDraft] = useState(savedRate);
+  const [rate, setRate] = useState(savedRate);
+  const [days, setDays] = useState(savedDays);
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
-  const hasChanges = draft.trim() !== savedRate.trim();
+  const hasChanges = rate.trim() !== savedRate.trim() || days.trim() !== savedDays.trim();
 
   const save = async () => {
     setSaving(true);
@@ -26,14 +32,18 @@ export default function CreditNoteSettings({
       const res = await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ vatRatePercent: draft.trim() }),
+        body: JSON.stringify({ vatRatePercent: rate.trim(), uncreditedAlertDays: days.trim() }),
       });
       const data = await res.json();
       if (res.ok) {
-        const saved = data.config?.vatRatePercent ?? draft.trim();
-        setDraft(saved);
+        const saved = {
+          vatRatePercent: data.config?.vatRatePercent ?? rate.trim(),
+          uncreditedAlertDays: data.config?.uncreditedAlertDays ?? days.trim(),
+        };
+        setRate(saved.vatRatePercent);
+        setDays(saved.uncreditedAlertDays);
         onSaved(saved);
-        setResult({ success: true, message: "Saved — new credit notes are checked against it" });
+        setResult({ success: true, message: "Saved" });
       } else {
         setResult({ success: false, message: data.error || "Failed to save" });
       }
@@ -51,22 +61,37 @@ export default function CreditNoteSettings({
           Credit Notes
         </h2>
         <p className="text-xs text-ink-muted mt-1">
-          Each credit note&apos;s VAT line is checked against this rate when it is read. Leave blank
-          for 15%. The credits folder itself is chosen under OneDrive above.
+          Each credit note&apos;s VAT line is checked against the VAT rate when it is read. A credit return that
+          has waited longer than the days below with no signed credit note is listed on Exceptions. The credits
+          folder itself is chosen under OneDrive above.
         </p>
       </div>
 
-      <div className="p-6 flex items-center gap-2">
-        <label htmlFor="vat-rate" className="text-sm text-ink-black">VAT rate</label>
-        <input
-          id="vat-rate"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          inputMode="decimal"
-          placeholder="15"
-          className="w-20 px-3 py-2 text-sm font-mono bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-green"
-        />
-        <span className="text-sm text-ink-muted">%</span>
+      <div className="p-6 flex flex-wrap items-center gap-x-8 gap-y-3">
+        <div className="flex items-center gap-2">
+          <label htmlFor="vat-rate" className="text-sm text-ink-black">VAT rate</label>
+          <input
+            id="vat-rate"
+            value={rate}
+            onChange={(e) => setRate(e.target.value)}
+            inputMode="decimal"
+            placeholder="15"
+            className="w-20 px-3 py-2 text-sm font-mono bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-green"
+          />
+          <span className="text-sm text-ink-muted">%</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <label htmlFor="uncredited-days" className="text-sm text-ink-black">Not credited after</label>
+          <input
+            id="uncredited-days"
+            value={days}
+            onChange={(e) => setDays(e.target.value)}
+            inputMode="numeric"
+            placeholder="7"
+            className="w-20 px-3 py-2 text-sm font-mono bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-green"
+          />
+          <span className="text-sm text-ink-muted">days</span>
+        </div>
       </div>
 
       <div className="flex items-center justify-between px-6 py-4 border-t border-ink-border bg-ink-surface/50">
@@ -80,7 +105,10 @@ export default function CreditNoteSettings({
         <div className="flex items-center gap-3">
           {hasChanges && (
             <button
-              onClick={() => setDraft(savedRate)}
+              onClick={() => {
+                setRate(savedRate);
+                setDays(savedDays);
+              }}
               className="px-4 py-2 text-sm font-mono text-ink-muted hover:text-ink-black transition-colors"
             >
               Cancel
@@ -95,7 +123,7 @@ export default function CreditNoteSettings({
                 : "bg-ink-border text-ink-muted cursor-not-allowed"
             }`}
           >
-            {saving ? "Saving…" : "Save Rate"}
+            {saving ? "Saving…" : "Save"}
           </button>
         </div>
       </div>

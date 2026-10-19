@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readConfig, writeConfig, validateFolderPath, parseVatRatePercent } from "@/lib/config";
+import { readConfig, writeConfig, validateFolderPath, parseVatRatePercent, parseAlertDays } from "@/lib/config";
 import { assertCollectionsFolderIsSibling } from "@/lib/collections";
 import { compileInvoiceNoPattern, type InvoiceNoPattern } from "@/lib/invoice-number";
 import { renormalizeInvoiceNumbers } from "@/lib/trip-data";
@@ -93,6 +93,15 @@ export const PUT = withAuth(async (request: NextRequest) => {
       return NextResponse.json({ error: "Enter the VAT rate as a percentage between 0 and 50." }, { status: 400 });
     }
     body.vatRatePercent = raw ? String(parseVatRatePercent(raw)) : "";
+  }
+
+  // Exceptions: days a collected credit return may wait for its credit note.
+  if (body.uncreditedAlertDays !== undefined) {
+    const raw = String(body.uncreditedAlertDays ?? "").trim();
+    if (raw && parseAlertDays(raw) === null) {
+      return NextResponse.json({ error: "Enter a number of days between 1 and 365." }, { status: 400 });
+    }
+    body.uncreditedAlertDays = raw ? String(parseAlertDays(raw)) : "";
   }
 
   // The invoice-number pattern runs server-side on every import, so it is

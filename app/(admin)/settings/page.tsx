@@ -80,6 +80,7 @@ interface Settings {
   invoiceNoPattern: string;
   collectionDeclarationText: string;
   vatRatePercent: string;
+  uncreditedAlertDays: string;
 }
 
 /** The three folders an ADMIN configures. Collections is a SIBLING of invoices. */
@@ -107,6 +108,7 @@ export default function SettingsPage() {
     invoiceNoPattern: "",
     collectionDeclarationText: "",
     vatRatePercent: "",
+    uncreditedAlertDays: "",
   });
   const [selectedPath, setSelectedPath] = useState("");
   const [browseData, setBrowseData] = useState<BrowseResult | null>(null);
@@ -1350,7 +1352,8 @@ export default function SettingsPage() {
       {/* ─── Credit notes: the VAT rate their VAT line is checked against ─ */}
       <CreditNoteSettings
         savedRate={settings.vatRatePercent || ""}
-        onSaved={(vatRatePercent) => setSettings((prev) => ({ ...prev, vatRatePercent }))}
+        savedDays={settings.uncreditedAlertDays || ""}
+        onSaved={(saved) => setSettings((prev) => ({ ...prev, ...saved }))}
       />
 
       {/* ─── Collection Receipt declaration ─────────────────────────── */}

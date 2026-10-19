@@ -62,7 +62,14 @@ export interface SignexConfig {
    * note's own arithmetic — Signex never computes VAT for anyone.
    */
   vatRatePercent: string;
+  /**
+   * Days a credit return may sit collected with no signed credit note before
+   * the Exceptions screen lists it. Empty means DEFAULT_UNCREDITED_ALERT_DAYS.
+   */
+  uncreditedAlertDays: string;
 }
+
+export const DEFAULT_UNCREDITED_ALERT_DAYS = 7;
 
 export const DEFAULT_VAT_RATE_PERCENT = 15;
 
@@ -77,6 +84,7 @@ const DEFAULT_CONFIG: SignexConfig = {
   invoiceNoPattern: "",
   collectionDeclarationText: "",
   vatRatePercent: "",
+  uncreditedAlertDays: "",
 };
 
 /**
@@ -105,6 +113,8 @@ export async function readConfig(tenantId: string): Promise<SignexConfig> {
         config.collectionDeclarationText = row.value;
       } else if (row.key === "vatRatePercent") {
         config.vatRatePercent = row.value;
+      } else if (row.key === "uncreditedAlertDays") {
+        config.uncreditedAlertDays = row.value;
       } else if (row.key === "signaturePosition") {
         try {
           config.signaturePosition = JSON.parse(row.value);
@@ -203,6 +213,20 @@ export function parseVatRatePercent(raw: string | null | undefined): number | nu
   if (!t) return null;
   const n = Number(t);
   return Number.isFinite(n) && n >= 0 && n <= 50 ? n : null;
+}
+
+/** "7" → 7. Blank or out of range (1..365) is null. */
+export function parseAlertDays(raw: string | null | undefined): number | null {
+  const t = String(raw ?? "").trim();
+  if (!/^\d{1,3}$/.test(t)) return null;
+  const n = Number(t);
+  return n >= 1 && n <= 365 ? n : null;
+}
+
+/** Days before an uncredited collection is an exception, for this scope. */
+export async function readUncreditedAlertDays(tenantId: string): Promise<number> {
+  const config = await readConfig(tenantId);
+  return parseAlertDays(config.uncreditedAlertDays) ?? DEFAULT_UNCREDITED_ALERT_DAYS;
 }
 
 /** This scope's VAT rate as a fraction (0.15). */

@@ -33,7 +33,7 @@ describe("page routing by role", () => {
   });
 
   it("never lets a driver render an admin page", async () => {
-    for (const path of ["/dashboard", "/drivers", "/users", "/collections", "/credits", "/settings/x"]) {
+    for (const path of ["/dashboard", "/drivers", "/users", "/collections", "/credits", "/exceptions", "/settings/x"]) {
       expect(await landing(path, "driver")).toBe("/run");
     }
   });

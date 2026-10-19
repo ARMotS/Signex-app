@@ -29,6 +29,7 @@ const ADMIN_ROUTES = [
   "/invoices",
   "/collections",
   "/credits",
+  "/exceptions",
   "/settings",
   "/backups",
   "/users",
