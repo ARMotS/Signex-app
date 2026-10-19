@@ -807,6 +807,22 @@ suite("cross-ADMIN isolation", () => {
       expect(body.counts.total).toBe(1);
     });
 
+    it("the filter bar's page, facets and CSV are the caller's own", async () => {
+      const { GET } = await import("@/app/api/collections/route");
+      useSession(adminSession(f.a));
+
+      const body = await (await GET(req("/api/collections?view=page"))).json();
+      expect(body.collections.map((c: any) => c.id)).toEqual([f.a.collection.id]);
+      expect(body.total).toBe(1);
+      expect(body.facets.drivers.map((d: any) => d.id)).toEqual([f.a.driver.id]);
+      // A driver id from another scope narrows to nothing rather than to theirs.
+      const theirs = await (await GET(req(`/api/collections?view=page&driver=${f.b.driver.id}`))).json();
+      expect(theirs.collections).toHaveLength(0);
+
+      const csv = await (await GET(req("/api/collections?view=page&format=csv"))).text();
+      expect(csv.trim().split("\r\n")).toHaveLength(2);
+    });
+
     it("ADMIN 1 fetching ADMIN 2's collection by direct id gets 404", async () => {
       const { GET } = await import("@/app/api/collections/[id]/route");
       useSession(adminSession(f.a));
@@ -4244,8 +4260,17 @@ suite("cross-ADMIN isolation", () => {
       expect(body.folder.path).toBe("/Credits-B");
       expect(body.counts.REJECTED).toBe(0);
 
+      // The filter bar's shape reads the same scope, and so does its CSV.
+      const paged = await (await GET(req("/api/credit-notes?view=page"))).json();
+      expect(paged.creditNotes.map((n: { id: string }) => n.id).sort()).toEqual(
+        body.creditNotes.map((n: { id: string }) => n.id).sort()
+      );
+      const csv = await (await GET(req("/api/credit-notes?view=page&format=csv"))).text();
+      expect(csv.trim().split("\r\n")).toHaveLength(body.creditNotes.length + 1);
+
       useSession(driverSession(f.a));
       expect((await GET(req("/api/credit-notes"))).status).toBe(403);
+      expect((await GET(req("/api/credit-notes?view=page"))).status).toBe(403);
     });
 
     it("ADMIN 2 reading, re-reading, linking or opening ADMIN 1's note gets 404 and changes nothing", async () => {

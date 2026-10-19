@@ -1522,6 +1522,9 @@ export interface CollectionRecord {
   creditReviewReason: string | null;
   /** The invoice registry row it is credited against — its chain page. */
   invoiceId: string | null;
+  /** The day its trip ran (YYYY-MM-DD) and the trip sheet's file, for the filter bar. */
+  tripDate: string | null;
+  tripName: string | null;
 }
 
 export interface CollectionQuery {
@@ -1597,7 +1600,7 @@ export async function listCollections(
     },
     include: {
       stop: { select: { customerName: true, stopNumber: true } },
-      tripSheet: { select: { driverId: true, driver: { select: { name: true } } } },
+      tripSheet: { select: { driverId: true, date: true, sourceFilename: true, driver: { select: { name: true } } } },
       lines: { select: { qtyListed: true, qtyCollected: true, isExtra: true } },
     },
     orderBy: { createdAt: "desc" },
@@ -1631,6 +1634,8 @@ export async function listCollections(
     creditReview: c.creditReview,
     creditReviewReason: c.creditReviewReason,
     invoiceId: c.invoiceId,
+    tripDate: c.tripSheet ? c.tripSheet.date.toISOString().slice(0, 10) : null,
+    tripName: c.tripSheet?.sourceFilename ?? null,
     // Filtered to attached rows above.
     tripSheetId: c.tripSheetId!,
     archived: false,
@@ -1717,6 +1722,8 @@ export async function listCollections(
         creditReview: c.creditReview ?? null,
         creditReviewReason: c.creditReviewReason ?? null,
         invoiceId: c.collectionId ? invoiceOf.get(c.collectionId) ?? null : null,
+        tripDate: archive.uploadedAt.toISOString().slice(0, 10),
+        tripName: archive.sourceFilename,
       });
     }
   }

@@ -3,9 +3,10 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
 
-import { FilterSearch } from "@/components/admin/FilterSearch";
+import RecordFilterBar, { Highlight, type FilterBarConfig } from "@/components/admin/RecordFilterBar";
 import { DocChip, StatusBadge } from "@/components/ui/Chips";
-import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
+import { applyFilter, toCsv, type FilterAccessors, type FilterState } from "@/lib/record-filter";
+import { useRecordFilters } from "@/hooks/useRecordFilters";
 
 interface InvoiceFile {
   name: string;
@@ -40,6 +41,34 @@ const CHAIN_TONE: Record<string, "idle" | "green" | "amber" | "violet" | "red" |
   PARTIALLY_CREDITED: "amber",
   FULLY_CREDITED: "blue",
   EXCEPTION: "red",
+};
+
+const CHAIN_OPTIONS = [
+  { value: "NOT_DELIVERED", label: "Not delivered" },
+  { value: "DELIVERED", label: "Delivered" },
+  { value: "COLLECTION_PENDING", label: "Collection pending" },
+  { value: "AWAITING_CREDIT", label: "Awaiting credit" },
+  { value: "PARTIALLY_CREDITED", label: "Partially credited" },
+  { value: "FULLY_CREDITED", label: "Fully credited" },
+  { value: "EXCEPTION", label: "Exception" },
+];
+
+/** Past delivered, every chain status means a credit collection hangs off the invoice. */
+const NO_COLLECTION = new Set(["NOT_DELIVERED", "DELIVERED"]);
+
+/**
+ * The Invoices tab runs the shared filter rulebook in the browser, not on the
+ * server: its list is the invoice folder, listed over Microsoft Graph on every
+ * request, so a round trip per filter change would re-list the folder each
+ * time. The whole listing already arrives in one response.
+ */
+const INVOICE_FILTER: FilterAccessors<InvoiceFile> = {
+  search: (inv) => [inv.invoiceNumber, inv.filename, inv.name, inv.customerName, inv.pdfCustomerName, formatInvoiceDate(inv.invoiceDate)],
+  date: (inv) => inv.invoiceDate,
+  status: (inv) => inv.chainStatus ?? "NOT_DELIVERED",
+  customer: (inv) => inv.customerName,
+  flag: (inv) => !!inv.chainStatus && !NO_COLLECTION.has(inv.chainStatus),
+  number: (inv) => inv.invoiceNumber,
 };
 
 /** DD/MM/YYYY, as the trip sheets write it. */
@@ -79,8 +108,8 @@ export default function InvoicesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"ALL" | "SIGNED" | "UNSIGNED">("ALL");
-  /** Free-text narrowing over the folder listing — see lib/search-match.ts. */
-  const [query, setQuery] = useState("");
+  /** Search and filters over the folder listing — see lib/record-filter.ts. */
+  const [filters, setFiltersState] = useRecordFilters("invoices");
   const [currentPage, setCurrentPage] = useState(1);
   const ITEMS_PER_PAGE = 20;
 
@@ -242,27 +271,58 @@ export default function InvoicesPage() {
   // The pills come first and the search box narrows what they left, so the
   // readout beside the field counts against the pill in force rather than
   // against the whole folder.
-  const statusFiltered = data?.invoices.filter((inv) => {
-    if (filter === "SIGNED") return inv.isSigned;
-    if (filter === "UNSIGNED") return !inv.isSigned;
-    return true;
-  }) ?? [];
+  const statusFiltered = useMemo(
+    () =>
+      data?.invoices.filter((inv) => {
+        if (filter === "SIGNED") return inv.isSigned;
+        if (filter === "UNSIGNED") return !inv.isSigned;
+        return true;
+      }) ?? [],
+    [data, filter]
+  );
 
-  const queryTokens = useMemo(() => tokenizeQuery(query), [query]);
+  const filteredInvoices = useMemo(() => applyFilter(statusFiltered, filters, INVOICE_FILTER), [statusFiltered, filters]);
+  const filtersOn = filteredInvoices.length !== statusFiltered.length;
+  const customers = useMemo(
+    () => [...new Set((data?.invoices ?? []).map((i) => i.customerName).filter((c): c is string => !!c))].sort((a, b) => a.localeCompare(b)),
+    [data]
+  );
+  const barConfig: FilterBarConfig = {
+    searchPlaceholder: "Invoice no, customer, filename…",
+    noun: "invoice",
+    dateLabel: "Invoice date",
+    statusOptions: CHAIN_OPTIONS,
+    sortOptions: [
+      { value: "date_desc", label: "Newest first" },
+      { value: "date_asc", label: "Oldest first" },
+      { value: "customer", label: "Customer A–Z" },
+      { value: "number", label: "Invoice no" },
+      { value: "status", label: "Status" },
+    ],
+    customers,
+    flagLabel: "Has a credit collection",
+  };
 
-  const filteredInvoices =
-    queryTokens.length === 0
-      ? statusFiltered
-      : statusFiltered.filter((inv) =>
-          matchesTokens(queryTokens, [
-            inv.invoiceNumber,
-            inv.filename,
-            inv.name,
-            inv.customerName,
-            inv.pdfCustomerName,
-            formatInvoiceDate(inv.invoiceDate),
-          ])
-        );
+  const exportCsv = () => {
+    const csv = toCsv(
+      ["Invoice No", "Invoice date", "Customer", "Status", "Signed", "Signed at", "File"],
+      filteredInvoices.map((inv) => [
+        inv.invoiceNumber,
+        inv.invoiceDate,
+        inv.customerName,
+        inv.chainLabel,
+        inv.isSigned ? "Yes" : "No",
+        inv.signedAt ?? "",
+        inv.filename,
+      ])
+    );
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `signex-invoices-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   // Pagination
   const totalPages = Math.max(1, Math.ceil(filteredInvoices.length / ITEMS_PER_PAGE));
@@ -283,8 +343,8 @@ export default function InvoicesPage() {
    * Otherwise Delete Selected would still be holding rows the query has since
    * hidden, which is not what the count in the action bar implies.
    */
-  const handleQueryChange = (next: string) => {
-    setQuery(next);
+  const setFilters = (next: FilterState) => {
+    setFiltersState(next);
     setCurrentPage(1);
     setSelectedInvoices(new Set());
   };
@@ -325,7 +385,7 @@ export default function InvoicesPage() {
     }
     // Show what was just selected: a live query would otherwise leave most of
     // it off-screen while the action bar counted it.
-    setQuery("");
+    setFiltersState({ ...filters, q: "", status: [], from: "", to: "", preset: "", customer: "", flag: false });
     setCurrentPage(1);
     setSelectedInvoices(dupeFiles);
   };
@@ -554,14 +614,12 @@ export default function InvoicesPage() {
           button off the page with it. */}
       {!loading && !error && data && data.count > 0 && (
         <div className="mb-4">
-          <FilterSearch
-            value={query}
-            onChange={handleQueryChange}
-            placeholder="Search invoice no. or filename…"
-            matchCount={filteredInvoices.length}
-            totalCount={statusFiltered.length}
-            noun="invoice"
-            shortcut
+          <RecordFilterBar
+            state={filters}
+            onChange={setFilters}
+            config={barConfig}
+            total={filteredInvoices.length}
+            onExport={exportCsv}
           />
         </div>
       )}
@@ -615,23 +673,23 @@ export default function InvoicesPage() {
       {!loading && !error && data && data.count > 0 && filteredInvoices.length === 0 && (
         <div className="bg-ink-card border-2 border-dashed border-ink-border rounded p-12 text-center">
           <div className="text-4xl mb-4">
-            {queryTokens.length > 0 ? "🔍" : filter === "SIGNED" ? "✍️" : "📋"}
+            {filtersOn ? "🔍" : filter === "SIGNED" ? "✍️" : "📋"}
           </div>
-          {queryTokens.length > 0 ? (
+          {filtersOn ? (
             <>
               <p className="font-mono text-sm font-medium text-ink-black mb-2">
-                Nothing matches “{query.trim()}”
+                {filters.q.trim() ? <>Nothing matches “{filters.q.trim()}”</> : "Nothing matches these filters"}
               </p>
               <p className="text-xs text-ink-muted max-w-sm mx-auto">
                 {filter === "ALL"
-                  ? "No invoice number or filename in this folder contains every word."
+                  ? "No invoice in this folder fits the search and filters."
                   : `No ${filter.toLowerCase()} invoice matches — try the All pill above.`}
               </p>
               <button
-                onClick={() => handleQueryChange("")}
+                onClick={() => setFilters({ ...filters, q: "", status: [], from: "", to: "", preset: "", customer: "", flag: false })}
                 className="mt-4 px-3 py-1.5 text-xs font-mono text-ink-muted bg-ink-surface border border-ink-border rounded hover:text-ink-black hover:border-ink-black/30 transition-all"
               >
-                Clear search
+                Clear search and filters
               </button>
             </>
           ) : (
@@ -727,7 +785,7 @@ export default function InvoicesPage() {
                     <td className="px-5 py-3.5 text-xs text-ink-black">
                       <div className="flex items-center gap-1.5 max-w-[220px]">
                         <span className="truncate" title={inv.customerName ?? undefined}>
-                          {inv.customerName ?? "—"}
+                          {inv.customerName ? <Highlight text={inv.customerName} query={filters.q} /> : "—"}
                         </span>
                         {inv.customerMismatch && (
                           <span
