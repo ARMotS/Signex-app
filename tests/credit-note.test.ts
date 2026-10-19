@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { extractPageItems } from "@/lib/invoice-header";
 import {
   assessCreditNote,
+  signBlocker,
   checkCreditFigures,
   matchCreditLines,
   parseAmount,
@@ -310,9 +311,20 @@ describe("the office's decision on the collection", () => {
     expect(result.issues[0].message).toContain("Goods damaged by the customer");
   });
 
-  it("a collection not yet approved is a warning only", () => {
+  it("a note is not ready to sign until the collection it pays for is approved", () => {
     const result = assessCreditNote(parsed(), context({ unapprovedCollectionNos: ["1797"] }), "TEXT");
-    expect(result.status).toBe("RECEIVED");
+    expect(result.status).toBe("NEEDS_REVIEW");
     expect(codes(result.issues)).toEqual(["COLLECTION_NOT_APPROVED"]);
+    expect(signBlocker(result.issues)?.code).toBe("COLLECTION_NOT_APPROVED");
+  });
+
+  it("a rejected collection blocks signing too; other issues do not", () => {
+    const rejected = assessCreditNote(
+      parsed(),
+      context({ collections: [], collectedLines: [], rejectedCollections: [{ collectionNo: "1797", reason: null }] }),
+      "TEXT"
+    );
+    expect(signBlocker(rejected.issues)?.code).toBe("COLLECTION_REJECTED");
+    expect(signBlocker([{ code: "CUSTOMER_MISMATCH", level: "warning", message: "" }])).toBeNull();
   });
 });

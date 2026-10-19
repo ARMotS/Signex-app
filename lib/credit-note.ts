@@ -625,6 +625,19 @@ export interface CreditContext {
   unapprovedCollectionNos?: string[];
 }
 
+/**
+ * Issues no acknowledgement can sign past. A credit note exists BECAUSE the
+ * office approved the collection it pays for (client rule): until that
+ * approval it is not ready to sign, and a rejected collection is never
+ * credited — that note is rejected, not signed.
+ */
+export const SIGN_BLOCKING_CODES = new Set(["COLLECTION_NOT_APPROVED", "COLLECTION_REJECTED"]);
+
+/** The first issue that stops a note being signed at all, if any. */
+export function signBlocker(issues: CreditIssue[]): CreditIssue | null {
+  return issues.find((i) => SIGN_BLOCKING_CODES.has(i.code)) ?? null;
+}
+
 export interface CreditAssessment {
   status: "RECEIVED" | "NEEDS_REVIEW";
   issues: CreditIssue[];
@@ -667,11 +680,13 @@ export function assessCreditNote(
       `Collection ${r.collectionNo} was rejected for credit by the office${r.reason ? `: ${r.reason}` : ""}.`
     );
   }
+  // Not ready to sign until the office approves what it pays for — the
+  // approval on the trip card is what the credit note follows from.
   const unapproved = ctx.unapprovedCollectionNos ?? [];
   if (unapproved.length > 0) {
-    warn(
+    review(
       "COLLECTION_NOT_APPROVED",
-      `Collection ${unapproved.join(", ")} has not been approved for credit by the office yet.`
+      `Waiting for collection ${unapproved.join(", ")} to be approved for credit on its trip card.`
     );
   }
 

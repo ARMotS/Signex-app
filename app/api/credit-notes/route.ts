@@ -51,6 +51,8 @@ function toRow(n: NoteWithLinks) {
     status: n.status,
     reviewCount: issues.filter((i) => i.level === "review").length,
     warningCount: issues.filter((i) => i.level === "warning").length,
+    awaitingApproval: issues.some((i) => i.code === "COLLECTION_NOT_APPROVED"),
+    collectionRejected: issues.some((i) => i.code === "COLLECTION_REJECTED"),
     collectionNos: n.collections.map((c) => c.collection.collectionNo),
     sourceFilename: n.sourceFilename,
     sourceFolder: n.sourceFolder,

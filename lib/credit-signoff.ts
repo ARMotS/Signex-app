@@ -21,7 +21,7 @@
 import { Prisma, type CreditNoteStatus } from "@prisma/client";
 import { scopedPrisma } from "./db-scoped";
 import { fileAway, reassessCreditNote, syncCreditsFolder } from "./credit-intake";
-import type { CreditIssue } from "./credit-note";
+import { signBlocker, type CreditIssue } from "./credit-note";
 import {
   appendCreditReference,
   buildSignedCreditNotePdf,
@@ -62,6 +62,19 @@ export async function signCreditNote(
   // moment — and the issues printed on the sign-off page are these.
   const evaluation = await reassessCreditNote(tenantId, creditNoteId);
   if (!evaluation) return { outcome: "closed" };
+  // Not an issue a reason can sign past: the note follows from the office's
+  // approval of the collection, and a rejected collection is never credited.
+  const blocker = signBlocker(evaluation.issues);
+  if (blocker) {
+    return {
+      outcome: "invalid",
+      error:
+        blocker.code === "COLLECTION_REJECTED"
+          ? `${blocker.message} A credit note for it is not signed — reject the note.`
+          : `${blocker.message} The note can be signed once it is approved.`,
+      issues: evaluation.issues,
+    };
+  }
   const check = validateSignOff(input, evaluation.issues.length);
   if (!check.ok) return { outcome: "invalid", error: check.error, issues: evaluation.issues };
 

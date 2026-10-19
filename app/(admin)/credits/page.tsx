@@ -36,6 +36,10 @@ interface CreditRow {
   status: Status;
   reviewCount: number;
   warningCount: number;
+  /** Waiting on the office's approval of the collection it pays for. */
+  awaitingApproval?: boolean;
+  /** Pays for a collection the office rejected for credit. */
+  collectionRejected?: boolean;
   collectionNos: string[];
   sourceFilename: string;
   sourceFolder: string;
@@ -436,7 +440,15 @@ export default function CreditsPage() {
                   </td>
                   <td className="px-4 py-2.5 font-mono text-right whitespace-nowrap">{money(r.total)}</td>
                   <td className="px-4 py-2.5 whitespace-nowrap">
-                    <StatusBadge status={r.status} />
+                    {/* Not "ready to sign" until the collection it pays for
+                        is approved — say which it is waiting on. */}
+                    {r.awaitingApproval && (r.status === "RECEIVED" || r.status === "NEEDS_REVIEW") ? (
+                      <Badge tone="amber" dot title="Approve the collection on its trip card first">Awaiting approval</Badge>
+                    ) : r.collectionRejected && (r.status === "RECEIVED" || r.status === "NEEDS_REVIEW") ? (
+                      <Badge tone="red" dot title="The collection was rejected for credit — reject this note">Collection rejected</Badge>
+                    ) : (
+                      <StatusBadge status={r.status} />
+                    )}
                     {r.status === "SIGNED" && r.filingError && (
                       <Badge tone="amber" title={r.filingError} className="ml-2">Filing pending</Badge>
                     )}
@@ -898,7 +910,10 @@ function SignOffForm({
   const [rejecting, setRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
 
-  const ready = canSign && name.trim().length >= 2 && hasSignature && (issues.length === 0 || ack.trim().length >= 5);
+  // A note follows from the office approving the collection it pays for:
+  // until then (or if it was rejected) there is nothing to sign past.
+  const blocker = issues.find((i) => i.code === "COLLECTION_NOT_APPROVED" || i.code === "COLLECTION_REJECTED") ?? null;
+  const ready = canSign && !blocker && name.trim().length >= 2 && hasSignature && (issues.length === 0 || ack.trim().length >= 5);
 
   const sign = async () => {
     const signatureImage = padRef.current?.toDataURL();
@@ -930,6 +945,13 @@ function SignOffForm({
       {!canSign ? (
         <p className="text-sm text-ink-amber">
           This note was not read properly, so it cannot be signed. Read it again, or reject it.
+        </p>
+      ) : blocker ? (
+        <p className={`text-sm ${blocker.code === "COLLECTION_REJECTED" ? "text-ink-red" : "text-ink-amber"}`}>
+          {blocker.message}{" "}
+          {blocker.code === "COLLECTION_REJECTED"
+            ? "A credit note for a rejected collection is not signed — reject the note below."
+            : "It becomes ready to sign as soon as the collection is approved."}
         </p>
       ) : (
         <>
@@ -970,7 +992,7 @@ function SignOffForm({
       )}
 
       <div className="flex flex-wrap items-center gap-2">
-        {canSign && (
+        {canSign && !blocker && (
           <button
             onClick={sign}
             disabled={!ready || signing || busy}
