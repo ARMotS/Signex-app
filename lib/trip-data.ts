@@ -23,6 +23,7 @@ import { readInvoiceNoPattern } from "./config";
 import { normalizeInvoiceNo, normalizedInvoiceNoOrNull, type InvoiceNoPattern } from "./invoice-number";
 import { ensureInvoices, scheduleInvoiceHeaders } from "./invoice-registry";
 import { scheduleCollectionSheets } from "./collection-sheet-sync";
+import { awaitingCreditReview } from "./collection-confirm";
 
 export type StopStatus = "PENDING" | "IN_PROGRESS" | "SIGNED";
 
@@ -70,6 +71,11 @@ export interface TripCollection {
   failReason?: string | null;
   /** Why the last attempt to read the office's sheet failed, if it did. */
   sheetError?: string | null;
+  /** The office's decision on a CR that came back (collection-confirm.ts). */
+  creditReview?: "APPROVED" | "REJECTED" | null;
+  creditReviewReason?: string | null;
+  creditReviewedBy?: string | null;
+  creditReviewedAt?: Date | null;
 }
 
 export interface TripCollectionLine {
@@ -249,6 +255,10 @@ export interface ArchivedCollection {
   /** Items on the sheet / items that came back; null when the sheet was never read. */
   itemsListed?: number | null;
   itemsCollected?: number | null;
+  /** The office's decision on a CR that came back. Absent before approvals. */
+  creditReview?: "APPROVED" | "REJECTED" | null;
+  creditReviewReason?: string | null;
+  creditReviewedBy?: string | null;
 }
 
 export interface CompletedTripSheet {
@@ -842,6 +852,20 @@ export async function completeTripSheet(
       };
     }
 
+    // A credit return that came back is not finished until the office has
+    // approved it for credit or rejected it — the client's rule. Without it, a
+    // trip closed out on goods nobody in the office had looked at.
+    const undecided = collections.filter(awaitingCreditReview);
+    if (undecided.length > 0) {
+      return {
+        success: false,
+        error: `Cannot complete: ${undecided.length} credit collection(s) need approving or rejecting first (${undecided
+          .slice(0, 3)
+          .map((c) => c.collectionNo)
+          .join(", ")}${undecided.length > 3 ? "…" : ""})`,
+      };
+    }
+
     const stopById = new Map(stops.map((s) => [s.id, s]));
 
     const driver = await db.driver.findFirst({ where: { id: trip.driverId } });
@@ -937,6 +961,9 @@ export async function completeTripSheet(
             emailStatus: c.emailStatus,
             hasVariance: c.hasVariance,
             failReason: c.failReason,
+            creditReview: c.creditReview,
+            creditReviewReason: c.creditReviewReason,
+            creditReviewedBy: c.creditReviewedBy,
             ...lineTotals(c.lines),
           };
         }),
@@ -1367,6 +1394,10 @@ interface RawCollection {
   hasVariance?: boolean;
   failReason?: string | null;
   sheetError?: string | null;
+  creditReview?: "APPROVED" | "REJECTED" | null;
+  creditReviewReason?: string | null;
+  creditReviewedBy?: string | null;
+  creditReviewedAt?: Date | null;
 }
 
 /**
@@ -1413,6 +1444,10 @@ function mapCollection(collection: RawCollection): TripCollection {
     hasVariance: collection.hasVariance,
     failReason: collection.failReason,
     sheetError: collection.sheetError,
+    creditReview: collection.creditReview ?? null,
+    creditReviewReason: collection.creditReviewReason ?? null,
+    creditReviewedBy: collection.creditReviewedBy ?? null,
+    creditReviewedAt: collection.creditReviewedAt ?? null,
   };
 }
 
@@ -1482,6 +1517,9 @@ export interface CollectionRecord {
    */
   itemsListed: number | null;
   itemsCollected: number | null;
+  /** The office's decision on a CR that came back; null when none (yet). */
+  creditReview: "APPROVED" | "REJECTED" | null;
+  creditReviewReason: string | null;
 }
 
 export interface CollectionQuery {
@@ -1588,6 +1626,8 @@ export async function listCollections(
     ...lineTotals(c.lines),
     emailStatus: c.emailStatus,
     emailError: c.emailError,
+    creditReview: c.creditReview,
+    creditReviewReason: c.creditReviewReason,
     // Filtered to attached rows above.
     tripSheetId: c.tripSheetId!,
     archived: false,
@@ -1653,6 +1693,8 @@ export async function listCollections(
         hasVariance: c.hasVariance ?? false,
         itemsListed: c.itemsListed ?? null,
         itemsCollected: c.itemsCollected ?? null,
+        creditReview: c.creditReview ?? null,
+        creditReviewReason: c.creditReviewReason ?? null,
       });
     }
   }

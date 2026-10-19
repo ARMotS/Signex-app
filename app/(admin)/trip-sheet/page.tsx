@@ -7,6 +7,8 @@ import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 import CollectionSheetPanel, { type SheetCollection } from "@/components/admin/CollectionSheetPanel";
 import RemoveCollectionButton from "@/components/admin/RemoveCollectionButton";
 import { DocChip, StatusBadge, collectionKind, collectionTone, invoiceTone } from "@/components/ui/Chips";
+import CreditReviewControl from "@/components/admin/CreditReviewControl";
+import { awaitingCreditReview, creditReviewRequired } from "@/lib/collection-confirm";
 
 interface TripStop {
   id: string;
@@ -76,6 +78,10 @@ interface TripCollection {
   collectedQty?: number | null;
   sourceFilePath?: string | null;
   signedFilePath?: string | null;
+  /** The office's decision on a CR that came back (lib/collection-confirm.ts). */
+  creditReview?: "APPROVED" | "REJECTED" | null;
+  creditReviewReason?: string | null;
+  creditReviewedBy?: string | null;
   sheetStatus?: SheetCollection["sheetStatus"];
   sheetIssues?: SheetCollection["sheetIssues"];
   sheetError?: SheetCollection["sheetError"];
@@ -101,6 +107,9 @@ interface ArchivedCollection {
   sourceFilePath: string | null;
   signedFileId: string | null;
   signedFilePath: string | null;
+  /** The office's decision, frozen at completion. Absent before approvals. */
+  creditReview?: "APPROVED" | "REJECTED" | null;
+  creditReviewReason?: string | null;
 }
 
 const COLLECTION_STATUS_LABEL: Record<string, string> = {
@@ -252,14 +261,17 @@ const canMoveStop = (s: TripStop) =>
 
 /** Every delivery signed (collections are checked by the server on Complete). */
 // The same rule the server enforces in completeTripSheet: every delivery
-// signed AND every collection given an outcome. Checking deliveries alone let a
+// signed, every collection given an outcome, AND every credit return that came
+// back approved or rejected by the office. Checking deliveries alone let a
 // collection-only trip show a full bar and a Complete button the server refused.
 const tripCompletable = (t: TripSheet) =>
   (t.stops.length > 0 ||
     (t.removedStops?.length ?? 0) > 0 ||
     (t.reallocatedOut?.length ?? 0) > 0) &&
   t.stops.every(deliveryDone) &&
-  t.stops.every((s) => (s.collections ?? []).every((c) => c.status !== "PENDING"));
+  t.stops.every((s) =>
+    (s.collections ?? []).every((c) => c.status !== "PENDING" && !awaitingCreditReview(c))
+  );
 
 function unsentEmails(stops: TripStop[]) {
   const failed: TripStop[] = [];
@@ -2853,6 +2865,7 @@ export default function TripSheetPage() {
               const collectionExceptions = tripCollections.filter((c) =>
                 COLLECTION_EXCEPTIONS.has(c.status)
               ).length;
+              const awaitingApproval = tripCollections.filter(awaitingCreditReview).length;
               const isExpanded = expandedTrip === trip.id;
               // How much of this sheet the query actually hit. A sheet can be
               // in the list on the strength of one stop out of forty, and the
@@ -2914,6 +2927,15 @@ export default function TripSheetPage() {
                             title={`${collectionsDone} of ${tripCollections.length} collections have an outcome. All of them need one before this sheet can be archived.`}
                           >
                             {collectionsDone}/{tripCollections.length} collected
+                          </StatusBadge>
+                        )}
+                        {awaitingApproval > 0 && (
+                          <StatusBadge
+                            tone="amber"
+                            dot
+                            title="Credit returns that came back and need approving or rejecting. The trip cannot be completed until they are."
+                          >
+                            {awaitingApproval} awaiting approval
                           </StatusBadge>
                         )}
                         {collectionExceptions > 0 && (
@@ -3245,6 +3267,19 @@ export default function TripSheetPage() {
                                     </div>
                                     {c.exceptionReason && (
                                       <p className="mt-1 text-[color:var(--tone-amber-fg)]">{c.exceptionReason}</p>
+                                    )}
+
+                                    {/* The office's decision: a credit return that
+                                        came back holds the trip open until it is
+                                        approved for credit or rejected. */}
+                                    {creditReviewRequired(c) && (
+                                      <div className="mt-2 flex items-center gap-2 flex-wrap rounded-md bg-ink-surface/60 px-2 py-1.5">
+                                        <span className="text-[11px] font-mono text-ink-muted">Credit</span>
+                                        <CreditReviewControl collection={c} onChanged={fetchTripSheets} />
+                                        {c.creditReview === "REJECTED" && c.creditReviewReason && (
+                                          <span className="text-[11px] text-ink-muted">— {c.creditReviewReason}</span>
+                                        )}
+                                      </div>
                                     )}
 
                                     {/* The paperwork, and the office's actions. */}
@@ -3915,10 +3950,18 @@ export default function TripSheetPage() {
                                           </span>
                                         )}
                                       </div>
-                                      <div className="flex items-center gap-2 justify-end">
+                                      <div className="flex items-center gap-2 justify-end flex-wrap">
                                         <StatusBadge tone={collectionTone(c.status)} dot>
                                           {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
                                         </StatusBadge>
+                                        {c.creditReview && (
+                                          <StatusBadge
+                                            tone={c.creditReview === "APPROVED" ? "green" : "red"}
+                                            title={c.creditReviewReason ?? undefined}
+                                          >
+                                            {c.creditReview === "APPROVED" ? "Approved for credit" : "Rejected for credit"}
+                                          </StatusBadge>
+                                        )}
                                         {c.signedFilePath ? (
                                           <a
                                             href={`/api/collections/document/${encodeURIComponent(c.signedFilePath)}?signed=true`}

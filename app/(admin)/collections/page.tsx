@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DocChip, StatusBadge, collectionKind, collectionTone } from "@/components/ui/Chips";
+import { awaitingCreditReview } from "@/lib/collection-confirm";
 
 /**
  * The dispatcher's collections view and the credit-return report accounts
@@ -39,6 +40,9 @@ interface CollectionRecord {
   /** Items on the office's sheet / items back — null when no sheet was read. */
   itemsListed?: number | null;
   itemsCollected?: number | null;
+  /** The office's decision on a CR that came back; null when none (yet). */
+  creditReview?: "APPROVED" | "REJECTED" | null;
+  creditReviewReason?: string | null;
   tripSheetId: string;
   archived: boolean;
   completedTripSheetId: string | null;
@@ -583,9 +587,27 @@ export default function CollectionsPage() {
                 </div>
 
                 <div className="mt-2 md:mt-0">
-                  <StatusBadge tone={collectionTone(r.status)} dot>
-                    {STATUS_LABEL[r.status] ?? r.status}
-                  </StatusBadge>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <StatusBadge tone={collectionTone(r.status)} dot>
+                      {STATUS_LABEL[r.status] ?? r.status}
+                    </StatusBadge>
+                    {/* The office's decision on a CR that came back. */}
+                    {r.creditReview ? (
+                      <StatusBadge
+                        tone={r.creditReview === "APPROVED" ? "green" : "red"}
+                        title={r.creditReviewReason ?? undefined}
+                      >
+                        {r.creditReview === "APPROVED" ? "Approved" : "Rejected"}
+                      </StatusBadge>
+                    ) : (
+                      // Live only: a trip closed before approvals existed has none.
+                      !r.archived && awaitingCreditReview(r) && (
+                        <StatusBadge tone="amber" title="Approve or reject it on the trip card">
+                          Awaiting approval
+                        </StatusBadge>
+                      )
+                    )}
+                  </div>
                   {RECEIPT_STATUSES.has(r.status) && r.emailStatus && (
                     <p
                       className={`text-[11px] font-mono mt-1 ${EMAIL_LABEL[r.emailStatus]?.tone ?? "text-ink-muted"}`}

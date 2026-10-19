@@ -192,6 +192,12 @@ export const PUT = withAuth(async (
     if (result.outcome === "closed") {
       return NextResponse.json({ error: "This credit note has been dealt with; its collections are settled." }, { status: 409 });
     }
+    if (result.outcome === "rejected_collection") {
+      return NextResponse.json(
+        { error: "That collection was rejected for credit by the office — nothing is credited against it." },
+        { status: 409 }
+      );
+    }
     if (result.outcome === "not_collected") {
       return NextResponse.json(
         { error: "Only a credit-return collection that has come back (collected or partly collected) can be linked." },

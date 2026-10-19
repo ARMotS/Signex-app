@@ -297,3 +297,22 @@ describe("assessCreditNote", () => {
 describe("the fixture", () => {
   it("is the one-line note", () => expect(CR_407712_LINES).toHaveLength(1));
 });
+
+describe("the office's decision on the collection", () => {
+  it("a note against a collection the office rejected needs review, and says why", () => {
+    const result = assessCreditNote(
+      parsed(),
+      context({ collections: [], collectedLines: [], rejectedCollections: [{ collectionNo: "1797", reason: "Goods damaged by the customer" }] }),
+      "TEXT"
+    );
+    expect(result.status).toBe("NEEDS_REVIEW");
+    expect(codes(result.issues)).toEqual(["COLLECTION_REJECTED"]);
+    expect(result.issues[0].message).toContain("Goods damaged by the customer");
+  });
+
+  it("a collection not yet approved is a warning only", () => {
+    const result = assessCreditNote(parsed(), context({ unapprovedCollectionNos: ["1797"] }), "TEXT");
+    expect(result.status).toBe("RECEIVED");
+    expect(codes(result.issues)).toEqual(["COLLECTION_NOT_APPROVED"]);
+  });
+});

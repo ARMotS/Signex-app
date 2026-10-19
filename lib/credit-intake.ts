@@ -280,13 +280,18 @@ export async function reassessCreditNote(tenantId: string, creditNoteId: string)
           type: "CREDIT_RETURN",
           OR: [{ invoiceNoNormalized: note.invoiceNoNormalized }, ...(invoice ? [{ invoiceId: invoice.id }] : [])],
         },
-        select: { id: true, collectionNo: true, status: true },
+        select: { id: true, collectionNo: true, status: true, creditReview: true, creditReviewReason: true },
       })
     : [];
 
+  // A collection the office rejected for credit is never linked: it stays on
+  // record, but nothing is credited against it.
   const linkOf = new Map(note.collections.map((l) => [l.collectionId, l]));
   const wantAuto = against.filter(
-    (c) => (c.status === "COLLECTED" || c.status === "PARTIAL") && linkOf.get(c.id)?.source !== "EXCLUDED"
+    (c) =>
+      (c.status === "COLLECTED" || c.status === "PARTIAL") &&
+      c.creditReview !== "REJECTED" &&
+      linkOf.get(c.id)?.source !== "EXCLUDED"
   );
   const wantIds = new Set(wantAuto.map((c) => c.id));
   const staleAuto = note.collections.filter((l) => l.source === "AUTO" && !wantIds.has(l.collectionId));
@@ -311,13 +316,19 @@ export async function reassessCreditNote(tenantId: string, creditNoteId: string)
       ...note.collections.filter((l) => l.source === "MANUAL").map((l) => l.collectionId),
     ]),
   ];
-  const linked = linkedIds.length
+  const linkedRows = linkedIds.length
     ? await db.collection.findMany({
         where: { id: { in: linkedIds } },
-        select: { id: true, collectionNo: true, lines: true },
+        select: { id: true, collectionNo: true, lines: true, creditReview: true, creditReviewReason: true },
         orderBy: { collectedAt: "asc" },
       })
     : [];
+  // A MANUAL link to a collection rejected since stops counting too.
+  const linked = linkedRows.filter((c) => c.creditReview !== "REJECTED");
+  const rejected = new Map<string, { collectionNo: string; reason: string | null }>();
+  for (const c of [...against.filter((c) => c.status === "COLLECTED" || c.status === "PARTIAL"), ...linkedRows]) {
+    if (c.creditReview === "REJECTED") rejected.set(c.id, { collectionNo: c.collectionNo, reason: c.creditReviewReason });
+  }
   const collectedLines: CollectedLine[] = linked.flatMap((c) =>
     c.lines.map((l) => ({
       id: l.id,
@@ -400,6 +411,8 @@ export async function reassessCreditNote(tenantId: string, creditNoteId: string)
       pendingCollectionNos: against.filter((c) => c.status === "PENDING").map((c) => c.collectionNo),
       collectedLines,
       alreadyCredited,
+      rejectedCollections: [...rejected.values()],
+      unapprovedCollectionNos: linked.filter((c) => !c.creditReview).map((c) => c.collectionNo),
     },
     note.readSource === "AI" ? "AI" : "TEXT"
   );
@@ -605,7 +618,7 @@ export async function rereadCreditNote(tenantId: string, creditNoteId: string, b
 
 export type LinkResult =
   | { outcome: "linked" | "unlinked"; evaluation: CreditEvaluation | null }
-  | { outcome: "not_found" | "closed" | "not_collected" };
+  | { outcome: "not_found" | "closed" | "not_collected" | "rejected_collection" };
 
 /**
  * The office links a collection the invoice did not lead to (a collection
@@ -623,7 +636,7 @@ export async function setCreditNoteLink(
   const db = scopedPrisma(tenantId);
   const [note, collection] = await Promise.all([
     db.creditNote.findFirst({ where: { id: creditNoteId }, select: { id: true, status: true } }),
-    db.collection.findFirst({ where: { id: collectionId }, select: { id: true, status: true, type: true, collectionNo: true } }),
+    db.collection.findFirst({ where: { id: collectionId }, select: { id: true, status: true, type: true, collectionNo: true, creditReview: true } }),
   ]);
   if (!note || !collection) return { outcome: "not_found" };
   if (!LIVE.includes(note.status)) return { outcome: "closed" };
@@ -633,6 +646,7 @@ export async function setCreditNoteLink(
     if (collection.type !== "CREDIT_RETURN" || (collection.status !== "COLLECTED" && collection.status !== "PARTIAL")) {
       return { outcome: "not_collected" };
     }
+    if (collection.creditReview === "REJECTED") return { outcome: "rejected_collection" };
     if (existing) {
       await db.creditNoteCollection.update({ where: { id: existing.id }, data: { source: "MANUAL", linkedBy: by } });
     } else {
