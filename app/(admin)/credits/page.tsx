@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import SignaturePad, { type SignaturePadHandle } from "@/components/SignaturePad";
 import { DocChip, StatusBadge as Badge, collectionKind, collectionTone, creditNoteTone } from "@/components/ui/Chips";
+import RecordFilterBar, { Highlight, type FilterBarConfig } from "@/components/admin/RecordFilterBar";
+import { usePagedRecords, useRecordFilters } from "@/hooks/useRecordFilters";
 
 /**
  * Credit notes from the accounting software, read off the branch's credits
@@ -160,49 +162,52 @@ function StatusBadge({ status }: { status: Status }) {
 /** Poll every 30s while the tab is visible — that is also what keeps the folder looked at. */
 const POLL_MS = 30_000;
 
+interface PageExtra {
+  counts: Record<Status, number>;
+  folder: Folder;
+  facets: { customers: string[] };
+}
+
 export default function CreditsPage() {
-  const [rows, setRows] = useState<CreditRow[]>([]);
-  const [counts, setCounts] = useState<Record<Status, number> | null>(null);
-  const [folder, setFolder] = useState<Folder | null>(null);
-  const [tab, setTab] = useState<"" | Status>("");
-  const [query, setQuery] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [filters, setFilters] = useRecordFilters("credits");
+  const list = usePagedRecords<CreditRow, PageExtra>("/api/credit-notes", "creditNotes", filters);
+  const rows = list.items;
+  const counts = list.extra?.counts ?? null;
+  const folder = list.extra?.folder ?? null;
+  const { reload } = list;
+  const load = reload;
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [checking, setChecking] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async () => {
-    try {
-      const params = new URLSearchParams();
-      if (tab) params.set("status", tab);
-      if (query.trim()) params.set("q", query.trim());
-      const res = await fetch(`/api/credit-notes?${params}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to load credit notes");
-      setRows(data.creditNotes);
-      setCounts(data.counts);
-      setFolder(data.folder);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load credit notes");
-    } finally {
-      setLoading(false);
-    }
-  }, [tab, query]);
+  // The tabs are the status filter's quick form: one status, or none.
+  const tab: "" | Status = filters.status.length === 1 ? (filters.status[0] as Status) : "";
 
+  // Polling is also what keeps the folder looked at (the server throttles it).
   useEffect(() => {
-    const first = setTimeout(load, query ? 250 : 0);
     const timer = setInterval(() => {
-      if (document.visibilityState === "visible") load();
+      if (document.visibilityState === "visible") reload();
     }, POLL_MS);
-    return () => {
-      clearTimeout(first);
-      clearInterval(timer);
-    };
-  }, [load, query]);
+    return () => clearInterval(timer);
+  }, [reload]);
+
+  const barConfig: FilterBarConfig = {
+    searchPlaceholder: "Credit no, invoice, customer, account, collection…",
+    noun: "credit note",
+    dateLabel: "Credit date",
+    statusOptions: [],
+    sortOptions: [
+      { value: "date_desc", label: "Newest first" },
+      { value: "date_asc", label: "Oldest first" },
+      { value: "customer", label: "Customer A–Z" },
+      { value: "number", label: "Credit no" },
+      { value: "status", label: "Status" },
+    ],
+    customers: list.extra?.facets.customers,
+    flagLabel: "Has warnings or issues",
+  };
 
   // /credits?note=<id> (from an invoice's chain) opens that note. Read after
   // mount, so the server-rendered page and the first client render agree.
@@ -231,7 +236,7 @@ export default function CreditsPage() {
         if (data.waiting) parts.push(`${data.waiting} more on the next check`);
         flash(true, `Folder checked: ${data.inFolder} file${data.inFolder === 1 ? "" : "s"}, ${parts.join(", ")}.`);
       }
-      await load();
+      load();
     } catch {
       flash(false, "Network error");
     } finally {
@@ -252,7 +257,7 @@ export default function CreditsPage() {
         flash(true, `${file.name} uploaded and read.`);
         setOpenId(data.id);
       }
-      await load();
+      load();
     } catch {
       flash(false, "Network error");
     } finally {
@@ -353,41 +358,41 @@ export default function CreditsPage() {
       )}
 
       {/* ── Filters ─────────────────────────────────────────── */}
-      <div className="bg-ink-card border border-ink-border rounded p-3 mb-4 flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-1.5 mb-2">
         {TABS.map((t) => (
           <button
             key={t.key || "all"}
-            onClick={() => setTab(t.key)}
-            className={`px-3 py-1.5 rounded text-xs font-mono border ${
-              tab === t.key ? "bg-ink-black text-white border-ink-black" : "bg-white text-ink-muted border-ink-border hover:text-ink-black"
-            }`}
+            onClick={() => setFilters({ ...filters, status: t.key ? [t.key] : [] })}
+            aria-pressed={tab === t.key}
+            className={`act ${tab === t.key ? "!bg-ink-black !text-white !border-ink-black" : ""}`}
           >
             {t.label}
-            {counts && t.key && <span className="ml-1 opacity-70">{counts[t.key]}</span>}
+            {counts && t.key && <span className="opacity-70">{counts[t.key]}</span>}
           </button>
         ))}
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Credit no, invoice, customer, account…"
-          className="ml-auto min-w-[14rem] flex-1 sm:flex-none px-3 py-1.5 bg-ink-surface border border-ink-border rounded font-mono text-sm outline-none focus:border-ink-green"
-        />
       </div>
+      <RecordFilterBar
+        state={filters}
+        onChange={setFilters}
+        config={barConfig}
+        total={list.total}
+        loading={list.loading}
+        exportHref={list.csvHref}
+      />
 
       {/* ── Table ───────────────────────────────────────────── */}
-      {loading ? (
+      {list.loading && rows.length === 0 ? (
         <div className="bg-ink-card border border-ink-border rounded p-12 text-center">
           <div className="w-6 h-6 border-2 border-ink-border border-t-ink-green rounded-full animate-spin mx-auto mb-3" />
           <p className="text-sm font-mono text-ink-muted">Loading credit notes…</p>
         </div>
-      ) : error ? (
+      ) : list.error && rows.length === 0 ? (
         <div className="bg-ink-red-dim border border-ink-red/20 rounded p-6 text-center">
-          <p className="text-sm font-mono text-ink-red">{error}</p>
+          <p className="text-sm font-mono text-ink-red">{list.error}</p>
         </div>
       ) : rows.length === 0 ? (
         <div className="bg-ink-card border-2 border-dashed border-ink-border rounded p-12 text-center">
-          <p className="font-mono text-sm text-ink-black mb-1">No credit notes{tab || query ? " match" : " yet"}</p>
+          <p className="font-mono text-sm text-ink-black mb-1">No credit notes{list.total === 0 && (filters.q || filters.status.length || filters.from || filters.to || filters.preset || filters.customer || filters.flag) ? " match" : " yet"}</p>
           <p className="text-xs text-ink-muted">
             They appear here once the accounting software saves them to the credits folder, or when you upload one.
           </p>
@@ -425,7 +430,7 @@ export default function CreditsPage() {
                   <td className="px-4 py-2.5 whitespace-nowrap">
                     {r.invoiceNo ? <DocChip kind="INV" number={r.invoiceNo} tone="ref" /> : "—"}
                   </td>
-                  <td className="px-4 py-2.5">{r.customerName ?? "—"}</td>
+                  <td className="px-4 py-2.5">{r.customerName ? <Highlight text={r.customerName} query={filters.q} /> : "—"}</td>
                   <td className="px-4 py-2.5 font-mono text-xs">
                     {r.collectionNos.length ? r.collectionNos.join(", ") : <span className="text-ink-muted">none</span>}
                   </td>
@@ -447,6 +452,13 @@ export default function CreditsPage() {
               ))}
             </tbody>
           </table>
+          {list.next && (
+            <div className="px-4 py-3 border-t border-ink-border text-center">
+              <button type="button" onClick={list.loadMore} disabled={list.loadingMore} className="act">
+                {list.loadingMore ? "Loading…" : `Load more · ${rows.length} of ${list.total ?? "?"}`}
+              </button>
+            </div>
+          )}
         </div>
       )}
 

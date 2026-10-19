@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { DocChip, StatusBadge, collectionKind, collectionTone } from "@/components/ui/Chips";
 import { awaitingCreditReview } from "@/lib/collection-confirm";
+import RecordFilterBar, { Highlight, type FilterBarConfig } from "@/components/admin/RecordFilterBar";
+import { usePagedRecords, useRecordFilters } from "@/hooks/useRecordFilters";
 
 /**
  * The dispatcher's collections view and the credit-return report accounts
@@ -49,18 +51,21 @@ interface CollectionRecord {
   tripSheetId: string;
   archived: boolean;
   completedTripSheetId: string | null;
+  tripDate?: string | null;
+  tripName?: string | null;
 }
 
 interface Counts {
   total: number;
   pending: number;
-  collected: number;
-  partial: number;
-  notAvailable: number;
-  refused: number;
   creditReturns: number;
   uplifts: number;
   exceptions: number;
+}
+
+interface PageExtra {
+  counts: Counts;
+  facets: { customers: string[]; drivers: { id: string; name: string }[]; trips: { id: string; name: string }[] };
 }
 
 const STATUS_LABEL: Record<CollectionRecord["status"], string> = {
@@ -228,71 +233,36 @@ function FolderPanel() {
   );
 }
 
-type TypeFilter = "" | "CREDIT_RETURN" | "NON_CREDIT_UPLIFT";
-type StatusFilter = "" | CollectionRecord["status"];
-
 export default function CollectionsPage() {
-  const [records, setRecords] = useState<CollectionRecord[]>([]);
-  const [counts, setCounts] = useState<Counts | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const [type, setType] = useState<TypeFilter>("");
-  const [status, setStatus] = useState<StatusFilter>("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [exceptionsOnly, setExceptionsOnly] = useState(false);
-  const [outstandingOnly, setOutstandingOnly] = useState(false);
-  const [query, setQuery] = useState("");
+  const [filters, setFilters] = useRecordFilters("collections");
+  const list = usePagedRecords<CollectionRecord, PageExtra>("/api/collections", "collections", filters);
+  const records = list.items;
+  const counts = list.extra?.counts ?? null;
   const [sendingId, setSendingId] = useState<string | null>(null);
   const [sendNote, setSendNote] = useState<{ id: string; text: string; ok: boolean } | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams();
-      if (type) params.set("type", type);
-      if (status) params.set("status", status);
-      if (from) params.set("from", from);
-      if (to) params.set("to", to);
-      if (exceptionsOnly) params.set("exceptions", "true");
-      // "Outstanding" means work still to do, which by definition lives on a
-      // trip nobody has closed yet.
-      if (outstandingOnly) params.set("includeArchived", "false");
-
-      const res = await fetch(`/api/collections?${params.toString()}`);
-      const data = await res.json();
-
-      if (!res.ok) {
-        setError(data.error || "Failed to load collections");
-        return;
-      }
-
-      setRecords(data.collections || []);
-      setCounts(data.counts || null);
-    } catch {
-      setError("Failed to connect to server");
-    } finally {
-      setLoading(false);
-    }
-  }, [type, status, from, to, exceptionsOnly, outstandingOnly]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  const visible = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    let rows = records;
-    if (outstandingOnly) rows = rows.filter((r) => r.status === "PENDING");
-    if (!q) return rows;
-    return rows.filter((r) =>
-      [r.collectionNo, r.customerName, r.originalInvoiceNo, r.driverName, r.exceptionReason]
-        .filter(Boolean)
-        .some((v) => String(v).toLowerCase().includes(q))
-    );
-  }, [records, query, outstandingOnly]);
+  const barConfig: FilterBarConfig = {
+    searchPlaceholder: "Collection no, customer, invoice, driver…",
+    noun: "collection",
+    dateLabel: "Collected",
+    tripDate: true,
+    statusOptions: (Object.keys(STATUS_LABEL) as CollectionRecord["status"][]).map((s) => ({ value: s, label: STATUS_LABEL[s] })),
+    typeOptions: [
+      { value: "CREDIT_RETURN", label: "Credit returns" },
+      { value: "NON_CREDIT_UPLIFT", label: "Uplifts" },
+    ],
+    sortOptions: [
+      { value: "date_desc", label: "Newest first" },
+      { value: "date_asc", label: "Oldest first" },
+      { value: "customer", label: "Customer A–Z" },
+      { value: "number", label: "Collection no" },
+      { value: "status", label: "Status" },
+    ],
+    customers: list.extra?.facets.customers,
+    drivers: list.extra?.facets.drivers,
+    trips: list.extra?.facets.trips,
+    flagLabel: "Not as listed",
+  };
 
   // The manual send — for a receipt that did not go out on its own, or another
   // copy. The automatic send on recording the outcome is the normal path.
@@ -309,64 +279,12 @@ export default function CollectionsPage() {
       } else {
         setSendNote({ id, text: data.error || "Send failed", ok: false });
       }
-      await load();
+      list.reload();
     } catch {
       setSendNote({ id, text: "Failed to connect to server", ok: false });
     } finally {
       setSendingId(null);
     }
-  };
-
-  const exportCsv = () => {
-    // A credit clerk reconciles in a spreadsheet, so the report has to leave as
-    // one. Built in the browser from what is already on screen — no second
-    // endpoint that could disagree with the table.
-    const headers = [
-      "Collection No",
-      "Type",
-      "Subtype",
-      "Original Invoice",
-      "Customer",
-      "Status",
-      "Expected",
-      "Collected",
-      "Reason",
-      "Driver",
-      "Signed By",
-      "Collected At",
-      "Signed Document",
-      "Receipt Email",
-    ];
-    const rows = visible.map((r) => [
-      r.collectionNo,
-      r.type === "CREDIT_RETURN" ? "Credit Return" : "Uplift",
-      r.upliftSubtype ? SUBTYPE_LABEL[r.upliftSubtype] ?? r.upliftSubtype : "",
-      r.originalInvoiceNo ?? "",
-      r.customerName,
-      STATUS_LABEL[r.status] ?? r.status,
-      r.expectedQty ?? "",
-      r.collectedQty ?? "",
-      r.exceptionReason ?? "",
-      r.driverName ?? "",
-      r.signedByName ?? "",
-      r.collectedAt ? new Date(r.collectedAt).toISOString() : "",
-      r.signedFilePath ?? "",
-      r.emailStatus ? EMAIL_LABEL[r.emailStatus]?.text ?? r.emailStatus : "",
-    ]);
-
-    const escape = (v: unknown) => {
-      const s = String(v ?? "");
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-
-    const csv = [headers, ...rows].map((r) => r.map(escape).join(",")).join("\r\n");
-    const blob = new Blob([`﻿${csv}`], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `signex-collections-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
   };
 
   return (
@@ -403,115 +321,26 @@ export default function CollectionsPage() {
       )}
 
       {/* ── Filters ─────────────────────────────────────────── */}
-      <div className="bg-ink-card border border-ink-border rounded p-4 mb-4 space-y-3">
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">Type</span>
-            <select
-              value={type}
-              onChange={(e) => setType(e.target.value as TypeFilter)}
-              className="px-3 py-2 bg-ink-surface border border-ink-border rounded font-mono text-sm outline-none focus:border-ink-green"
-            >
-              <option value="">All</option>
-              <option value="CREDIT_RETURN">Credit returns</option>
-              <option value="NON_CREDIT_UPLIFT">Uplifts</option>
-            </select>
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">Status</span>
-            <select
-              value={status}
-              onChange={(e) => setStatus(e.target.value as StatusFilter)}
-              className="px-3 py-2 bg-ink-surface border border-ink-border rounded font-mono text-sm outline-none focus:border-ink-green"
-            >
-              <option value="">All</option>
-              {(Object.keys(STATUS_LABEL) as CollectionRecord["status"][]).map((s) => (
-                <option key={s} value={s}>
-                  {STATUS_LABEL[s]}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">From</span>
-            <input
-              type="date"
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
-              className="px-3 py-2 bg-ink-surface border border-ink-border rounded font-mono text-sm outline-none focus:border-ink-green"
-            />
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">To</span>
-            <input
-              type="date"
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-              className="px-3 py-2 bg-ink-surface border border-ink-border rounded font-mono text-sm outline-none focus:border-ink-green"
-            />
-          </label>
-
-          <label className="flex flex-col gap-1 flex-1 min-w-[12rem]">
-            <span className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">Search</span>
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Collection no, customer, invoice, driver…"
-              className="px-3 py-2 bg-ink-surface border border-ink-border rounded font-mono text-sm outline-none focus:border-ink-green"
-            />
-          </label>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-4">
-          <label className="flex items-center gap-2 text-xs font-mono text-ink-muted cursor-pointer">
-            <input
-              type="checkbox"
-              checked={exceptionsOnly}
-              onChange={(e) => setExceptionsOnly(e.target.checked)}
-              className="w-3.5 h-3.5 rounded border-ink-border accent-[#F5A623]"
-            />
-            Exceptions only (partial / not available / refused)
-          </label>
-          <label className="flex items-center gap-2 text-xs font-mono text-ink-muted cursor-pointer">
-            <input
-              type="checkbox"
-              checked={outstandingOnly}
-              onChange={(e) => setOutstandingOnly(e.target.checked)}
-              className="w-3.5 h-3.5 rounded border-ink-border accent-[#00C07F]"
-            />
-            Still outstanding
-          </label>
-
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-xs font-mono text-ink-muted">
-              {visible.length} shown
-            </span>
-            <button
-              onClick={exportCsv}
-              disabled={visible.length === 0}
-              className="px-3 py-1.5 text-xs font-mono border border-ink-border rounded hover:bg-ink-surface transition-colors disabled:opacity-40"
-            >
-              Export CSV
-            </button>
-          </div>
-        </div>
-      </div>
+      <RecordFilterBar
+        state={filters}
+        onChange={setFilters}
+        config={barConfig}
+        total={list.total}
+        loading={list.loading}
+        exportHref={list.csvHref}
+      />
 
       {/* ── Table ───────────────────────────────────────────── */}
-      {loading ? (
+      {list.loading && records.length === 0 ? (
         <div className="bg-ink-card border border-ink-border rounded p-12 text-center">
           <div className="w-6 h-6 border-2 border-ink-border border-t-ink-green rounded-full animate-spin mx-auto mb-3" />
           <p className="text-sm font-mono text-ink-muted">Loading collections…</p>
         </div>
-      ) : error ? (
+      ) : list.error && records.length === 0 ? (
         <div className="bg-ink-red-dim border border-ink-red/20 rounded p-6 text-center">
-          <p className="text-sm font-mono text-ink-red">{error}</p>
+          <p className="text-sm font-mono text-ink-red">{list.error}</p>
         </div>
-      ) : visible.length === 0 ? (
+      ) : records.length === 0 ? (
         <div className="bg-ink-card border-2 border-dashed border-ink-border rounded p-12 text-center">
           <p className="font-mono text-sm text-ink-black mb-1">No collections match</p>
           <p className="text-xs text-ink-muted">
@@ -529,7 +358,7 @@ export default function CollectionsPage() {
           </div>
 
           <div className="divide-y divide-ink-border">
-            {visible.map((r) => (
+            {records.map((r) => (
               <div
                 key={`${r.tripSheetId}-${r.collectionNo}-${r.id ?? "archived"}`}
                 className="px-4 py-3 hover:bg-ink-surface/30 transition-colors md:grid md:grid-cols-[10rem_1fr_1fr_9rem_12rem] md:gap-3 md:items-center"
@@ -546,9 +375,10 @@ export default function CollectionsPage() {
                 </div>
 
                 <div className="min-w-0 mt-2 md:mt-0">
-                  <p className="text-[13px] text-ink-black truncate">{r.customerName}</p>
+                  <p className="text-[13px] text-ink-black truncate"><Highlight text={r.customerName} query={filters.q} /></p>
                   <p className="text-[11px] font-mono text-ink-muted truncate">
                     {r.driverName ?? "No driver"}
+                    {r.tripDate ? ` · trip ${r.tripDate}` : ""}
                     {r.collectedAt
                       ? ` · ${new Date(r.collectedAt).toLocaleDateString("en-ZA", {
                           day: "2-digit",
@@ -693,6 +523,13 @@ export default function CollectionsPage() {
               </div>
             ))}
           </div>
+          {list.next && (
+            <div className="px-4 py-3 border-t border-ink-border text-center">
+              <button type="button" onClick={list.loadMore} disabled={list.loadingMore} className="act">
+                {list.loadingMore ? "Loading…" : `Load more · ${records.length} of ${list.total ?? "?"}`}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

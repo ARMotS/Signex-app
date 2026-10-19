@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { CollectionStatus, CollectionType } from "@prisma/client";
-import { listCollections } from "@/lib/trip-data";
+import { listCollections, type CollectionRecord } from "@/lib/trip-data";
 import { dayWindow, parseTzOffset } from "@/lib/day-window";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { readInvoiceNoPattern } from "@/lib/config";
+import { normalizeInvoiceNo, type InvoiceNoPattern } from "@/lib/invoice-number";
+import { applyFilter, facetsOf, pageOf, parseFilterState, parsePageSize, toCsv, type FilterAccessors } from "@/lib/record-filter";
 
 /**
  * The dispatcher's collections view and the credit-return report accounts
@@ -21,6 +24,10 @@ import { withAuth } from "@/lib/api-handler";
  *   ?range=today&tzOffset=      the caller's own day, not the server's
  *   ?driverId= / ?tripSheetId=
  *   ?includeArchived=false      outstanding work only
+ *
+ * ?view=page is the filter bar's shape instead (lib/record-filter.ts): the
+ * bar's filters, sort, one 25-row page (`after` = the previous `next`), the
+ * facets for its dropdowns, and `format=csv` for every filtered row.
  */
 
 const VALID_TYPES: CollectionType[] = ["CREDIT_RETURN", "NON_CREDIT_UPLIFT"];
@@ -34,6 +41,56 @@ const VALID_STATUSES: CollectionStatus[] = [
 
 const EXCEPTION_STATUSES = new Set<string>(["PARTIAL", "NOT_AVAILABLE", "REFUSED"]);
 
+const accessors = (pattern: InvoiceNoPattern): FilterAccessors<CollectionRecord> => ({
+  search: (r) => [
+    r.collectionNo,
+    r.customerName,
+    r.originalInvoiceNo,
+    r.originalInvoiceNo ? normalizeInvoiceNo(r.originalInvoiceNo, pattern) : null,
+    r.driverName,
+    r.exceptionReason,
+    r.signedByName,
+  ],
+  date: (r) => r.collectedAt?.toISOString() ?? null,
+  tripDate: (r) => r.tripDate,
+  status: (r) => r.status,
+  type: (r) => r.type,
+  customer: (r) => r.customerName,
+  driver: (r) => r.driverId,
+  trip: (r) => r.tripSheetId,
+  flag: (r) => r.hasVariance,
+  number: (r) => r.collectionNo,
+});
+
+const CSV_HEADERS = [
+  "Collection No", "Type", "Subtype", "Original Invoice", "Customer", "Status", "Expected", "Collected",
+  "Not as listed", "Reason", "Approval", "Driver", "Trip date", "Trip sheet", "Signed By", "Collected At",
+  "Signed Document", "Receipt Email",
+];
+
+function csvRow(r: CollectionRecord) {
+  return [
+    r.collectionNo,
+    r.type === "CREDIT_RETURN" ? "Credit Return" : "Uplift",
+    r.upliftSubtype ?? "",
+    r.originalInvoiceNo ?? "",
+    r.customerName,
+    r.status,
+    r.itemsListed ?? r.expectedQty ?? "",
+    r.itemsCollected ?? r.collectedQty ?? "",
+    r.hasVariance ? "Yes" : "",
+    r.exceptionReason ?? "",
+    r.creditReview ?? "",
+    r.driverName ?? "",
+    r.tripDate ?? "",
+    r.tripName ?? "",
+    r.signedByName ?? "",
+    r.collectedAt?.toISOString() ?? "",
+    r.signedFilePath ?? "",
+    r.emailStatus ?? "",
+  ];
+}
+
 /** A date-only query param, read as the start of that UTC day. */
 function parseDate(raw: string | null): Date | undefined {
   if (!raw) return undefined;
@@ -46,6 +103,42 @@ export const GET = withAuth(async (request: NextRequest) => {
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   const { searchParams } = new URL(request.url);
+
+  if (searchParams.get("view") === "page") {
+    const state = parseFilterState(searchParams);
+    const [all, pattern] = await Promise.all([
+      listCollections(ctx.tenantId, { limit: 2000 }),
+      readInvoiceNoPattern(ctx.tenantId),
+    ]);
+    const acc = accessors(pattern);
+    const rows = applyFilter(all, state, acc, new Date(), parseTzOffset(searchParams.get("tzOffset")));
+
+    if (searchParams.get("format") === "csv") {
+      return new NextResponse(toCsv(CSV_HEADERS, rows.map(csvRow)), {
+        headers: {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="signex-collections-${new Date().toISOString().slice(0, 10)}.csv"`,
+        },
+      });
+    }
+
+    const page = pageOf(rows, searchParams.get("after"), parsePageSize(searchParams.get("size")));
+    const count = (pred: (r: CollectionRecord) => boolean) => rows.filter(pred).length;
+    return NextResponse.json({
+      collections: page.items,
+      total: page.total,
+      next: page.next,
+      // The dropdowns offer what exists in the whole scope, not just this page.
+      facets: facetsOf(all, acc, (r) => r.driverName, (r) => `${r.tripDate ?? ""} · ${r.driverName ?? ""} · ${r.tripName ?? ""}`),
+      counts: {
+        total: rows.length,
+        pending: count((r) => r.status === "PENDING"),
+        creditReturns: count((r) => r.type === "CREDIT_RETURN"),
+        uplifts: count((r) => r.type === "NON_CREDIT_UPLIFT"),
+        exceptions: count((r) => EXCEPTION_STATUSES.has(r.status)),
+      },
+    });
+  }
 
   const typeParam = searchParams.get("type");
   const statusParam = searchParams.get("status");
