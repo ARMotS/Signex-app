@@ -3161,16 +3161,28 @@ export default function TripSheetPage() {
                             <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">
                               {stop.stopNumber}
                             </span>
-                            <span className="min-w-0">
+                            {/* The invoice and, beside it, where it stands —
+                                read together, as the collections below are. */}
+                            <span className="min-w-0 flex items-center gap-1.5 flex-wrap">
                               {stop.invoiceNumber ? (
-                                <DocChip
-                                  kind="INV"
-                                  number={stop.invoiceNumber}
-                                  tone={invoiceTone(stop.status)}
-                                  title={`Invoice ${stop.invoiceNumber} — ${
-                                    stop.status === "SIGNED" ? "signed" : stop.status === "IN_PROGRESS" ? "active" : "pending"
-                                  }`}
-                                />
+                                <>
+                                  <DocChip
+                                    kind="INV"
+                                    number={stop.invoiceNumber}
+                                    tone={invoiceTone(stop.status)}
+                                    title={`Invoice ${stop.invoiceNumber} — ${
+                                      stop.status === "SIGNED" ? "signed" : stop.status === "IN_PROGRESS" ? "active" : "pending"
+                                    }`}
+                                  />
+                                  <StatusBadge tone={invoiceTone(stop.status)} dot>
+                                    {stop.status === "SIGNED" ? "Signed" : stop.status === "IN_PROGRESS" ? "Active" : "Pending"}
+                                  </StatusBadge>
+                                  {stop.status === "SIGNED" && !stop.contact?.email && (
+                                    <StatusBadge tone="amber" title="No email address on this contact — add one to send a confirmation">
+                                      No email on file
+                                    </StatusBadge>
+                                  )}
+                                </>
                               ) : (
                                 <span className="text-[11px] font-mono text-ink-muted">Collection only</span>
                               )}
@@ -3342,24 +3354,14 @@ export default function TripSheetPage() {
                               })}
                             </div>
                           )}
-                          {/* Line 2, for a delivery: its status on the left,
-                              what the office can do on the right. The
-                              confirmation goes out automatically on signature,
-                              so the Email button is a resend — or the recovery
-                              when the automatic attempt failed. A
-                              collection-only stop has no invoice to sign, so it
-                              gets no line rather than a permanent "Pending". */}
-                          {stop.invoiceNumber && (
-                          <div className="flex items-center gap-2 mt-2 sm:pl-8 flex-wrap">
-                            <StatusBadge tone={invoiceTone(stop.status)} dot>
-                              {stop.status === "SIGNED" ? "Signed" : stop.status === "IN_PROGRESS" ? "Active" : "Pending"}
-                            </StatusBadge>
-                            {stop.status === "SIGNED" && !stop.contact?.email && (
-                              <StatusBadge tone="amber" title="No email address on this contact — add one to send a confirmation">
-                                No email on file
-                              </StatusBadge>
-                            )}
-                            <span className="flex-1" />
+                          {/* Line 2, for a delivery: what the office can do
+                              (its status sits beside the invoice chip above).
+                              The confirmation goes out automatically on
+                              signature, so the Email button is a resend — or
+                              the recovery when the automatic attempt failed. A
+                              collection-only stop has no invoice to act on. */}
+                          {stop.invoiceNumber && (stop.status !== "SIGNED" || stop.invoiceFile || stop.contact?.email) && (
+                          <div className="flex items-center justify-end gap-2 mt-2 sm:pl-8 flex-wrap">
                             {/* Opens the signed copy directly — no hunting for the
                                 invoice number on the Invoices tab. Addressed by
                                 filename, as that tab's "Signed" button is. */}
