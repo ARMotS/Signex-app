@@ -2652,10 +2652,11 @@ export default function TripSheetPage() {
           <div className="flex items-center justify-between border-b border-ink-border">
             <div className="flex items-center overflow-x-auto">
               {([
-                { id: "active" as const, label: "Active Trip Sheets", count: tripSheets.length },
+                { id: "active" as const, label: "Active Trip Sheets", short: "Active", count: tripSheets.length },
                 {
                   id: "completed" as const,
                   label: completedRange === "today" ? "Completed Today" : "All Completed",
+                  short: completedRange === "today" ? "Today" : "Completed",
                   count: completedSheets.length,
                 },
               ]).map((t) => (
@@ -2665,13 +2666,14 @@ export default function TripSheetPage() {
                     setTripTab(t.id);
                     setShowActiveTrips(true);
                   }}
-                  className={`flex items-center gap-2 px-5 py-4 font-mono text-[13px] sm:text-sm font-medium uppercase tracking-wide whitespace-nowrap border-b-2 -mb-px transition-colors ${
+                  className={`flex items-center gap-2 px-3 sm:px-5 py-3 sm:py-4 font-mono text-[13px] sm:text-sm font-medium uppercase tracking-wide whitespace-nowrap border-b-2 -mb-px transition-colors ${
                     tripTab === t.id
                       ? "border-ink-green text-ink-black"
                       : "border-transparent text-ink-muted hover:text-ink-black"
                   }`}
                 >
-                  {t.label}
+                  <span className="sm:hidden">{t.short}</span>
+                  <span className="hidden sm:inline">{t.label}</span>
                   <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-mono font-medium rounded-full bg-ink-surface text-ink-muted">
                     {t.count}
                   </span>
@@ -2680,8 +2682,9 @@ export default function TripSheetPage() {
             </div>
             <button
               onClick={() => setShowActiveTrips(!showActiveTrips)}
-              className="px-5 py-4 text-ink-muted hover:text-ink-black transition-colors shrink-0"
+              className="px-3 sm:px-5 py-3 sm:py-4 text-ink-muted hover:text-ink-black transition-colors shrink-0"
               title={showActiveTrips ? "Collapse" : "Expand"}
+              aria-label={showActiveTrips ? "Collapse" : "Expand"}
             >
               <svg
                 width="14"
@@ -2711,7 +2714,7 @@ export default function TripSheetPage() {
                 totalCount={tripSearchTotal}
                 noun="sheet"
                 shortcut
-                className="flex-1 min-w-[14rem]"
+                className="flex-1 basis-full sm:basis-auto min-w-0 sm:min-w-[14rem]"
               />
               <select
                 value={driverFilter}
@@ -2720,7 +2723,7 @@ export default function TripSheetPage() {
                   resetTripLists();
                 }}
                 aria-label="Filter by driver"
-                className={`h-8 px-2 text-xs font-mono rounded border bg-ink-card outline-none focus:border-ink-green ${
+                className={`h-8 px-2 text-xs font-mono rounded border bg-ink-card outline-none focus:border-ink-green flex-1 sm:flex-none min-w-0 ${
                   driverFilter ? "border-ink-green text-ink-black" : "border-ink-border text-ink-muted"
                 }`}
               >
@@ -2739,7 +2742,7 @@ export default function TripSheetPage() {
                     resetTripLists();
                   }}
                   aria-label="Filter by progress"
-                  className={`h-8 px-2 text-xs font-mono rounded border bg-ink-card outline-none focus:border-ink-green ${
+                  className={`h-8 px-2 text-xs font-mono rounded border bg-ink-card outline-none focus:border-ink-green flex-1 sm:flex-none min-w-0 ${
                     activeStatusFilter !== "all" ? "border-ink-green text-ink-black" : "border-ink-border text-ink-muted"
                   }`}
                 >
@@ -2756,7 +2759,7 @@ export default function TripSheetPage() {
                     resetTripLists();
                   }}
                   aria-label="Filter by email status"
-                  className={`h-8 px-2 text-xs font-mono rounded border bg-ink-card outline-none focus:border-ink-green ${
+                  className={`h-8 px-2 text-xs font-mono rounded border bg-ink-card outline-none focus:border-ink-green flex-1 sm:flex-none min-w-0 ${
                     completedStatusFilter !== "all" ? "border-ink-green text-ink-black" : "border-ink-border text-ink-muted"
                   }`}
                 >
@@ -2893,7 +2896,7 @@ export default function TripSheetPage() {
                 >
                   {/* Trip header */}
                   <div
-                    className={`flex items-center gap-3 px-5 py-4 cursor-pointer hover:bg-ink-surface/50 transition-colors ${selectedTrips.has(trip.id) ? "bg-ink-green-dim/20" : ""}`}
+                    className={`flex flex-wrap items-center gap-x-3 gap-y-2 px-3 sm:px-5 py-3 sm:py-4 cursor-pointer hover:bg-ink-surface/50 transition-colors ${selectedTrips.has(trip.id) ? "bg-ink-green-dim/20" : ""}`}
                     onClick={() => setExpandedTrip(isExpanded ? null : trip.id)}
                   >
                     {/* Checkbox */}
@@ -3026,7 +3029,7 @@ export default function TripSheetPage() {
                         </span>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center justify-end gap-2 flex-wrap w-full sm:w-auto">
                       {canReallocate && (
                         <button
                           onClick={(e) => {
@@ -3128,10 +3131,10 @@ export default function TripSheetPage() {
                   {/* Expanded stops */}
                   {isExpanded && (
                     <div className="border-t border-ink-border divide-y divide-ink-border animate-fade-in">
-                      <div className="grid grid-cols-[2rem_1fr_1fr_3rem] gap-2 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50">
+                      <div className="grid grid-cols-[2rem_minmax(0,1fr)_3rem] sm:grid-cols-[2rem_1fr_1fr_3rem] gap-2 px-3 sm:px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50">
                         <div>#</div>
-                        <div>Document</div>
-                        <div>Customer</div>
+                        <div>Document<span className="sm:hidden"> · Customer</span></div>
+                        <div className="hidden sm:block">Customer</div>
                         <div className="text-right">NOP</div>
                       </div>
                       {/* Colour key: colour is status, for every document
@@ -3147,14 +3150,14 @@ export default function TripSheetPage() {
                       {trip.stops.map((stop) => (
                         <div
                           key={stop.id}
-                          className={`px-4 py-3 hover:bg-ink-surface/30 transition-colors ${
+                          className={`px-3 sm:px-4 py-3 hover:bg-ink-surface/30 transition-colors ${
                             stopMatchesQuery(stop)
                               ? "bg-ink-green-dim/20 border-l-2 border-l-ink-green"
                               : ""
                           }`}
                         >
                           {/* Line 1: #, Document, Customer, NOP */}
-                          <div className="grid grid-cols-[2rem_1fr_1fr_3rem] gap-2 items-center">
+                          <div className="grid grid-cols-[2rem_minmax(0,1fr)_3rem] sm:grid-cols-[2rem_1fr_1fr_3rem] gap-x-2 gap-y-1 items-center">
                             <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">
                               {stop.stopNumber}
                             </span>
@@ -3172,17 +3175,17 @@ export default function TripSheetPage() {
                                 <span className="text-[11px] font-mono text-ink-muted">Collection only</span>
                               )}
                             </span>
-                            <span className="text-[13px] text-ink-muted truncate">
+                            <span className="text-[13px] text-ink-muted truncate col-start-2 row-start-2 sm:col-start-3 sm:row-start-1">
                               {stop.customerName}
                             </span>
-                            <span className="text-[13px] font-mono text-ink-muted text-right">
+                            <span className="text-[13px] font-mono text-ink-muted text-right col-start-3 row-start-1 sm:col-start-4">
                               {stop.nop > 0 ? stop.nop : "—"}
                             </span>
                           </div>
                           {/* Lines the customer refused. The driver sees the
                               same list, and it is printed on the signed PDF. */}
                           {(stop.rejectedLines?.length ?? 0) > 0 && (
-                            <div className="mt-2 pl-8 space-y-1">
+                            <div className="mt-2 sm:pl-8 space-y-1">
                               {stop.rejectedLines!.map((l) => (
                                 <div key={l.id} className="flex items-center gap-2 flex-wrap text-[12px]">
                                   <StatusBadge tone="red">Line removed</StatusBadge>
@@ -3220,7 +3223,7 @@ export default function TripSheetPage() {
                               shape on their run sheet. Each is a small card:
                               what it is on top, the office's actions below. */}
                           {(stop.collections?.length ?? 0) > 0 && (
-                            <div className="mt-2 pl-8 space-y-1.5">
+                            <div className="mt-2 sm:pl-8 space-y-1.5">
                               {stop.collections!.map((c) => {
                                 const listed = (c.lines ?? []).filter((l) => !l.isExtra).reduce((n, l) => n + l.qtyListed, 0);
                                 const back = (c.lines ?? []).reduce((n, l) => n + (l.qtyCollected ?? 0), 0);
@@ -3347,7 +3350,7 @@ export default function TripSheetPage() {
                               collection-only stop has no invoice to sign, so it
                               gets no line rather than a permanent "Pending". */}
                           {stop.invoiceNumber && (
-                          <div className="flex items-center gap-2 mt-2 pl-8 flex-wrap">
+                          <div className="flex items-center gap-2 mt-2 sm:pl-8 flex-wrap">
                             <StatusBadge tone={invoiceTone(stop.status)} dot>
                               {stop.status === "SIGNED" ? "Signed" : stop.status === "IN_PROGRESS" ? "Active" : "Pending"}
                             </StatusBadge>
@@ -3675,7 +3678,7 @@ export default function TripSheetPage() {
                       >
                         <button
                           onClick={() => setExpandedCompleted(isExpanded ? null : sheet.id)}
-                          className="flex items-center gap-3 w-full px-5 py-4 text-left hover:bg-ink-surface/50 transition-colors"
+                          className="flex items-center gap-3 w-full px-3 sm:px-5 py-3 sm:py-4 text-left hover:bg-ink-surface/50 transition-colors"
                         >
                           <div className="w-9 h-9 rounded bg-ink-green-dim flex items-center justify-center shrink-0">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00C07F" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -3754,22 +3757,22 @@ export default function TripSheetPage() {
 
                         {isExpanded && (
                           <div className="border-t border-ink-border divide-y divide-ink-border animate-fade-in">
-                            <div className="grid grid-cols-[2rem_1fr_1fr_auto] gap-2 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50">
+                            <div className="grid grid-cols-[2rem_minmax(0,1fr)_auto] sm:grid-cols-[2rem_1fr_1fr_auto] gap-2 px-3 sm:px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-surface/50">
                               <div>#</div>
-                              <div>Document</div>
-                              <div>Customer</div>
+                              <div>Document<span className="sm:hidden"> · Customer</span></div>
+                              <div className="hidden sm:block">Customer</div>
                               <div className="text-right">Signed</div>
                             </div>
                             {sheet.stops.map((stop) => (
                               <div
                                 key={`${sheet.id}-${stop.stopNumber}-${stop.invoiceNumber}`}
-                                className={`px-4 py-2.5 hover:bg-ink-surface/30 transition-colors ${
+                                className={`px-3 sm:px-4 py-2.5 hover:bg-ink-surface/30 transition-colors ${
                                   stopMatchesQuery(stop)
                                     ? "bg-ink-green-dim/20 border-l-2 border-l-ink-green"
                                     : ""
                                 }`}
                               >
-                                <div className="grid grid-cols-[2rem_1fr_1fr_auto] gap-2 items-center">
+                                <div className="grid grid-cols-[2rem_minmax(0,1fr)_auto] sm:grid-cols-[2rem_1fr_1fr_auto] gap-x-2 gap-y-1 items-center">
                                   <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">
                                     {stop.stopNumber}
                                   </span>
@@ -3780,10 +3783,10 @@ export default function TripSheetPage() {
                                       <span className="text-[11px] font-mono text-ink-muted">Collection only</span>
                                     )}
                                   </span>
-                                  <span className="text-[13px] text-ink-muted truncate">
+                                  <span className="text-[13px] text-ink-muted truncate col-start-2 row-start-2 sm:col-start-3 sm:row-start-1">
                                     {stop.customerName}
                                   </span>
-                                  <div className="flex items-center gap-2 justify-end">
+                                  <div className="flex items-center gap-2 justify-end col-start-3 row-start-1 sm:col-start-4">
                                     <CompletedEmailPill status={stop.emailStatus} />
                                     <span className="text-[12px] font-mono text-ink-muted">
                                       {stop.signedAt
@@ -3796,7 +3799,7 @@ export default function TripSheetPage() {
                                   </div>
                                 </div>
                                 {(stop.rejectedLines?.length ?? 0) > 0 && (
-                                  <div className="mt-1.5 pl-8 space-y-0.5">
+                                  <div className="mt-1.5 sm:pl-8 space-y-0.5">
                                     {stop.rejectedLines!.map((l, i) => (
                                       <p key={i} className="text-[12px] flex items-center gap-2 flex-wrap">
                                         <StatusBadge tone="red">Line removed</StatusBadge>
@@ -3818,7 +3821,7 @@ export default function TripSheetPage() {
                                   const used = stop.resends ?? 0;
                                   const left = ARCHIVE_RESEND_LIMIT - used;
                                   return (
-                                    <div className="flex items-center gap-2 mt-1.5 pl-8 flex-wrap">
+                                    <div className="flex items-center gap-2 mt-1.5 sm:pl-8 flex-wrap">
                                       <button
                                         onClick={() => handleArchiveResend(sheet.id, stop.stopNumber)}
                                         disabled={left <= 0 || live?.state === "sending"}
@@ -3912,18 +3915,18 @@ export default function TripSheetPage() {
                                 chase. */}
                             {(sheet.collections?.length ?? 0) > 0 && (
                               <>
-                                <div className="grid grid-cols-[2rem_1fr_1fr_auto] gap-2 px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-violet-dim">
+                                <div className="grid grid-cols-[2rem_minmax(0,1fr)] sm:grid-cols-[2rem_1fr_1fr_auto] gap-2 px-3 sm:px-4 py-2 text-[11px] font-mono text-ink-muted uppercase tracking-wide bg-ink-violet-dim">
                                   <div>#</div>
-                                  <div>Collection</div>
-                                  <div>Customer</div>
-                                  <div className="text-right">Outcome</div>
+                                  <div>Collection<span className="sm:hidden"> · Customer · Outcome</span></div>
+                                  <div className="hidden sm:block">Customer</div>
+                                  <div className="hidden sm:block text-right">Outcome</div>
                                 </div>
                                 {sheet.collections!.map((c, i) => (
                                   <div
                                     key={`${sheet.id}-col-${c.collectionNo}-${i}`}
-                                    className="px-4 py-2.5 hover:bg-ink-surface/30 transition-colors"
+                                    className="px-3 sm:px-4 py-2.5 hover:bg-ink-surface/30 transition-colors"
                                   >
-                                    <div className="grid grid-cols-[2rem_1fr_1fr_auto] gap-2 items-center">
+                                    <div className="grid grid-cols-[2rem_minmax(0,1fr)] sm:grid-cols-[2rem_1fr_1fr_auto] gap-x-2 gap-y-1.5 items-center">
                                       <span className="w-6 h-6 rounded bg-ink-surface flex items-center justify-center font-mono text-xs text-ink-muted font-medium">
                                         {c.stopNumber ?? "—"}
                                       </span>
@@ -3940,7 +3943,7 @@ export default function TripSheetPage() {
                                           </span>
                                         )}
                                       </div>
-                                      <div className="min-w-0">
+                                      <div className="min-w-0 col-start-2 sm:col-start-auto">
                                         <span className="text-[13px] text-ink-muted truncate block">
                                           {c.customerName}
                                         </span>
@@ -3950,7 +3953,7 @@ export default function TripSheetPage() {
                                           </span>
                                         )}
                                       </div>
-                                      <div className="flex items-center gap-2 justify-end flex-wrap">
+                                      <div className="flex items-center gap-2 justify-start sm:justify-end flex-wrap col-start-2 sm:col-start-auto">
                                         <StatusBadge tone={collectionTone(c.status)} dot>
                                           {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
                                         </StatusBadge>

@@ -330,7 +330,9 @@ export default function AdminLayout({
         <ScopeBanner role={role} />
 
         {/* ─── Content ─────────────────────────────────────────────────── */}
-        <main className="flex-1 p-6 md:p-8 pb-24 md:pb-8 overflow-y-auto bg-ink-surface">
+        {/* 16px gutter on a phone: 24px either side left too little room for
+            the trip cards and invoice tables. */}
+        <main className="flex-1 p-4 sm:p-6 md:p-8 pb-24 md:pb-8 overflow-y-auto bg-ink-surface">
           {children}
         </main>
       </div>

@@ -665,7 +665,7 @@ export default function InvoicesPage() {
                   <th className="text-left px-5 py-3 font-mono text-xs text-ink-muted uppercase tracking-wide hidden md:table-cell">
                     Filename
                   </th>
-                  <th className="text-left px-5 py-3 font-mono text-xs text-ink-muted uppercase tracking-wide">
+                  <th className="text-left px-5 py-3 font-mono text-xs text-ink-muted uppercase tracking-wide hidden sm:table-cell">
                     Size
                   </th>
                   <th className="text-right px-5 py-3 font-mono text-xs text-ink-muted uppercase tracking-wide hidden sm:table-cell">
@@ -762,7 +762,7 @@ export default function InvoicesPage() {
                     <td className="px-5 py-3.5 text-ink-muted hidden md:table-cell font-mono text-xs">
                       {inv.filename}
                     </td>
-                    <td className="px-5 py-3.5 text-ink-muted font-mono text-xs">
+                    <td className="px-5 py-3.5 text-ink-muted font-mono text-xs hidden sm:table-cell">
                       {formatSize(inv.sizeBytes)}
                     </td>
                     <td className="px-5 py-3.5 text-right text-ink-muted text-xs hidden sm:table-cell">
@@ -805,7 +805,7 @@ export default function InvoicesPage() {
 
           {/* Selection action bar */}
           {selectedInvoices.size > 0 && (
-            <div className="flex items-center justify-between px-5 py-2.5 border-t border-ink-border bg-ink-surface/50 animate-fade-in">
+            <div className="flex items-center justify-between flex-wrap gap-2 px-3 sm:px-5 py-2.5 border-t border-ink-border bg-ink-surface/50 animate-fade-in">
               <p className="text-xs font-mono text-ink-muted">
                 {selectedInvoices.size} invoice{selectedInvoices.size !== 1 ? "s" : ""} selected
               </p>
@@ -831,12 +831,34 @@ export default function InvoicesPage() {
           )}
 
           {/* Pagination */}
+          {/* Pagination. On a phone the numbered buttons do not fit beside the
+              count — the row was wider than the card and clipped off — so a
+              compact Prev · n / N · Next takes their place there. */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-between px-5 py-3 border-t border-ink-border bg-ink-surface/50">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-3 sm:px-5 py-3 border-t border-ink-border bg-ink-surface/50">
               <p className="text-xs font-mono text-ink-muted">
                 Showing {(currentPage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(currentPage * ITEMS_PER_PAGE, filteredInvoices.length)} of {filteredInvoices.length}
               </p>
-              <div className="flex items-center gap-1">
+              <div className="flex sm:hidden items-center justify-between gap-2">
+                <button
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="act flex-1 justify-center !h-9"
+                >
+                  ‹ Prev
+                </button>
+                <span className="text-xs font-mono text-ink-muted px-2 whitespace-nowrap">
+                  {currentPage} / {totalPages}
+                </span>
+                <button
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                  className="act flex-1 justify-center !h-9"
+                >
+                  Next ›
+                </button>
+              </div>
+              <div className="hidden sm:flex items-center gap-1">
                 <button
                   onClick={() => setCurrentPage(1)}
                   disabled={currentPage === 1}
