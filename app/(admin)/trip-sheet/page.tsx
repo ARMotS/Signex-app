@@ -1,13 +1,13 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import Link from "next/link";
 import { useLiveSync } from "@/hooks/useLiveSync";
 import { FilterSearch } from "@/components/admin/FilterSearch";
 import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 import CollectionSheetPanel, { type SheetCollection } from "@/components/admin/CollectionSheetPanel";
 import RemoveCollectionButton from "@/components/admin/RemoveCollectionButton";
 import { DocChip, StatusBadge, collectionKind, collectionTone, invoiceTone } from "@/components/ui/Chips";
-import CreditReviewControl from "@/components/admin/CreditReviewControl";
 import { awaitingCreditReview, creditReviewRequired } from "@/lib/collection-confirm";
 
 interface TripStop {
@@ -269,9 +269,9 @@ const tripCompletable = (t: TripSheet) =>
     (t.removedStops?.length ?? 0) > 0 ||
     (t.reallocatedOut?.length ?? 0) > 0) &&
   t.stops.every(deliveryDone) &&
-  t.stops.every((s) =>
-    (s.collections ?? []).every((c) => c.status !== "PENDING" && !awaitingCreditReview(c))
-  );
+  // A credit return awaiting the office's approval does not hold the trip
+  // open — that decision is made on the Collections tab.
+  t.stops.every((s) => (s.collections ?? []).every((c) => c.status !== "PENDING"));
 
 function unsentEmails(stops: TripStop[]) {
   const failed: TripStop[] = [];
@@ -2932,14 +2932,18 @@ export default function TripSheetPage() {
                             {collectionsDone}/{tripCollections.length} collected
                           </StatusBadge>
                         )}
+                        {/* Decided on the Collections tab; it does not hold
+                            the trip open. One link there, filtered to this run. */}
                         {awaitingApproval > 0 && (
-                          <StatusBadge
-                            tone="amber"
-                            dot
-                            title="Credit returns that came back and need approving or rejecting. The trip cannot be completed until they are."
+                          <Link
+                            href={`/collections?status=AWAITING_APPROVAL&trip=${encodeURIComponent(trip.id)}`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="act act-amber"
+                            title="Credit returns that came back — approve or reject them on the Collections tab"
                           >
                             {awaitingApproval} awaiting approval
-                          </StatusBadge>
+                            <span aria-hidden="true">→</span>
+                          </Link>
                         )}
                         {collectionExceptions > 0 && (
                           <StatusBadge
@@ -3273,6 +3277,20 @@ export default function TripSheetPage() {
                                         {COLLECTION_STATUS_LABEL[c.status] ?? c.status}
                                       </StatusBadge>
                                       {c.hasVariance && <StatusBadge tone="amber">Not as listed</StatusBadge>}
+                                      {/* The office's decision — made on the Collections tab. */}
+                                      {creditReviewRequired(c) &&
+                                        (c.creditReview ? (
+                                          <StatusBadge
+                                            tone={c.creditReview === "APPROVED" ? "green" : "red"}
+                                            title={c.creditReviewReason ?? undefined}
+                                          >
+                                            {c.creditReview === "APPROVED" ? "Approved for credit" : "Rejected for credit"}
+                                          </StatusBadge>
+                                        ) : (
+                                          <StatusBadge tone="amber" title="Approve or reject it on the Collections tab">
+                                            Awaiting approval
+                                          </StatusBadge>
+                                        ))}
                                       {quantity && <span className="font-mono text-ink-muted">{quantity}</span>}
                                       {c.originalInvoiceNo && (
                                         <span className="inline-flex items-center gap-1.5 text-ink-muted">
@@ -3282,19 +3300,6 @@ export default function TripSheetPage() {
                                     </div>
                                     {c.exceptionReason && (
                                       <p className="mt-1 text-[color:var(--tone-amber-fg)]">{c.exceptionReason}</p>
-                                    )}
-
-                                    {/* The office's decision: a credit return that
-                                        came back holds the trip open until it is
-                                        approved for credit or rejected. */}
-                                    {creditReviewRequired(c) && (
-                                      <div className="mt-2 flex items-center gap-2 flex-wrap rounded-md bg-ink-surface/60 px-2 py-1.5">
-                                        <span className="text-[11px] font-mono text-ink-muted">Credit</span>
-                                        <CreditReviewControl collection={c} onChanged={fetchTripSheets} />
-                                        {c.creditReview === "REJECTED" && c.creditReviewReason && (
-                                          <span className="text-[11px] text-ink-muted">— {c.creditReviewReason}</span>
-                                        )}
-                                      </div>
                                     )}
 
                                     {/* The paperwork, and the office's actions. */}

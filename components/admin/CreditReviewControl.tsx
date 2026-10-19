@@ -7,9 +7,9 @@ import { CREDIT_REJECT_REASONS } from "@/lib/collection-confirm";
 
 /**
  * The dispatcher's decision on a credit return that came back: approve it for
- * credit, or reject it (reason required). Until every such collection on a
- * trip is decided, the trip cannot be completed. The decision can be changed
- * while the trip is live.
+ * credit, or reject it (reason required). Lives on the Collections tab and
+ * works before or after the trip closes. Accounts makes the credit note only
+ * once it is approved, so a note waits on it. The decision can be changed.
  */
 export default function CreditReviewControl({
   collection,
@@ -75,7 +75,7 @@ export default function CreditReviewControl({
         </StatusBadge>
       )}
       {!decided && (
-        <StatusBadge tone="amber" dot title="The trip cannot be completed until this is approved or rejected">
+        <StatusBadge tone="amber" dot title="Accounts makes the credit note once this is approved">
           Awaiting approval
         </StatusBadge>
       )}
@@ -129,7 +129,7 @@ export default function CreditReviewControl({
             setChanging(true);
           }}
           className="act"
-          title="Change the decision — allowed until the trip is completed"
+          title="Change the decision"
         >
           Change
         </button>

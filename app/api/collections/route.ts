@@ -5,6 +5,7 @@ import { dayWindow, parseTzOffset } from "@/lib/day-window";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { readInvoiceNoPattern } from "@/lib/config";
+import { awaitingCreditReview } from "@/lib/collection-confirm";
 import { normalizeInvoiceNo, type InvoiceNoPattern } from "@/lib/invoice-number";
 import { applyFilter, facetsOf, pageOf, parseFilterState, parsePageSize, toCsv, type FilterAccessors } from "@/lib/record-filter";
 
@@ -54,6 +55,8 @@ const accessors = (pattern: InvoiceNoPattern): FilterAccessors<CollectionRecord>
   date: (r) => r.collectedAt?.toISOString() ?? null,
   tripDate: (r) => r.tripDate,
   status: (r) => r.status,
+  // The office's decision, made on this tab before or after the trip closes.
+  tags: (r) => (awaitingCreditReview(r) ? ["AWAITING_APPROVAL"] : []),
   type: (r) => r.type,
   customer: (r) => r.customerName,
   driver: (r) => r.driverId,
@@ -136,6 +139,8 @@ export const GET = withAuth(async (request: NextRequest) => {
         creditReturns: count((r) => r.type === "CREDIT_RETURN"),
         uplifts: count((r) => r.type === "NON_CREDIT_UPLIFT"),
         exceptions: count((r) => EXCEPTION_STATUSES.has(r.status)),
+        // Across the whole scope, not the filtered view: it is a to-do count.
+        awaitingApproval: all.filter((r) => awaitingCreditReview(r)).length,
       },
     });
   }

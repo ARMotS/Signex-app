@@ -163,6 +163,11 @@ export interface FilterAccessors<T> {
   date: (row: T) => string | null;
   tripDate?: (row: T) => string | null;
   status: (row: T) => string;
+  /**
+   * States a row is in beside its status, offered as status pills too — e.g.
+   * a collection AWAITING_APPROVAL. A row matches a pill by status OR tag.
+   */
+  tags?: (row: T) => string[];
   type?: (row: T) => string;
   customer: (row: T) => string | null;
   driver?: (row: T) => string | null;
@@ -200,7 +205,7 @@ export function applyFilter<T>(rows: T[], state: FilterState, acc: FilterAccesso
   const out = rows.filter((r) => {
     if (!inDayRange(acc.date(r), range.from, range.to, tzOffset)) return false;
     if (acc.tripDate && !inDayRange(acc.tripDate(r), state.tripFrom, state.tripTo, tzOffset)) return false;
-    if (statuses.size && !statuses.has(acc.status(r))) return false;
+    if (statuses.size && !statuses.has(acc.status(r)) && !(acc.tags?.(r) ?? []).some((t) => statuses.has(t))) return false;
     if (state.type && acc.type && acc.type(r) !== state.type) return false;
     if (customer && (acc.customer(r) ?? "").trim().toLowerCase() !== customer) return false;
     if (state.driver && acc.driver && acc.driver(r) !== state.driver) return false;

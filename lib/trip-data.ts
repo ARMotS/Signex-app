@@ -23,7 +23,6 @@ import { readInvoiceNoPattern } from "./config";
 import { normalizeInvoiceNo, normalizedInvoiceNoOrNull, type InvoiceNoPattern } from "./invoice-number";
 import { ensureInvoices, scheduleInvoiceHeaders } from "./invoice-registry";
 import { scheduleCollectionSheets } from "./collection-sheet-sync";
-import { awaitingCreditReview } from "./collection-confirm";
 
 export type StopStatus = "PENDING" | "IN_PROGRESS" | "SIGNED";
 
@@ -852,19 +851,10 @@ export async function completeTripSheet(
       };
     }
 
-    // A credit return that came back is not finished until the office has
-    // approved it for credit or rejected it — the client's rule. Without it, a
-    // trip closed out on goods nobody in the office had looked at.
-    const undecided = collections.filter(awaitingCreditReview);
-    if (undecided.length > 0) {
-      return {
-        success: false,
-        error: `Cannot complete: ${undecided.length} credit collection(s) need approving or rejecting first (${undecided
-          .slice(0, 3)
-          .map((c) => c.collectionNo)
-          .join(", ")}${undecided.length > 3 ? "…" : ""})`,
-      };
-    }
+    // A credit return still awaiting the office's approval does NOT hold the
+    // trip open (client decision): the driver's work is done, and the decision
+    // is made on the Collections tab against the collection row, which
+    // outlives the trip.
 
     const stopById = new Map(stops.map((s) => [s.id, s]));
 
@@ -1095,6 +1085,34 @@ export async function deleteTripSheets(
 }
 
 /**
+ * What an archived collection's frozen entry cannot hold: the office's credit
+ * decision (made on the Collections tab, possibly after the trip closed) and
+ * its invoice. Read from the detached Collection rows, by id.
+ */
+async function liveCollectionFacts(
+  tenantId: string,
+  ids: (string | null | undefined)[]
+): Promise<
+  Map<
+    string,
+    {
+      creditReview: "APPROVED" | "REJECTED" | null;
+      creditReviewReason: string | null;
+      creditReviewedBy: string | null;
+      invoiceId: string | null;
+    }
+  >
+> {
+  const wanted = [...new Set(ids.filter((v): v is string => !!v))];
+  if (wanted.length === 0) return new Map();
+  const rows = await scopedPrisma(tenantId).collection.findMany({
+    where: { id: { in: wanted } },
+    select: { id: true, creditReview: true, creditReviewReason: true, creditReviewedBy: true, invoiceId: true },
+  });
+  return new Map(rows.map((r) => [r.id, r]));
+}
+
+/**
  * Read the completed-trip-sheet archive for one scope, newest first.
  *
  * @param opts.since  Inclusive lower bound on completedAt. The trip sheet page
@@ -1129,10 +1147,14 @@ export async function getCompletedTripSheets(
     : [];
   // RemovedStop rows outlive the sheet and keep its old id, so the archive
   // finds them by tripSheetId the same way the live view does.
-  const [removedByTrip, realloc, removedCollectionsByTrip] = await Promise.all([
+  const [removedByTrip, realloc, removedCollectionsByTrip, decisions] = await Promise.all([
     loadRemovedStops(tenantId, rows.map((r) => r.tripSheetId)),
     loadReallocations(tenantId, rows.map((r) => r.tripSheetId)),
     loadRemovedCollections(tenantId, rows.map((r) => r.tripSheetId)),
+    liveCollectionFacts(
+      tenantId,
+      rows.flatMap((r) => (Array.isArray(r.collections) ? (r.collections as unknown as ArchivedCollection[]) : []).map((c) => c.collectionId))
+    ),
   ]);
   const resendsByStop = new Map<string, { count: number; last: Date }>();
   for (const r of resends) {
@@ -1173,10 +1195,14 @@ export async function getCompletedTripSheets(
       }
     ),
     // Null on every trip archived before collections existed, which reads
-    // correctly as "this trip had none".
-    collections: Array.isArray(r.collections)
-      ? (r.collections as unknown as ArchivedCollection[])
-      : [],
+    // correctly as "this trip had none". The office's decision comes from the
+    // live row: it may be made after the trip closed.
+    collections: (Array.isArray(r.collections) ? (r.collections as unknown as ArchivedCollection[]) : []).map((c) => {
+      const row = c.collectionId ? decisions.get(c.collectionId) : undefined;
+      return row
+        ? { ...c, creditReview: row.creditReview, creditReviewReason: row.creditReviewReason, creditReviewedBy: row.creditReviewedBy }
+        : c;
+    }),
     removedStops: removedByTrip.get(r.tripSheetId) ?? [],
     removedCollections: removedCollectionsByTrip.get(r.tripSheetId) ?? [],
     reallocatedOut: realloc.out.get(r.tripSheetId) ?? [],
@@ -1522,6 +1548,13 @@ export interface CollectionRecord {
   creditReviewReason: string | null;
   /** The invoice registry row it is credited against — its chain page. */
   invoiceId: string | null;
+  /**
+   * The Collection row behind this record — the live row, or the detached row
+   * an archived entry was frozen from. What an approval acts on: the decision
+   * is made on the Collections tab, before or after the trip closes.
+   */
+  rowId: string | null;
+  creditReviewedBy: string | null;
   /** The day its trip ran (YYYY-MM-DD) and the trip sheet's file, for the filter bar. */
   tripDate: string | null;
   tripName: string | null;
@@ -1633,7 +1666,9 @@ export async function listCollections(
     emailError: c.emailError,
     creditReview: c.creditReview,
     creditReviewReason: c.creditReviewReason,
+    creditReviewedBy: c.creditReviewedBy,
     invoiceId: c.invoiceId,
+    rowId: c.id,
     tripDate: c.tripSheet ? c.tripSheet.date.toISOString().slice(0, 10) : null,
     tripName: c.tripSheet?.sourceFilename ?? null,
     // Filtered to attached rows above.
@@ -1661,21 +1696,13 @@ export async function listCollections(
   });
 
   // The rows outlive their trips (detached at completion), so an archived
-  // entry's invoice is one lookup away through its collectionId.
-  const frozenIds = archives.flatMap((a) =>
-    (Array.isArray(a.collections) ? (a.collections as unknown as ArchivedCollection[]) : [])
-      .map((c) => c.collectionId)
-      .filter((v): v is string => !!v)
-  );
-  const invoiceOf = new Map(
-    frozenIds.length
-      ? (
-          await db.collection.findMany({
-            where: { id: { in: frozenIds } },
-            select: { id: true, invoiceId: true },
-          })
-        ).map((r) => [r.id, r.invoiceId])
-      : []
+  // entry's invoice — and the office's decision, which may be made after the
+  // trip closed — are one lookup away through its collectionId.
+  const frozenFacts = await liveCollectionFacts(
+    tenantId,
+    archives.flatMap((a) =>
+      (Array.isArray(a.collections) ? (a.collections as unknown as ArchivedCollection[]) : []).map((c) => c.collectionId)
+    )
   );
 
   for (const archive of archives) {
@@ -1719,9 +1746,16 @@ export async function listCollections(
         hasVariance: c.hasVariance ?? false,
         itemsListed: c.itemsListed ?? null,
         itemsCollected: c.itemsCollected ?? null,
-        creditReview: c.creditReview ?? null,
-        creditReviewReason: c.creditReviewReason ?? null,
-        invoiceId: c.collectionId ? invoiceOf.get(c.collectionId) ?? null : null,
+        ...(() => {
+          const row = c.collectionId ? frozenFacts.get(c.collectionId) : undefined;
+          return {
+            creditReview: row ? row.creditReview : c.creditReview ?? null,
+            creditReviewReason: row ? row.creditReviewReason : c.creditReviewReason ?? null,
+            creditReviewedBy: row ? row.creditReviewedBy : c.creditReviewedBy ?? null,
+            invoiceId: row?.invoiceId ?? null,
+            rowId: row ? c.collectionId! : null,
+          };
+        })(),
         tripDate: archive.uploadedAt.toISOString().slice(0, 10),
         tripName: archive.sourceFilename,
       });

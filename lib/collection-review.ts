@@ -3,15 +3,19 @@
  * credit, or rejected (not creditable). See creditReviewRequired in
  * lib/collection-confirm.ts for which collections need one.
  *
- *   • Until every such collection on a trip is decided, the trip cannot be
- *     completed (lib/trip-data.ts completeTripSheet).
+ *   • Accounts makes the credit note only once the collection is approved,
+ *     and never for a rejected one — so a note waits on this decision
+ *     (COLLECTION_NOT_APPROVED blocks signing; see lib/credit-note.ts).
+ *   • It does NOT hold the trip open (client decision): the driver's work is
+ *     done when the goods are back. The decision is made on the Collections
+ *     tab, on the Collection row — which outlives its trip — so it can be made
+ *     before or after the trip closes.
  *   • A REJECTED collection stays on record — the signed receipt is the
  *     customer's proof of what was handed over — but no credit note is ever
  *     matched to it, and one that arrives for it is flagged on the Credits page.
- *   • Decided only while the trip is live. The completed archive freezes the
- *     decision with the rest of the day, so it can never drift from it.
- *   • The decision can be changed while the trip is live — a dispatcher who
- *     approves by mistake rejects again — and is recorded each time.
+ *   • The decision can be changed — a dispatcher who approves by mistake
+ *     rejects again — and is recorded each time. Readers of the archive take
+ *     it from the row, not the frozen snapshot.
  */
 
 import { scopedPrisma } from "./db-scoped";
@@ -24,7 +28,7 @@ export type ReviewDecision = "APPROVE" | "REJECT";
 export type ReviewResult =
   | { outcome: "decided"; creditReview: "APPROVED" | "REJECTED" }
   | { outcome: "not_found" }
-  | { outcome: "not_reviewable" | "archived" | "invalid"; error: string };
+  | { outcome: "not_reviewable" | "conflict" | "invalid"; error: string };
 
 export async function reviewCreditCollection(
   tenantId: string,
@@ -51,7 +55,6 @@ export async function reviewCreditCollection(
       type: true,
       originalInvoiceNo: true,
       status: true,
-      tripSheetId: true,
       creditReview: true,
     },
   });
@@ -62,15 +65,11 @@ export async function reviewCreditCollection(
       error: "Only a credit return against an invoice that came back (collected or partly collected) is approved or rejected.",
     };
   }
-  if (!collection.tripSheetId) {
-    return { outcome: "archived", error: "This trip has been completed; its decisions are part of the archive." };
-  }
-
   const creditReview = decision === "APPROVE" ? "APPROVED" : "REJECTED";
   // Conditional on the row still being what was checked: a collection the
-  // office re-recorded (or a trip completed) in the meantime is left alone.
+  // office re-recorded in the meantime is left alone.
   const res = await db.collection.updateMany({
-    where: { id: collectionId, status: { in: ["COLLECTED", "PARTIAL"] }, tripSheetId: { not: null } },
+    where: { id: collectionId, status: { in: ["COLLECTED", "PARTIAL"] } },
     data: {
       creditReview,
       creditReviewReason: text || null,
@@ -79,7 +78,7 @@ export async function reviewCreditCollection(
     },
   });
   if (res.count === 0) {
-    return { outcome: "archived", error: "This collection changed while you were deciding — refresh and try again." };
+    return { outcome: "conflict", error: "This collection changed while you were deciding — refresh and try again." };
   }
 
   await logAudit({

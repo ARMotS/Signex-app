@@ -4605,26 +4605,40 @@ suite("cross-ADMIN isolation", () => {
       return PUT(req(`/api/collections/${id}/review`, { method: "PUT", body }), params({ id }));
     };
 
-    it("the trip cannot be completed until the collection is approved", async () => {
+    it("the trip completes without the decision, which is then made on the Collections tab", async () => {
       const { trip, collection } = await collectedCR(f.a, "RV-1");
-      const { completeTripSheet } = await import("@/lib/trip-data");
+      const { completeTripSheet, listCollections, getCompletedTripSheets } = await import("@/lib/trip-data");
 
-      const blocked = await completeTripSheet(f.a.tenantId, trip.id, "Admin");
-      expect(blocked.success).toBe(false);
-      expect(blocked.error).toContain("approving or rejecting");
+      // The driver's work is done: an undecided credit return does not hold the trip.
+      expect((await completeTripSheet(f.a.tenantId, trip.id, "Admin")).success).toBe(true);
 
+      // Still awaiting on the Collections tab, addressed by its row.
+      const { GET } = await import("@/app/api/collections/route");
       useSession(adminSession(f.a));
+      const waiting = await (await GET(req("/api/collections?view=page&status=AWAITING_APPROVAL"))).json();
+      expect(waiting.collections.map((c: any) => c.rowId)).toContain(collection.id);
+      expect(waiting.counts.awaitingApproval).toBe(waiting.total);
+
+      // Decided after the trip closed — and changeable.
+      expect((await review(collection.id, { decision: "REJECT", reason: "Goods damaged" })).status).toBe(200);
       expect((await review(collection.id, { decision: "APPROVE" })).status).toBe(200);
       expect(await db().collection.findUniqueOrThrow({ where: { id: collection.id } })).toMatchObject({
         creditReview: "APPROVED",
         creditReviewedBy: f.a.admin.name,
       });
 
-      expect((await completeTripSheet(f.a.tenantId, trip.id, "Admin")).success).toBe(true);
-      // Archived with the trip: its decision is frozen, and can no longer change.
-      expect((await review(collection.id, { decision: "REJECT", reason: "Changed my mind" })).status).toBe(409);
-      const archive = await db().completedTripSheet.findFirstOrThrow({ where: { tripSheetId: trip.id } });
-      expect(JSON.stringify(archive.collections)).toContain('"creditReview":"APPROVED"');
+      // Readers of the archive take the decision from the row, not the snapshot.
+      const [record] = (await listCollections(f.a.tenantId)).filter((r) => r.rowId === collection.id);
+      expect(record).toMatchObject({ archived: true, creditReview: "APPROVED" });
+      const [completed] = await getCompletedTripSheets(f.a.tenantId);
+      expect(completed.collections.find((c) => c.collectionId === collection.id)?.creditReview).toBe("APPROVED");
+      const none = await (await GET(req("/api/collections?view=page&status=AWAITING_APPROVAL"))).json();
+      expect(none.collections.map((c: any) => c.rowId)).not.toContain(collection.id);
+      expect(none.total).toBe(waiting.total - 1);
+
+      // Another scope cannot decide it, closed trip or not.
+      useSession(adminSession(f.b));
+      expect((await review(collection.id, { decision: "REJECT", reason: "Not ours" })).status).toBe(404);
     });
 
     it("rejecting needs a reason, also lets the trip close, and the decision can change while live", async () => {
