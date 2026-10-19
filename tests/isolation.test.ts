@@ -4722,4 +4722,51 @@ suite("cross-ADMIN isolation", () => {
       expect(forA.get(invA.id)).toBe("COLLECTION_PENDING");
     });
   });
+  // ── Exceptions ───────────────────────────────────────────────────────
+  describe("the exceptions screen", () => {
+    it("lists only the caller's own exceptions, and is closed to drivers", async () => {
+      const { saveTripSheet } = await import("@/lib/trip-data");
+      const trip = await saveTripSheet(f.a.tenantId, {
+        driverId: f.a.driver.id,
+        driverName: f.a.driver.name,
+        regNo: "REG-EX",
+        uploadedBy: f.a.admin.id,
+        sourceFilename: "exceptions.csv",
+        stops: [
+          {
+            stopNumber: 1,
+            invoiceNumber: "",
+            customerName: "EXCEPTION MOTORS",
+            address: "",
+            nop: 0,
+            status: "PENDING",
+            collections: [{ id: "preview-id", collectionNo: "EX-FAIL", type: "CREDIT_RETURN", originalInvoiceNo: "888001", status: "PENDING", expectedQty: 1 }],
+          },
+        ],
+      });
+      const collection = await db().collection.findFirstOrThrow({ where: { tripSheetId: trip.id, collectionNo: "EX-FAIL" } });
+      await db().collection.update({
+        where: { id: collection.id },
+        data: { status: "NOT_AVAILABLE", exceptionReason: "Customer not ready", collectedAt: new Date(), driverId: f.a.driver.id },
+      });
+
+      const { GET } = await import("@/app/api/exceptions/route");
+      const failedIn = async () => {
+        const body = await (await GET(req("/api/exceptions"))).json();
+        return body.lists.find((l: { key: string }) => l.key === "failed_collection").rows.map((r: { number: string }) => r.number);
+      };
+
+      useSession(adminSession(f.a));
+      expect(await failedIn()).toContain("EX-FAIL");
+      const csv = await (await GET(req("/api/exceptions?format=csv"))).text();
+      expect(csv).toContain("EX-FAIL");
+
+      useSession(adminSession(f.b));
+      expect(await failedIn()).not.toContain("EX-FAIL");
+      expect(await (await GET(req("/api/exceptions?format=csv"))).text()).not.toContain("EX-FAIL");
+
+      useSession(driverSession(f.a));
+      expect((await GET(req("/api/exceptions"))).status).toBe(403);
+    });
+  });
 });
