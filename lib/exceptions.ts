@@ -261,7 +261,18 @@ export async function loadExceptions(
       "Read and checked; waiting for the dispatcher's sign-off.",
       scopedNotes
         .filter((n) => n.status === "RECEIVED" || n.status === "NEEDS_REVIEW")
-        .map((n) => noteRow(n, n.status === "NEEDS_REVIEW" ? "Needs review before signing" : "Ready to sign"))
+        .map((n) => {
+          // Not ready to sign until the collection it pays for is approved.
+          const codes = new Set(((n.issues as unknown as { code: string }[] | null) ?? []).map((i) => i.code));
+          const detail = codes.has("COLLECTION_REJECTED")
+            ? "Collection rejected for credit — reject the note"
+            : codes.has("COLLECTION_NOT_APPROVED")
+            ? "Waiting for the collection to be approved"
+            : n.status === "NEEDS_REVIEW"
+            ? "Needs review before signing"
+            : "Ready to sign";
+          return noteRow(n, detail);
+        })
     ),
   ];
 

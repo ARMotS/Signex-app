@@ -4694,6 +4694,57 @@ suite("cross-ADMIN isolation", () => {
       expect(after.collections).toHaveLength(0);
       expect(after.status).toBe("NEEDS_REVIEW");
       expect(JSON.stringify(after.issues)).toContain("COLLECTION_REJECTED");
+
+      // A note for a rejected collection is never signed, whatever reason is given.
+      const { signCreditNote } = await import("@/lib/credit-signoff");
+      const signature = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+      const refused = await signCreditNote(
+        f.a.tenantId,
+        note.id,
+        { signedByName: "Thabo Mokoena", signatureImage: signature, acknowledgement: "Signing anyway, agreed with accounts" },
+        { name: "Admin", userId: f.a.admin.id }
+      );
+      expect(refused.outcome).toBe("invalid");
+    });
+
+    it("a credit note is not ready to sign until its collection is approved, and is the moment it is", async () => {
+      const { collection } = await collectedCR(f.a, "RV-6", "384300");
+      await db().collectionLine.create({
+        data: {
+          tenantId: f.a.tenantId,
+          collectionId: collection.id,
+          lineNo: 1,
+          itemCode: "618ABG",
+          description: "BATT BM-618B41LB1 41AH 360CCA",
+          qtyListed: 1,
+          qtyCollected: 1,
+        },
+      });
+      const { ingestCreditNote } = await import("@/lib/credit-intake");
+      const { creditNotePdf } = await import("./helpers/credit-note-fixture");
+      await ingestCreditNote(
+        f.a.tenantId,
+        { itemId: "item-rv6", filename: "CR-407951.pdf", subfolder: "Originals", lastModified: new Date().toISOString() },
+        await creditNotePdf({ creditNo: "407951", invoiceNo: "384300" })
+      );
+      const note = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-rv6" } });
+      expect(note.status).toBe("NEEDS_REVIEW");
+      expect(JSON.stringify(note.issues)).toContain("COLLECTION_NOT_APPROVED");
+
+      // No reason signs past it.
+      const { signCreditNote } = await import("@/lib/credit-signoff");
+      const signature = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+      const input = { signedByName: "Thabo Mokoena", signatureImage: signature, acknowledgement: "Approved verbally by the dispatcher" };
+      expect((await signCreditNote(f.a.tenantId, note.id, input, { name: "Admin", userId: f.a.admin.id })).outcome).toBe("invalid");
+      expect((await db().creditNote.findUniqueOrThrow({ where: { id: note.id } })).status).toBe("NEEDS_REVIEW");
+
+      // Approving the collection makes the note ready to sign at once.
+      useSession(adminSession(f.a));
+      expect((await review(collection.id, { decision: "APPROVE" })).status).toBe(200);
+      const ready = await db().creditNote.findUniqueOrThrow({ where: { id: note.id } });
+      expect(ready.status).toBe("RECEIVED");
+      expect(JSON.stringify(ready.issues)).not.toContain("COLLECTION_NOT_APPROVED");
+      expect((await signCreditNote(f.a.tenantId, note.id, input, { name: "Admin", userId: f.a.admin.id })).outcome).toBe("signed");
     });
   });
   // ── The invoice chain ────────────────────────────────────────────────
