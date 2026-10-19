@@ -1520,6 +1520,8 @@ export interface CollectionRecord {
   /** The office's decision on a CR that came back; null when none (yet). */
   creditReview: "APPROVED" | "REJECTED" | null;
   creditReviewReason: string | null;
+  /** The invoice registry row it is credited against — its chain page. */
+  invoiceId: string | null;
 }
 
 export interface CollectionQuery {
@@ -1628,6 +1630,7 @@ export async function listCollections(
     emailError: c.emailError,
     creditReview: c.creditReview,
     creditReviewReason: c.creditReviewReason,
+    invoiceId: c.invoiceId,
     // Filtered to attached rows above.
     tripSheetId: c.tripSheetId!,
     archived: false,
@@ -1651,6 +1654,24 @@ export async function listCollections(
     orderBy: { completedAt: "desc" },
     take: 500,
   });
+
+  // The rows outlive their trips (detached at completion), so an archived
+  // entry's invoice is one lookup away through its collectionId.
+  const frozenIds = archives.flatMap((a) =>
+    (Array.isArray(a.collections) ? (a.collections as unknown as ArchivedCollection[]) : [])
+      .map((c) => c.collectionId)
+      .filter((v): v is string => !!v)
+  );
+  const invoiceOf = new Map(
+    frozenIds.length
+      ? (
+          await db.collection.findMany({
+            where: { id: { in: frozenIds } },
+            select: { id: true, invoiceId: true },
+          })
+        ).map((r) => [r.id, r.invoiceId])
+      : []
+  );
 
   for (const archive of archives) {
     const frozen = Array.isArray(archive.collections)
@@ -1695,6 +1716,7 @@ export async function listCollections(
         itemsCollected: c.itemsCollected ?? null,
         creditReview: c.creditReview ?? null,
         creditReviewReason: c.creditReviewReason ?? null,
+        invoiceId: c.collectionId ? invoiceOf.get(c.collectionId) ?? null : null,
       });
     }
   }

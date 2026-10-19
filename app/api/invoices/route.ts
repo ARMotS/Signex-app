@@ -11,6 +11,7 @@ import {
   ensureInvoices,
   scheduleInvoiceHeaders,
 } from "@/lib/invoice-registry";
+import { CHAIN_STATUS_LABEL, chainStatuses } from "@/lib/invoice-chain";
 import {
   DEFAULT_INVOICE_DELETED_REASON,
   normalizeRemovalReason,
@@ -57,11 +58,24 @@ export const GET = withAuth(async () => {
   const recordByKey = new Map(records.map((r) => [r.invoiceNoNormalized, r]));
   scheduleInvoiceHeaders(ctx.tenantId, { limit: 25 });
 
-  const invoices = files.map((f) => {
-    const r = recordByKey.get(normalizeInvoiceNo(f.invoiceNumber, pattern));
+  // Where each invoice's chain stands (delivered → collected → credited), for
+  // the Invoices tab's status column. Two queries for the whole listing.
+  const rowOf = files.map((f) => recordByKey.get(normalizeInvoiceNo(f.invoiceNumber, pattern)));
+  const delivered = new Map<string, boolean>();
+  files.forEach((f, i) => {
+    const r = rowOf[i];
+    if (r) delivered.set(r.id, (delivered.get(r.id) ?? false) || f.isSigned);
+  });
+  const statuses = await chainStatuses(ctx.tenantId, [...delivered.keys()], delivered);
+
+  const invoices = files.map((f, i) => {
+    const r = rowOf[i];
+    const chain = r ? statuses.get(r.id) ?? null : null;
     return {
       ...f,
       recordId: r?.id ?? null,
+      chainStatus: chain,
+      chainLabel: chain ? CHAIN_STATUS_LABEL[chain] : null,
       invoiceDate: r?.invoiceDate ? r.invoiceDate.toISOString().slice(0, 10) : null,
       // The trip sheet's name wins; until a sheet names it, the PDF's.
       customerName: r?.customerName ?? r?.deliverToName ?? r?.billToName ?? null,

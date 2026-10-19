@@ -26,7 +26,21 @@ interface InvoiceFile {
   customerMismatch: boolean;
   headerSource: string | null;
   headerError: string | null;
+  /** Where the invoice's chain stands (lib/invoice-chain.ts). */
+  chainStatus: string | null;
+  chainLabel: string | null;
 }
+
+/** The chain status tints, as on the invoice page. */
+const CHAIN_TONE: Record<string, "idle" | "green" | "amber" | "violet" | "red" | "blue"> = {
+  NOT_DELIVERED: "idle",
+  DELIVERED: "green",
+  COLLECTION_PENDING: "amber",
+  AWAITING_CREDIT: "violet",
+  PARTIALLY_CREDITED: "amber",
+  FULLY_CREDITED: "blue",
+  EXCEPTION: "red",
+};
 
 /** DD/MM/YYYY, as the trip sheets write it. */
 function formatInvoiceDate(iso: string | null): string {
@@ -747,16 +761,16 @@ export default function InvoicesPage() {
                       </div>
                     </td>
                     <td className="px-5 py-3.5">
-                      {inv.isSigned ? (
-                        <span className="badge-signed">
-                          <span className="w-1.5 h-1.5 rounded-full bg-ink-green" />
-                          Signed
-                        </span>
+                      {/* The chain's status where there is more to say than signed
+                          or not: a collection, a credit, an exception. */}
+                      {inv.chainStatus && inv.chainStatus !== "DELIVERED" && inv.chainStatus !== "NOT_DELIVERED" ? (
+                        <StatusBadge tone={CHAIN_TONE[inv.chainStatus] ?? "idle"} dot>
+                          {inv.chainLabel}
+                        </StatusBadge>
+                      ) : inv.isSigned ? (
+                        <StatusBadge tone="green" dot>Delivered</StatusBadge>
                       ) : (
-                        <span className="badge-pending">
-                          <span className="w-1.5 h-1.5 rounded-full bg-ink-red" />
-                          Unsigned
-                        </span>
+                        <StatusBadge tone="idle" dot>Unsigned</StatusBadge>
                       )}
                     </td>
                     <td className="px-5 py-3.5 text-ink-muted hidden md:table-cell font-mono text-xs">
@@ -772,6 +786,15 @@ export default function InvoicesPage() {
                     </td>
                     <td className="px-5 py-3.5 text-right">
                       <div className="inline-flex items-center gap-2">
+                        {inv.recordId && (
+                          <Link href={`/invoices/${inv.recordId}`} className="act" title="Delivery, collections and credit notes for this invoice">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="18" r="2.5" />
+                              <path d="M6 8.5v7M8.5 18h7" />
+                            </svg>
+                            Chain
+                          </Link>
+                        )}
                         <Link
                           href={`/api/invoices/${encodeURIComponent(inv.filename)}`}
                           target="_blank"
