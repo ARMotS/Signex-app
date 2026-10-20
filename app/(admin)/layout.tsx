@@ -20,32 +20,6 @@ const navItems = [
     ),
   },
   {
-    label: "Drivers",
-    href: "/drivers",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-        <circle cx="9" cy="7" r="4" />
-        <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-      </svg>
-    ),
-  },
-  {
-    label: "Contacts",
-    href: "/contacts",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-        <circle cx="9" cy="7" r="4" />
-        <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-        <line x1="19" y1="8" x2="23" y2="8" />
-        <line x1="21" y1="6" x2="21" y2="10" />
-      </svg>
-    ),
-  },
-  {
     label: "Trip Sheet",
     href: "/trip-sheet",
     icon: (
@@ -55,6 +29,16 @@ const navItems = [
         <path d="M16 13H8" />
         <path d="M16 17H8" />
         <path d="M10 9H8" />
+      </svg>
+    ),
+  },
+  {
+    label: "Invoices",
+    href: "/invoices",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="5" width="20" height="14" rx="2" />
+        <path d="M2 10h20" />
       </svg>
     ),
   },
@@ -92,12 +76,42 @@ const navItems = [
     ),
   },
   {
-    label: "Invoices",
-    href: "/invoices",
+    label: "Drivers",
+    href: "/drivers",
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="2" y="5" width="20" height="14" rx="2" />
-        <path d="M2 10h20" />
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      </svg>
+    ),
+  },
+  {
+    label: "Contacts",
+    href: "/contacts",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+        <line x1="19" y1="8" x2="23" y2="8" />
+        <line x1="21" y1="6" x2="21" y2="10" />
+      </svg>
+    ),
+  },
+  {
+    // SUPER_ADMIN only — filtered out for everyone else in the layout.
+    label: "Users",
+    href: "/users",
+    superAdminOnly: true,
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
       </svg>
     ),
   },
@@ -134,6 +148,7 @@ export default function AdminLayout({
   const [session, setSession] = useState<{ name: string; email?: string } | null>(null);
 
   const [role, setRole] = useState<string | null>(null);
+  const visibleNavItems = navItems.filter((item) => !item.superAdminOnly || role === "super_admin");
 
   useEffect(() => {
     const checkSession = () => {
@@ -187,7 +202,7 @@ export default function AdminLayout({
         <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain flex flex-col">
         {/* Navigation */}
         <nav className="flex-1 px-3 py-4 space-y-1">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const isActive = pathname === item.href;
             return (
               <Link
@@ -211,29 +226,6 @@ export default function AdminLayout({
               </Link>
             );
           })}
-          {role === "super_admin" && (
-            <Link
-              href="/users"
-              className={`flex items-center gap-3 px-3 py-2.5 rounded text-sm font-mono transition-colors ${
-                pathname === "/users"
-                  ? "bg-white/8 text-sidebar-text-active"
-                  : "text-sidebar-text hover:bg-white/5 hover:text-sidebar-text-active"
-              }`}
-            >
-              <span className={pathname === "/users" ? "text-ink-green" : "text-sidebar-text"}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-                  <circle cx="9" cy="7" r="4" />
-                  <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-                  <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                </svg>
-              </span>
-              Users
-              {pathname === "/users" && (
-                <span className="ml-auto w-1.5 h-1.5 rounded-full bg-ink-green" />
-              )}
-            </Link>
-          )}
         </nav>
 
         {/* Scope switcher — SUPER_ADMIN only, renders nothing otherwise */}
@@ -303,7 +295,7 @@ export default function AdminLayout({
           {/* Eight or nine destinations cannot share a phone's width without
               clipping their labels, so the bar scrolls sideways instead. */}
           <nav className="flex items-center gap-1 px-1 py-2 overflow-x-auto [scrollbar-width:none]">
-            {navItems.map((item) => {
+            {visibleNavItems.map((item) => {
               const isActive = pathname === item.href;
               return (
                 <Link
@@ -318,22 +310,6 @@ export default function AdminLayout({
                 </Link>
               );
             })}
-            {role === "super_admin" && (
-              <Link
-                href="/users"
-                className={`flex flex-col items-center gap-1 px-2.5 py-1.5 shrink-0 rounded transition-colors touch-target ${
-                  pathname === "/users" ? "text-ink-green" : "text-ink-muted"
-                }`}
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-                  <circle cx="9" cy="7" r="4" />
-                  <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-                  <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                </svg>
-                <span className="text-[10px] font-mono whitespace-nowrap">Users</span>
-              </Link>
-            )}
           </nav>
         </div>
 
