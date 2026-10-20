@@ -226,6 +226,47 @@ export function textBeside(lines: Segment[][], labels: string[], maxGap = 160): 
   return null;
 }
 
+/**
+ * The value printed under a column heading, on a row of headings with a row
+ * of values beneath it:
+ *
+ *     Account no   Order no   Order date   Invoice no   Branch   Invoice date
+ *     V002         JANNIE     01/10/2021     130522     B1       25/11/2025
+ *
+ * Each heading owns the stretch of its row half-way to the headings either
+ * side, and its value is what prints in that stretch on the first line below.
+ * A value set off-centre (130522 is) still lands under its own heading, and
+ * the neighbouring column's value (B1) never does.
+ */
+export function valueUnder(lines: Segment[][], labels: string[]): string | null {
+  const all = lines.flat();
+  for (const seg of all) {
+    if (afterLabel(seg.text, labels) !== "") continue; // not a bare heading
+
+    // The heading row, by position: one heading may sit a point or two lower.
+    const row = all.filter((s) => s !== seg && Math.abs(s.y - seg.y) <= 3);
+    const leftOf = row.filter((s) => s.right <= seg.x).sort((a, b) => b.right - a.right)[0];
+    const rightOf = row.filter((s) => s.x >= seg.right).sort((a, b) => a.x - b.x)[0];
+    const from = leftOf ? (leftOf.right + seg.x) / 2 : seg.x - 40;
+    const to = rightOf ? (seg.right + rightOf.x) / 2 : seg.right + 40;
+
+    const rowBottom = Math.max(seg.y, ...row.map((s) => s.y));
+    const reach = Math.max(seg.height, ...row.map((s) => s.height)) * 3;
+    const under = all
+      .filter((s) => s.y > rowBottom + 2 && s.y - rowBottom <= reach)
+      .filter((s) => centre(s) >= from && centre(s) <= to)
+      .sort((a, b) => a.y - b.y || a.x - b.x);
+    if (!under[0]) continue;
+    const text = under
+      .filter((s) => Math.abs(s.y - under[0].y) <= 3)
+      .map((s) => s.text)
+      .join(" ")
+      .trim();
+    if (text) return text;
+  }
+  return null;
+}
+
 const findParty = (lines: Segment[][], labels: string[]) => firstLineUnder(lines, labels, ALL_LABELS);
 
 /** The header, read from the first page's text items. Pure — see the tests. */

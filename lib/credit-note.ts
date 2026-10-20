@@ -10,6 +10,10 @@
  *   CR NOTE 407712
  *   Account no   Order no   Order date   Branch   Invoice date
  *   C007H014     SCR        19/07/2024   C1       16/10/2026      ← the credit's date
+ *
+ * The later layout (CR-407710) drops "Inv No." and prints the invoice as a
+ * column of that heading row instead — "Invoice no" over 130522, between
+ * Order date and Branch. Both are read (readInvoiceRef).
  *   Product no · (short name) · Bin · Description · Qty · Unit Price · Disc % · Nett
  *   618ABG   BATTERY   FLOOR   BATT BM-618B41LB1 41AH 360CCA   1   720.00   0   720.00
  *   Other: 618AB,,,,               Brand: UNITECH 12M WO        Uom: EACH   ← ignored
@@ -37,6 +41,7 @@ import {
   readHeaderFromItems,
   segmentLines,
   textBeside,
+  valueUnder,
   type TextItem,
 } from "./invoice-header";
 import { joinTouching, toCells, toRows, tokens, type Cell } from "./collection-sheet";
@@ -147,9 +152,17 @@ function readCreditNumber(items: TextItem[]): string | null {
   return null;
 }
 
+/**
+ * The invoice credited. Two layouts: "Inv No. 384281" with the number beside
+ * it, above the title (CR-407712); or "Invoice no" as one heading in the
+ * Account no / Order no / Branch row with the number under it (CR-407710).
+ * Beside that heading sits the next heading, which carries no number — so
+ * the beside reading comes up empty there and the column reading answers.
+ */
 function readInvoiceRef(items: TextItem[]): string | null {
-  const value = textBeside(segmentLines(items), INVOICE_REF_LABELS);
-  return value?.match(/[A-Z]{0,6}[-/]?\d[\d\-/]*/i)?.[0] ?? null;
+  const lines = segmentLines(items);
+  const ref = (value: string | null) => value?.match(/[A-Z]{0,6}[-/]?\d[\d\-/]*/i)?.[0] ?? null;
+  return ref(textBeside(lines, INVOICE_REF_LABELS)) ?? ref(valueUnder(lines, INVOICE_REF_LABELS));
 }
 
 // ─── Table ────────────────────────────────────────────────────────────────
@@ -256,7 +269,9 @@ function readTable(items: TextItem[]): CreditLineRead[] {
     const textCells = row.filter(
       (c) => zoneOf(c.x) === "text" || !c.text.split(/\s+/).every((w) => parseAmount(w) !== null || parseQty(w) !== null)
     );
-    const codeEnd = (cols.binX ?? cols.descX) - 5;
+    // A bin can print a little left of its heading (CR-407710: 17G2 at 192.8
+    // under Bin at 199.5); the short name ends well before either.
+    const codeEnd = cols.binX !== null ? cols.binX - 12 : cols.descX - 5;
     const lead = joinTouching(textCells.filter((c) => c.x < codeEnd));
     const bin = joinTouching(textCells.filter((c) => c.x >= codeEnd && c.x < cols.descX - 5));
     const desc = joinTouching(textCells.filter((c) => c.x >= cols.descX - 5));
