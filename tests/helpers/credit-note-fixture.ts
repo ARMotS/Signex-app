@@ -20,6 +20,8 @@ export interface CreditFixtureLine {
   unitPrice: number;
   disc: number;
   nett: number;
+  /** CR-407710 prints a second code under some product nos (REG1006). */
+  supplierCode?: string;
 }
 
 export const CR_407712_LINES: CreditFixtureLine[] = [
@@ -34,6 +36,63 @@ export const CR_407712_LINES: CreditFixtureLine[] = [
     nett: 720,
   },
 ];
+
+/** CR-407710 — the later layout, crediting invoice 130522 (collection 1797). */
+export const CR_407710_LINES: CreditFixtureLine[] = [
+  {
+    productCode: "220740I",
+    shortName: "CABLE 7COR 0.75 P30M",
+    bin: "17G2",
+    description: "0.75MM 7COR CABLE P/30MR",
+    qty: 1,
+    unitPrice: 767.4,
+    disc: 30,
+    nett: 537.18,
+  },
+  {
+    productCode: "431456M",
+    shortName: "REG",
+    bin: "11B5",
+    description: "12V HYBRID REG (MONARK)",
+    qty: 1,
+    unitPrice: 202.37,
+    disc: 25,
+    nett: 151.78,
+    supplierCode: "REG1006",
+  },
+  {
+    productCode: "0986AH0250",
+    shortName: "RELAY",
+    bin: "12F7",
+    description: "12V 5PIN 30A BOSCH RELAY",
+    qty: 2,
+    unitPrice: 57.7,
+    disc: 25,
+    nett: 86.54,
+    supplierCode: "C4020",
+  },
+];
+
+/**
+ * Where each layout prints things. CR-407710 moves the invoice number from
+ * "Inv No." above the title into the heading row (between Order date and
+ * Branch), which pushes that row and the table 36pt down; its line cells are
+ * all one size, and its bins print a few points left of the Bin heading.
+ */
+const LAYOUTS = {
+  "CR-407712": {
+    shift: 0,
+    codeSize: 12, codeDy: 2.7, shortX: 102.8, binX: 201.8,
+    qtyH: 397.5, unitH: 432.8, discH: 489.8, nettH: 546.8,
+    qtyR: 429.8, qtySize: 12, qtyDy: 3.5, priceR: 487.5, discR: 511.5, nettR: 576.8,
+  },
+  "CR-407710": {
+    shift: 36,
+    codeSize: 9, codeDy: 0, shortX: 84.8, binX: 192.8,
+    qtyH: 414, unitH: 439.5, discH: 497.3, nettH: 558,
+    qtyR: 431.3, qtySize: 9, qtyDy: 0.7, priceR: 491.3, discR: 516, nettR: 580.5,
+  },
+} as const;
 
 /**
  * Draw so pdf.js reports exactly this y back — the real note's numbers can be
@@ -60,8 +119,12 @@ export async function creditNotePdf(
     subtotal?: number;
     vat?: number;
     total?: number;
+    layout?: keyof typeof LAYOUTS;
   } = {}
 ): Promise<Buffer> {
+  const layout = opts.layout ?? "CR-407712";
+  const g = LAYOUTS[layout];
+  const columnInvoice = layout === "CR-407710";
   const doc = await PDFDocument.create();
   // Neighbouring cells in different fonts, as the real generator's runs
   // arrive separately: pdf.js stitches same-font runs on one baseline.
@@ -70,8 +133,8 @@ export async function creditNotePdf(
   const mono = await doc.embedFont(StandardFonts.Courier);
   const times = await doc.embedFont(StandardFonts.TimesRoman);
   const timesBold = await doc.embedFont(StandardFonts.TimesRomanBold);
-  const pages = opts.pages ?? [CR_407712_LINES];
-  const customer = opts.customer ?? "HELDERBERG MOTOR SPARES";
+  const pages = opts.pages ?? [columnInvoice ? CR_407710_LINES : CR_407712_LINES];
+  const customer = opts.customer ?? (columnInvoice ? "VISA AUTO ELECTRICAL" : "HELDERBERG MOTOR SPARES");
 
   const sum = Math.round(pages.flat().reduce((s, l) => s + l.nett, 0) * 100) / 100;
   const subtotal = opts.subtotal ?? sum;
@@ -82,16 +145,23 @@ export async function creditNotePdf(
     const page = doc.addPage([595, HEIGHT]);
     text(page, bold, "ELECTRO CITY", 28.5, 43.5, 16);
     text(page, sans, "Tel: (011) 334 8355/9", 18, 131.7, 8);
-    if (opts.invoiceNo !== null) {
+    if (opts.invoiceNo !== null && !columnInvoice) {
       text(page, sans, "Inv No.", 183.8, 135.6, 10);
       text(page, bold, opts.invoiceNo ?? "384281", 219, 134.9, 10);
     }
     text(page, times, "Website: www.electro-city.co.za", 327, 134.8, 12);
 
-    text(page, bold, "COPY", 29.3, 155.9, 12);
-    text(page, bold, "CR NOTE", 78.8, 157.6, 16);
-    text(page, mono, opts.creditNo ?? "407712", 225.9, 157.6, 16);
-    text(page, sans, "Customer VAT no", 334.5, 156.6, 12);
+    if (columnInvoice) {
+      text(page, bold, "CR NOTE", 78.8, 163.6, 16);
+      text(page, mono, opts.creditNo ?? "407710", 212.4, 163.6, 16);
+      text(page, sans, "Customer VAT no", 334.5, 162.6, 12);
+      text(page, mono, "4770255505", 453, 163.4, 12);
+    } else {
+      text(page, bold, "COPY", 29.3, 155.9, 12);
+      text(page, bold, "CR NOTE", 78.8, 157.6, 16);
+      text(page, mono, opts.creditNo ?? "407712", 225.9, 157.6, 16);
+      text(page, sans, "Customer VAT no", 334.5, 156.6, 12);
+    }
 
     text(page, bold, "Invoice to:", 48, 181.3, 10);
     text(page, timesBold, "Deliver to:", 345, 181.3, 10);
@@ -100,38 +170,55 @@ export async function creditNotePdf(
     text(page, mono, "24 FABRIK STREET", 50.3, 209.8, 10);
     text(page, times, "24 FABRIEK STREET", 346.5, 209.8, 10);
 
-    text(page, sans, "Account no", 21, 262.9, 8);
-    text(page, timesBold, "Order no", 111.8, 262.9, 8);
-    text(page, sans, "Order date", 243, 262.9, 8);
-    text(page, timesBold, "Branch", 426.8, 264.5, 10);
-    text(page, sans, "Invoice date", 489, 262.9, 8);
-    text(page, mono, "C007H014", 21.8, 279.5, 10);
-    text(page, sans, "SCR", 111.8, 279.5, 10);
-    text(page, mono, "19/07/2024", 244.5, 279.5, 10);
-    text(page, sans, "C1", 423.8, 279.5, 10);
-    text(page, mono, "16/10/2026", 490.5, 279.5, 10);
+    const s = g.shift;
+    text(page, sans, "Account no", 21, 262.9 + s, 8);
+    text(page, timesBold, "Order no", 111.8, 262.9 + s, 8);
+    text(page, sans, "Order date", 243, 262.9 + s, 8);
+    text(page, timesBold, "Branch", 426.8, 264.5 + s, 10);
+    text(page, sans, "Invoice date", 489, 262.9 + s, 8);
+    if (columnInvoice) {
+      text(page, mono, "V002", 21.8, 279.5 + s, 10);
+      text(page, sans, "JANNIE", 111.8, 279.5 + s, 10);
+      text(page, mono, "01/10/2021", 244.5, 279.5 + s, 10);
+      text(page, sans, "B1", 423.8, 279.5 + s, 10);
+      text(page, mono, "25/11/2025", 490.5, 279.5 + s, 10);
+      if (opts.invoiceNo !== null) {
+        // A heading of its own in this row, its number set off-centre under it.
+        text(page, bold, "Invoice no", 348, 298.2, 8);
+        text(page, bold, opts.invoiceNo ?? "130522", 364.5, 315.5, 10);
+      }
+    } else {
+      text(page, mono, "C007H014", 21.8, 279.5, 10);
+      text(page, sans, "SCR", 111.8, 279.5, 10);
+      text(page, mono, "19/07/2024", 244.5, 279.5, 10);
+      text(page, sans, "C1", 423.8, 279.5, 10);
+      text(page, mono, "16/10/2026", 490.5, 279.5, 10);
+    }
 
-    text(page, bold, "Product no", 18.3, 305.7, 8);
-    text(page, timesBold, "Bin", 199.5, 306.4, 8);
-    text(page, bold, "Description", 247.5, 306.4, 8);
-    text(page, timesBold, "Qty", 397.5, 305.7, 8);
-    text(page, bold, "Unit Price", 432.8, 306.4, 8);
-    text(page, timesBold, "Disc %", 489.8, 307.2, 8);
-    text(page, bold, "Nett", 546.8, 306.4, 8);
+    text(page, bold, "Product no", 18.3, 305.7 + s, 8);
+    text(page, timesBold, "Bin", 199.5, 306.4 + s, 8);
+    text(page, bold, "Description", 247.5, 306.4 + s, 8);
+    text(page, timesBold, "Qty", g.qtyH, 305.7 + s, 8);
+    text(page, bold, "Unit Price", g.unitH, 306.4 + s, 8);
+    text(page, timesBold, "Disc %", g.discH, 307.2 + s, 8);
+    text(page, bold, "Nett", g.nettH, 306.4 + s, 8);
 
     lines.forEach((line, i) => {
-      const top = 330.8 + i * 26;
-      text(page, sans, line.productCode, 14.3, top + 2.7, 12);
-      text(page, mono, line.shortName, 102.8, top, 9);
-      text(page, sans, line.bin, 201.8, top, 9);
+      const top = columnInvoice ? 369.8 + i * 30 : 330.8 + i * 26;
+      text(page, sans, line.productCode, columnInvoice ? 17.3 : 14.3, top + g.codeDy, g.codeSize);
+      text(page, mono, line.shortName, g.shortX, top, 9);
+      text(page, sans, line.bin, g.binX, top, 9);
       text(page, times, line.description, 246.8, top + 0.7, 9);
-      right(page, sans, String(line.qty), 429.8, top + 3.5, 12);
-      right(page, mono, money(line.unitPrice), 487.5, top + 0.7, 9);
-      right(page, sans, String(line.disc), 511.5, top + 0.7, 9);
-      right(page, mono, money(line.nett), 576.8, top + 0.7, 9);
+      right(page, sans, String(line.qty), g.qtyR, top + g.qtyDy, g.qtySize);
+      right(page, mono, money(line.unitPrice), g.priceR, top + 0.7, 9);
+      right(page, sans, String(line.disc), g.discR, top + 0.7, 9);
+      right(page, mono, money(line.nett), g.nettR, top + 0.7, 9);
 
-      text(page, sans, "Other:", 17.3, top + 13.8, 10);
-      text(page, mono, `${line.productCode.slice(0, 5)},,,,`, 45.8, top + 13.4, 8);
+      if (line.supplierCode) text(page, sans, line.supplierCode, 18, top + 14.2, 9);
+      else if (!columnInvoice) {
+        text(page, sans, "Other:", 17.3, top + 13.8, 10);
+        text(page, mono, `${line.productCode.slice(0, 5)},,,,`, 45.8, top + 13.4, 8);
+      }
       text(page, sans, "Brand:", 352.5, top + 14, 10);
       text(page, mono, "UNITECH 12M WO", 390.8, top + 15.7, 9);
       text(page, sans, "Uom:", 507.8, top + 14.8, 10);

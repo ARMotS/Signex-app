@@ -91,6 +91,42 @@ describe("reading the client's credit note", () => {
 
   it("leaves the invoice null when the note does not print one", async () => {
     expect((await read(await creditNotePdf({ invoiceNo: null }))).invoiceNo).toBeNull();
+    expect((await read(await creditNotePdf({ layout: "CR-407710", invoiceNo: null }))).invoiceNo).toBeNull();
+  });
+});
+
+describe("the later layout: the invoice as a column of the heading row (CR-407710)", () => {
+  it("reads the number under the Invoice no heading — not Branch's, nor a date", async () => {
+    // As printed: 775.50 × 15% is 116.325, which floating point rounds down.
+    const note = await read(await creditNotePdf({ layout: "CR-407710", vat: 116.33, total: 891.83 }));
+
+    expect(note).toMatchObject({
+      creditNo: "407710",
+      invoiceNo: "130522",
+      creditDate: "2025-11-25",
+      accountNo: "V002",
+      deliverToName: "VISA AUTO ELECTRICAL",
+      subtotal: 775.5,
+      vatAmount: 116.33,
+      total: 891.83,
+    });
+    expect(checkCreditFigures(note, 0.15)).toEqual([]);
+  });
+
+  it("reads its lines: bins left of their heading, and no second code under a product no", async () => {
+    const note = await read(await creditNotePdf({ layout: "CR-407710" }));
+
+    expect(note.lines.map((l) => [l.productCode, l.shortName, l.bin, l.qty, l.discountPct, l.nett])).toEqual([
+      ["220740I", "CABLE 7COR 0.75 P30M", "17G2", 1, 30, 537.18],
+      ["431456M", "REG", "11B5", 1, 25, 151.78],
+      ["0986AH0250", "RELAY", "12F7", 2, 25, 86.54],
+    ]);
+  });
+
+  it("keeps a lettered invoice reference whole", async () => {
+    expect((await read(await creditNotePdf({ layout: "CR-407710", invoiceNo: "IV-130522" }))).invoiceNo).toBe(
+      "IV-130522"
+    );
   });
 });
 
