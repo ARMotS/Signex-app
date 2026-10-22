@@ -118,15 +118,8 @@ export function compileInvoiceNoPattern(
   if (trimmed.length > INVOICE_NO_PATTERN_MAX_LENGTH) {
     return { ok: false, error: `Keep the pattern under ${INVOICE_NO_PATTERN_MAX_LENGTH} characters.` };
   }
-  if (/\\[1-9]|\\k</.test(trimmed)) {
-    return { ok: false, error: "Backreferences (\\1, \\k<name>) are not supported." };
-  }
-  if (/\)\s*[*+{]/.test(trimmed)) {
-    return {
-      ok: false,
-      error: "A group cannot be repeated — put the quantifier inside it: (\\d+), not (\\d)+.",
-    };
-  }
+  const unsafe = unsafePatternReason(trimmed);
+  if (unsafe) return { ok: false, error: unsafe };
 
   let pattern: RegExp;
   try {
@@ -143,6 +136,21 @@ export function compileInvoiceNoPattern(
   }
 
   return { ok: true, pattern };
+}
+
+/**
+ * Why an ADMIN-written pattern is refused, or null if its shape is safe to run
+ * server-side: no backreferences and no repeated group. Shared with import
+ * templates (lib/sheet-mapping.ts), whose patterns run on the same instance.
+ */
+export function unsafePatternReason(source: string): string | null {
+  if (/\\[1-9]|\\k</.test(source)) {
+    return "Backreferences (\\1, \\k<name>) are not supported.";
+  }
+  if (/\)\s*[*+{]/.test(source)) {
+    return "A group cannot be repeated — put the quantifier inside it: (\\d+), not (\\d)+.";
+  }
+  return null;
 }
 
 /** The digits a custom pattern pulls out of a value, or null if it does not match. */
