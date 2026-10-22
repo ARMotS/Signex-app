@@ -20,8 +20,9 @@ import { listInvoiceFiles } from "./invoices";
 import { logAudit } from "./audit";
 import { parseWithTemplate, readGrid } from "./sheet-mapping";
 import { chooseTemplate, templateRef, templateSnapshot, type TemplatePrompt } from "./sheet-templates";
-import { getOneDriveSource, getTripSheetFolderPath } from "./trip-sheet-folder";
-import { downloadFileById, ensureSubfolder, getParentFolderId, uploadNewFileToFolder } from "./microsoft-graph";
+import { getTripSheetFolderPath } from "./trip-sheet-folder";
+import { downloadFileById } from "./microsoft-graph";
+import { fileCourierOriginal, resolveCourierFolder } from "./courier-folder";
 import {
   assessCourierSheet,
   blocksHandover,
@@ -227,11 +228,15 @@ export async function previewCourierSheet(tenantId: string, input: ReadInput): P
  * Import a courier trip sheet: the record first, in one transaction, then the
  * original file. A failed upload never costs the import — it is recorded on
  * the sheet with a Retry, and the bytes are held until then.
+ *
+ * `originalItemId`: the sheet was picked up from the courier folder, so its
+ * original is already in OneDrive — no bytes are held, and filing it is a move.
  */
 export async function importCourierSheet(
   tenantId: string,
   input: ReadInput,
-  by: { id: string; name: string | null }
+  by: { id: string; name: string | null },
+  { originalItemId }: { originalItemId?: string } = {}
 ): Promise<{ id: string; preview: CourierPreview }> {
   const preview = await previewCourierSheet(tenantId, input);
   if (preview.duplicateOf) {
@@ -276,7 +281,9 @@ export async function importCourierSheet(
           issues: preview.issues as unknown as Prisma.InputJsonValue,
           checkedAt: new Date(),
           sourceFileName: input.filename,
-          sourceFileBytes: new Uint8Array(input.buffer),
+          ...(originalItemId
+            ? { sourceFileId: originalItemId }
+            : { sourceFileBytes: new Uint8Array(input.buffer) }),
           importTemplateId: choice.ok ? choice.id : null,
           ...(choice.ok && templateSnapshot(choice) ? { mappingSnapshot: templateSnapshot(choice) } : {}),
           importedById: by.id,
@@ -331,10 +338,14 @@ export async function importCourierSheet(
 // ─── The kept original ────────────────────────────────────────────────────
 
 /**
- * File the uploaded Excel in Courier Trip Sheets/{YYYY}/{MM}/, beside the
- * trip sheet folder — OneDrive when connected, else the local folder. Never
- * overwrites: a name already there gets _2, _3. Idempotent; on failure the
- * reason is kept on the sheet and the bytes stay for a retry.
+ * File the sheet's original beneath the courier folder, in {YYYY}/{MM}/ —
+ * OneDrive when connected (lib/courier-folder.ts), else beside the local trip
+ * sheet folder. Never overwrites: a name already there gets _2, _3.
+ *
+ * Two kinds of original: bytes Signex holds (a manual upload — uploaded, then
+ * cleared), or a file already in the courier folder (picked up from it —
+ * moved, keeping its item id). Idempotent; on failure the reason is kept on
+ * the sheet and the next try (Retry, or the folder's next look) finishes it.
  */
 export async function storeCourierOriginal(
   tenantId: string,
@@ -344,40 +355,59 @@ export async function storeCourierOriginal(
   const db = scopedPrisma(tenantId);
   const row = await db.courierTripSheet.findFirst({
     where: { id },
-    select: { courierSheetNo: true, customerName: true, sheetDate: true, sourceFileName: true, sourceFileBytes: true },
+    select: {
+      courierSheetNo: true,
+      customerName: true,
+      sheetDate: true,
+      sourceFileName: true,
+      sourceFileBytes: true,
+      sourceFileId: true,
+      sourceFilePath: true,
+    },
   });
   if (!row) throw new CourierError("NOT_FOUND", "Courier trip sheet not found", 404);
-  if (!row.sourceFileBytes) return { ok: true };
+  const inFolder = !row.sourceFileBytes && !!row.sourceFileId && !row.sourceFilePath;
+  if (!row.sourceFileBytes && !inFolder) return { ok: true };
 
-  const bytes = Buffer.from(row.sourceFileBytes);
-  const date = row.sheetDate.toISOString().slice(0, 10);
-  const folders = originalFolder(date);
+  const names = {
+    courierSheetNo: row.courierSheetNo,
+    customerName: row.customerName,
+    sheetDate: row.sheetDate.toISOString().slice(0, 10),
+    sourceFileName: row.sourceFileName,
+  };
   const contentType = /\.xls$/i.test(row.sourceFileName)
     ? "application/vnd.ms-excel"
     : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
   try {
     let stored: { id: string | null; path: string } | null = null;
-    const onedrive = await getOneDriveSource(tenantId);
+    const onedrive = await db.cloudAccount.findFirst({ where: { provider: "onedrive" }, select: { id: true } });
 
-    if (onedrive?.folderItemId) {
-      const parent = await getParentFolderId(tenantId, onedrive.folderItemId);
-      if (!parent) throw new Error("The trip sheet folder has no folder above it to put Courier Trip Sheets/ in.");
-      let folderId = parent;
-      for (const name of folders) folderId = await ensureSubfolder(tenantId, folderId, name);
-      const base = (onedrive.folderPath ?? "").replace(/\/[^/]*\/?$/, "");
-      for (let attempt = 1; attempt <= 50 && !stored; attempt++) {
-        const name = originalFileName(row.courierSheetNo, row.customerName, row.sourceFileName, attempt);
-        const item = await uploadNewFileToFolder(tenantId, folderId, name, bytes, contentType);
-        if (item) stored = { id: item.id, path: `OneDrive: ${[base, ...folders, name].filter(Boolean).join("/")}` };
+    if (onedrive) {
+      const folder = await resolveCourierFolder(tenantId, { create: true });
+      if (!folder) {
+        throw new Error(
+          "No Courier Trip Sheets folder: choose one in Settings → OneDrive, or a Trip Sheet folder for Signex to put it beside."
+        );
       }
+      const filed = await fileCourierOriginal(
+        tenantId,
+        folder,
+        names,
+        row.sourceFileBytes
+          ? { upload: { bytes: Buffer.from(row.sourceFileBytes), contentType } }
+          : { move: { itemId: row.sourceFileId! } }
+      );
+      stored = { id: filed.itemId, path: filed.path };
     } else {
+      if (!row.sourceFileBytes) throw new Error("The original is in OneDrive, which is no longer connected.");
       const tripFolder = await getTripSheetFolderPath(tenantId);
       if (!tripFolder) {
         throw new Error("No trip sheet folder is set up, so there is nowhere beside it to keep the original. Set one in Settings.");
       }
-      const dir = path.join(path.dirname(path.resolve(tripFolder)), ...folders);
+      const dir = path.join(path.dirname(path.resolve(tripFolder)), ...originalFolder(names.sheetDate));
       fs.mkdirSync(dir, { recursive: true });
+      const bytes = Buffer.from(row.sourceFileBytes);
       for (let attempt = 1; attempt <= 50 && !stored; attempt++) {
         const file = path.join(dir, originalFileName(row.courierSheetNo, row.customerName, row.sourceFileName, attempt));
         try {
@@ -387,8 +417,8 @@ export async function storeCourierOriginal(
           if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
         }
       }
+      if (!stored) throw new Error("Could not find a free file name for the original.");
     }
-    if (!stored) throw new Error("Could not find a free file name for the original.");
 
     await db.courierTripSheet.updateMany({
       where: { id },
@@ -399,7 +429,7 @@ export async function storeCourierOriginal(
       entity: "courier_sheet",
       entityId: id,
       userName: userName ?? undefined,
-      details: `Original sheet saved to ${stored.path}`,
+      details: `Original sheet ${inFolder ? "filed" : "saved"} to ${stored.path}`,
       tenantId,
     });
     return { ok: true };
@@ -707,8 +737,9 @@ export async function getCourierSheet(tenantId: string, id: string) {
     ...row,
     sheetDate: row.sheetDate.toISOString().slice(0, 10),
     issues: issuesOf(row.issues),
-    /** Filed in Courier Trip Sheets/ — otherwise held for a retry (see sourceFileError). */
-    originalSaved: !!(row.sourceFileId || row.sourceFilePath),
+    /** Filed in its {YYYY}/{MM} folder — otherwise held, or still in the
+     *  courier folder, for a retry (see sourceFileError). */
+    originalSaved: !!row.sourceFilePath,
     readWith: snapshot?.name ?? "Built-in courier trip sheet layout",
     mappingSnapshot: undefined,
     invoices: row.invoices.map((i) => ({ ...i, invoiceDate: i.invoiceDate?.toISOString().slice(0, 10) ?? null })),

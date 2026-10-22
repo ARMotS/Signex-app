@@ -365,6 +365,8 @@ export async function getCloudAccountStatus(tenantId: string) {
     collectionsFolderItemId: account.collectionsFolderItemId,
     creditsFolderPath: account.creditsFolderPath,
     creditsFolderItemId: account.creditsFolderItemId,
+    courierFolderPath: account.courierFolderPath,
+    courierFolderItemId: account.courierFolderItemId,
   };
 }
 
@@ -1038,6 +1040,40 @@ export async function setOneDriveCreditsFolder(
     where: { provider: PROVIDER },
     data: { creditsFolderPath: folderPath, creditsFolderItemId: folderItemId, creditsError: null },
   });
+}
+
+/** The folder the Trip application saves courier trip sheets to. See lib/courier-folder.ts. */
+export async function setOneDriveCourierFolder(
+  tenantId: string,
+  folderPath: string,
+  folderItemId: string
+): Promise<void> {
+  await scopedPrisma(tenantId).cloudAccount.updateMany({
+    where: { provider: PROVIDER },
+    data: { courierFolderPath: folderPath, courierFolderItemId: folderItemId, courierError: null },
+  });
+}
+
+/**
+ * Move a file into a folder under a new name, never replacing one: "conflict"
+ * when that name is taken there, so the caller can pick another. The item id
+ * survives the move.
+ */
+export async function moveItemTo(
+  tenantId: string,
+  itemId: string,
+  folderItemId: string,
+  name: string
+): Promise<"moved" | "conflict"> {
+  const token = await requireToken(tenantId);
+  const res = await graphFetch(`${GRAPH_API_URL}/me/drive/items/${encodeURIComponent(itemId)}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ parentReference: { id: folderItemId }, name: assertSafeItemName(name) }),
+  });
+  if (res.status === 409) return "conflict";
+  if (!res.ok) throw new Error(`Graph API move error (${res.status}): ${await res.text()}`);
+  return "moved";
 }
 
 export interface CreditFolderItem extends OneDriveItem {

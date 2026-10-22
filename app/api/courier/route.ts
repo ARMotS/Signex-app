@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { readPrompts } from "@/lib/sheet-templates";
+import { courierInboxState, scheduleCourierInbox } from "@/lib/courier-inbox";
 import {
   CourierError,
   importCourierSheet,
@@ -21,7 +22,11 @@ export const maxDuration = 60;
 export const GET = withAuth(async () => {
   const ctx = await getScope();
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
-  return NextResponse.json({ sheets: await listCourierSheets(ctx.tenantId) });
+  // This tab polls, so it carries the look at the courier folder (throttled
+  // per scope, after the response — see lib/courier-inbox.ts).
+  scheduleCourierInbox(ctx.tenantId);
+  const [sheets, inbox] = await Promise.all([listCourierSheets(ctx.tenantId), courierInboxState(ctx.tenantId)]);
+  return NextResponse.json({ sheets, inbox });
 });
 
 /**

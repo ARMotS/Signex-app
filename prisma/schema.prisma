@@ -65,6 +65,7 @@ model Tenant {
   importTemplates ImportTemplate[]
   courierTripSheets CourierTripSheet[]
   courierTripSheetInvoices CourierTripSheetInvoice[]
+  courierImportFailures CourierImportFailure[]
 }
 
 model User {
@@ -736,6 +737,15 @@ model CloudAccount {
   creditsCheckedAt    DateTime?
   /// Why the last look failed, for the Credits page. Null when it worked.
   creditsError        String?  @db.Text
+  /// Courier trip sheets: the folder the Trip application saves them to.
+  /// Files directly in it are imported; Signex files each in YYYY/MM/
+  /// beneath it. Unset: the "Courier Trip Sheets" folder beside the trip sheet
+  /// folder, remembered here once created. See lib/courier-folder.ts.
+  courierFolderPath   String?
+  courierFolderItemId String?
+  /// Last look at the courier folder — throttles the automatic check.
+  courierCheckedAt    DateTime?
+  courierError        String?  @db.Text
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -888,6 +898,28 @@ model CourierTripSheetInvoice {
   @@unique([tenantId, courierSheetId, lineNo])
   @@index([tenantId, invoiceNoNormalized])
   @@index([courierSheetId])
+}
+
+/// A file in the courier folder that could not be imported, and why — the
+/// Courier tab's "Couldn't import" list. Keyed by the OneDrive item id. Gone
+/// once the file imports or leaves the folder; re-read only when the file
+/// changes, after a while, or on "Check folder", not on every look.
+model CourierImportFailure {
+  id           String    @id @default(cuid())
+  tenantId     String    @default("")
+  tenant       Tenant    @relation(fields: [tenantId], references: [id])
+  itemId       String
+  fileName     String
+  /// The file's lastModified when it last failed.
+  lastModified DateTime?
+  code         String
+  error        String    @db.Text
+  attempts     Int       @default(1)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([tenantId, itemId])
+  @@index([tenantId])
 }
 
 // ─── Imported Files (Trip Sheet Cloud Folder Tracking) ────────────────────

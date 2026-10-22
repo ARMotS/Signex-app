@@ -77,6 +77,7 @@ export async function resetDatabase() {
   await p.cloudAccount.deleteMany();
   await p.appConfig.deleteMany();
   await p.importTemplate.deleteMany();
+  await p.courierImportFailure.deleteMany();
   await p.auditLog.deleteMany();
   await p.driver.deleteMany();
   await p.user.deleteMany();
