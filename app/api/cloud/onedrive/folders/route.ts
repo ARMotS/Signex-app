@@ -6,6 +6,7 @@ import {
   setOneDriveInvoiceFolder,
   setOneDriveCollectionsFolder,
   setOneDriveCreditsFolder,
+  setOneDriveCourierFolder,
   getCloudAccountStatus,
 } from "@/lib/microsoft-graph";
 import { assertCollectionsFolderIsSibling, foldersOverlap } from "@/lib/collections";
@@ -37,10 +38,10 @@ export const GET = withAuth(async (request: NextRequest) => {
 
 /**
  * POST /api/cloud/onedrive/folders
- * Set the selected OneDrive folder as the trip sheet, invoice, collections or
- * credits source.
+ * Set the selected OneDrive folder as the trip sheet, invoice, collections,
+ * credits or courier trip sheets source.
  * Body: { folderPath: string, folderItemId: string,
- *         target?: "tripsheets" | "invoices" | "collections" | "credits" }
+ *         target?: "tripsheets" | "invoices" | "collections" | "credits" | "courier" }
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
@@ -110,7 +111,39 @@ export const POST = withAuth(async (request: NextRequest) => {
     }
   }
 
-  if (target === "credits") {
+  // The courier folder takes Excel files straight from the Trip application,
+  // and the trip sheet folder is read the same way: overlapping in either
+  // direction, a courier sheet would be offered as a trip sheet (and the
+  // other way round). Clear of the PDF folders too, which its year folders
+  // would clutter. Checked from both sides, like the pairs above.
+  if (target === "courier" || target === "tripsheets" || !target) {
+    const status = await getCloudAccountStatus(ctx.tenantId);
+    const others =
+      target === "courier"
+        ? [
+            { label: "trip sheet", path: status?.folderPath, id: status?.folderItemId },
+            { label: "invoice", path: status?.invoiceFolderPath, id: status?.invoiceFolderItemId },
+            { label: "collections", path: status?.collectionsFolderPath, id: status?.collectionsFolderItemId },
+            { label: "credits", path: status?.creditsFolderPath, id: status?.creditsFolderItemId },
+          ]
+        : [{ label: "courier trip sheets", path: status?.courierFolderPath, id: status?.courierFolderItemId }];
+    const clash = others.find((o) => (o.id && o.id === folderItemId) || foldersOverlap(o.path, folderPath));
+    if (clash) {
+      return NextResponse.json(
+        {
+          error:
+            target === "courier"
+              ? `That folder overlaps the ${clash.label} folder. Courier trip sheets need a folder of their own — beside Trip Sheets is usual, not inside it.`
+              : "That folder overlaps the courier trip sheets folder. Trip sheets and courier trip sheets need separate folders.",
+        },
+        { status: 400 }
+      );
+    }
+  }
+
+  if (target === "courier") {
+    await setOneDriveCourierFolder(ctx.tenantId, folderPath, folderItemId);
+  } else if (target === "credits") {
     await setOneDriveCreditsFolder(ctx.tenantId, folderPath, folderItemId);
   } else if (target === "invoices") {
     await setOneDriveInvoiceFolder(ctx.tenantId, folderPath, folderItemId);

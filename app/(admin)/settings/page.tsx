@@ -18,6 +18,8 @@ interface OneDriveAccount {
   collectionsFolderItemId?: string;
   creditsFolderPath?: string;
   creditsFolderItemId?: string;
+  courierFolderPath?: string;
+  courierFolderItemId?: string;
 }
 
 interface OneDriveFolder {
@@ -87,7 +89,7 @@ interface Settings {
 /** The three folders an ADMIN configures. Collections is a SIBLING of invoices. */
 type FolderTarget = "invoices" | "tripsheets" | "collections";
 /** OneDrive has a fourth: credit notes, also a sibling of invoices. */
-type OnedriveTarget = FolderTarget | "credits";
+type OnedriveTarget = FolderTarget | "credits" | "courier";
 
 interface CloudSyncRoot {
   provider: string;
@@ -210,6 +212,8 @@ export default function SettingsPage() {
             collectionsFolderItemId: data.account.collectionsFolderItemId,
             creditsFolderPath: data.account.creditsFolderPath,
             creditsFolderItemId: data.account.creditsFolderItemId,
+            courierFolderPath: data.account.courierFolderPath,
+            courierFolderItemId: data.account.courierFolderItemId,
           });
         } else {
           setOnedrive(null);
@@ -241,6 +245,8 @@ export default function SettingsPage() {
               collectionsFolderItemId: data.account.collectionsFolderItemId,
               creditsFolderPath: data.account.creditsFolderPath,
               creditsFolderItemId: data.account.creditsFolderItemId,
+              courierFolderPath: data.account.courierFolderPath,
+              courierFolderItemId: data.account.courierFolderItemId,
             });
           }
         })
@@ -693,6 +699,8 @@ export default function SettingsPage() {
           setOnedrive((prev) => prev ? { ...prev, collectionsFolderPath: folderPath, collectionsFolderItemId: folder.id } : prev);
         } else if (onedriveBrowserTarget === "credits") {
           setOnedrive((prev) => prev ? { ...prev, creditsFolderPath: folderPath, creditsFolderItemId: folder.id } : prev);
+        } else if (onedriveBrowserTarget === "courier") {
+          setOnedrive((prev) => prev ? { ...prev, courierFolderPath: folderPath, courierFolderItemId: folder.id } : prev);
         } else {
           setOnedrive((prev) => prev ? { ...prev, folderPath, folderItemId: folder.id } : prev);
         }
@@ -704,6 +712,8 @@ export default function SettingsPage() {
             ? "Collections folder"
             : onedriveBrowserTarget === "credits"
             ? "Credits folder"
+            : onedriveBrowserTarget === "courier"
+            ? "Courier trip sheets folder"
             : "Trip sheet folder";
         setOnedriveMessage({ type: "success", text: `${label} set: ${folderPath}` });
         setTimeout(() => setOnedriveMessage(null), 4000);
@@ -922,6 +932,58 @@ export default function SettingsPage() {
                 </p>
               </div>
 
+              {/* Courier Trip Sheets folder — where the Trip application saves
+                  courier trip sheets. Signex imports what lands in it and
+                  files each in YYYY/MM beneath it. Not inside (or around) the
+                  trip sheet folder: both are read for Excel files. */}
+              <div className="space-y-3">
+                <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
+                  Courier Trip Sheets Folder
+                </p>
+                <div className="flex items-center gap-3 p-3 bg-ink-surface border border-ink-border rounded">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={onedrive.courierFolderPath ? "#00C07F" : "#888580"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                  <span className="flex-1 text-sm font-mono text-ink-black truncate">
+                    {onedrive.courierFolderPath ||
+                      (onedrive.folderPath ? "Automatic — beside the Trip Sheet folder, made on first use" : "No folder selected")}
+                  </span>
+                  {!onedrive.courierFolderPath && onedrive.folderPath && (
+                    <button
+                      onClick={async () => {
+                        const res = await fetch("/api/courier/inbox", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ action: "createFolder" }),
+                        }).catch(() => null);
+                        const data = res ? await res.json().catch(() => ({})) : {};
+                        if (res?.ok) {
+                          setOnedrive((prev) => (prev ? { ...prev, courierFolderPath: data.folderPath } : prev));
+                          setOnedriveMessage({ type: "success", text: `Courier trip sheets folder created: ${data.folderPath}` });
+                        } else {
+                          setOnedriveMessage({ type: "error", text: data.error || "Could not create the folder" });
+                        }
+                        setTimeout(() => setOnedriveMessage(null), 5000);
+                      }}
+                      className="text-xs font-mono text-[#0078D4] hover:text-[#005a9e] transition-colors px-3 py-1.5 border border-[#0078D4]/30 rounded hover:bg-[#0078D4]/5"
+                    >
+                      Create it now
+                    </button>
+                  )}
+                  <button
+                    onClick={() => openOnedriveBrowser("courier")}
+                    className="text-xs font-mono text-[#0078D4] hover:text-[#005a9e] transition-colors px-3 py-1.5 border border-[#0078D4]/30 rounded hover:bg-[#0078D4]/5"
+                  >
+                    {onedrive.courierFolderPath ? "Change" : "Choose Folder"}
+                  </button>
+                </div>
+                <p className="text-[11px] text-ink-muted">
+                  Point the Trip application at this folder. Every courier trip sheet saved in it is imported on the
+                  Courier tab and filed in a year/month folder beneath it, so what is left directly in the folder is
+                  still waiting. A sheet that cannot be imported stays put and is listed with the reason.
+                </p>
+              </div>
+
               {/* Trip Sheet Folder selection */}
               <div className="space-y-3">
                 <p className="text-xs font-mono text-ink-muted uppercase tracking-wide">
@@ -997,6 +1059,8 @@ export default function SettingsPage() {
                       ? "collection files"
                       : onedriveBrowserTarget === "credits"
                         ? "credit notes"
+                        : onedriveBrowserTarget === "courier"
+                        ? "courier trip sheets"
                         : "trip sheet files"}
                 </p>
               </div>

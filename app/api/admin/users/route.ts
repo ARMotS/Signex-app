@@ -560,6 +560,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
       await tx.cloudAccount.deleteMany({ where: { tenantId } });
       await tx.appConfig.deleteMany({ where: { tenantId } });
       await tx.importTemplate.deleteMany({ where: { tenantId } });
+      await tx.courierImportFailure.deleteMany({ where: { tenantId } });
     }
 
     if (targetUser) {
@@ -589,6 +590,8 @@ export const DELETE = withAuth(async (request: NextRequest) => {
         // scope holding only those skips the purge above — and they would
         // block the Tenant delete on its foreign key.
         await tx.importTemplate.deleteMany({ where: { tenantId } });
+        // A note about a file in the folder, not workspace data — same reason.
+        await tx.courierImportFailure.deleteMany({ where: { tenantId } });
         await tx.tenant.delete({ where: { id: tenantId } });
       }
     }

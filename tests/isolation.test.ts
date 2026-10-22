@@ -1070,6 +1070,122 @@ suite("cross-ADMIN isolation", () => {
       expect([401, 403]).toContain(imported.status);
     });
 
+    describe("arriving by folder", () => {
+      const xlsxBytes = (rows: (string | number)[][]) => {
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([HEAD, ...rows]), "Sheet1");
+        return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+      };
+      const good = xlsxBytes([["W600", "Acme Trading", "6001", "14/10/2026", 1]]);
+      const twoCustomers = xlsxBytes([["W1", "Acme Trading", "6101", "", 1], ["W2", "Other Co", "6102", "", 1]]);
+      const calls: { method: string; url: string; token: string | null }[] = [];
+
+      /** A's courier folder, as OneDrive would answer for it. */
+      function fakeFolderA(original: (url: any, init: any) => Promise<Response>) {
+        return async (url: any, init: any) => {
+          const u = String(url);
+          const method = init?.method ?? "GET";
+          const auth: string | undefined = init?.headers?.Authorization;
+          calls.push({ method, url: u, token: auth ? auth.replace("Bearer ", "") : null });
+          const json = (body: unknown, status = 200) =>
+            new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+          if (method === "GET" && u.includes("/items/courier-folder-A/children")) {
+            return json({
+              value: [
+                { id: "inbox-good", name: "cts-600001-p5.xlsx", size: 1, file: {}, lastModifiedDateTime: "2026-10-22T08:00:00Z" },
+                { id: "inbox-bad", name: "cts-600002-p5.xlsx", size: 1, file: {}, lastModifiedDateTime: "2026-10-22T08:01:00Z" },
+                { id: "inbox-lock", name: "~$cts-600001-p5.xlsx", size: 1, file: {}, lastModifiedDateTime: "2026-10-22T08:02:00Z" },
+                { id: "year-2026", name: "2026", size: 0, folder: { childCount: 0 }, lastModifiedDateTime: "2026-10-01T00:00:00Z" },
+              ],
+            });
+          }
+          if (u.includes("/items/inbox-good/content")) return new Response(new Uint8Array(good));
+          if (u.includes("/items/inbox-bad/content")) return new Response(new Uint8Array(twoCustomers));
+          if (method === "GET" && u.includes("/items/year-2026/children")) return json({ value: [] });
+          if (method === "POST" && u.includes("/items/year-2026/children")) return json({ id: "month-10" });
+          if (method === "PATCH" && u.includes("/items/inbox-good")) return json({ id: "inbox-good" });
+          return original(url, init);
+        };
+      }
+
+      it("imports what lands in the caller's own folder, through the caller's own connection, and files it", async () => {
+        await db().cloudAccount.updateMany({
+          where: { tenantId: f.a.tenantId },
+          data: { courierFolderItemId: "courier-folder-A", courierFolderPath: "/Courier-A", courierCheckedAt: null },
+        });
+        const fetchMock = vi.mocked(fetch);
+        const original = fetchMock.getMockImplementation()!;
+        fetchMock.mockImplementation(fakeFolderA(original));
+        calls.length = 0;
+        try {
+          const { POST } = await import("@/app/api/courier/inbox/route");
+          useSession(adminSession(f.a));
+          const res = await POST(req("/api/courier/inbox", { method: "POST", body: { action: "check" } }));
+          const body = await res.json();
+          expect(body.result).toMatchObject({ outcome: "checked", imported: 1, failed: 1 });
+        } finally {
+          fetchMock.mockImplementation(original);
+        }
+
+        const sheet = await db().courierTripSheet.findFirstOrThrow({ where: { tenantId: f.a.tenantId, courierSheetNo: "600001" } });
+        expect(sheet.sourceFileId).toBe("inbox-good");
+        expect(sheet.sourceFilePath).toBe("OneDrive: /Courier-A/2026/10/CTS600001_ACME-TRADING.xlsx");
+        expect(sheet.importedByName).toBe("Courier Trip Sheets folder");
+        expect(sheet.sourceFileBytes).toBeNull();
+
+        // Every OneDrive call carried A's own token; the lock file and the
+        // sheet that failed were never moved.
+        const tokens = new Set(calls.map((c) => c.token).filter(Boolean));
+        expect([...tokens]).toEqual(["access-token-A"]);
+        expect(calls.some((c) => c.method === "PATCH" && !c.url.includes("inbox-good"))).toBe(false);
+        expect(calls.some((c) => c.url.includes("inbox-lock"))).toBe(false);
+
+        const failure = await db().courierImportFailure.findFirstOrThrow({ where: { itemId: "inbox-bad" } });
+        expect(failure).toMatchObject({ tenantId: f.a.tenantId, code: "MULTIPLE_CUSTOMERS", fileName: "cts-600002-p5.xlsx" });
+        expect(await db().courierTripSheet.count({ where: { tenantId: f.b.tenantId, courierSheetNo: "600001" } })).toBe(0);
+      });
+
+      it("another scope neither sees nor can download the caller's failed files", async () => {
+        const list = await import("@/app/api/courier/route");
+        const download = await import("@/app/api/courier/inbox/[itemId]/route");
+
+        useSession(adminSession(f.b));
+        const asB = await (await list.GET(req("/api/courier"))).json();
+        expect(asB.inbox.failures).toEqual([]);
+        expect((await download.GET(req("/api/courier/inbox/inbox-bad"), params({ itemId: "inbox-bad" }))).status).toBe(404);
+
+        useSession(adminSession(f.a));
+        const asA = await (await list.GET(req("/api/courier"))).json();
+        expect(asA.inbox.failures.map((x: { fileName: string }) => x.fileName)).toEqual(["cts-600002-p5.xlsx"]);
+      });
+
+      it("the folder is the caller's own, and never inside the trip sheet folder", async () => {
+        const { POST } = await import("@/app/api/cloud/onedrive/folders/route");
+        useSession(adminSession(f.a));
+        const inside = await POST(
+          req("/api/cloud/onedrive/folders", {
+            method: "POST",
+            body: { target: "courier", folderPath: "/TripSheets-A/Courier", folderItemId: "nested" },
+          })
+        );
+        expect(inside.status).toBe(400);
+
+        const ok = await POST(
+          req("/api/cloud/onedrive/folders", {
+            method: "POST",
+            body: { target: "courier", folderPath: "/Courier-A2", folderItemId: "courier-folder-A2" },
+          })
+        );
+        expect(ok.status).toBe(200);
+        const [a, b] = await Promise.all([
+          db().cloudAccount.findFirstOrThrow({ where: { tenantId: f.a.tenantId } }),
+          db().cloudAccount.findFirstOrThrow({ where: { tenantId: f.b.tenantId } }),
+        ]);
+        expect(a.courierFolderItemId).toBe("courier-folder-A2");
+        expect(b.courierFolderItemId).toBeNull();
+      });
+    });
+
     it("a workspace holding courier sheets asks before it is purged, then takes them with it", async () => {
       const { POST, DELETE } = await import("@/app/api/admin/users/route");
       useSession(superAdminSession(f));

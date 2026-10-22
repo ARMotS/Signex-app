@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import CourierUpload from "@/components/admin/courier/CourierUpload";
+import CourierInbox, { type InboxState } from "@/components/admin/courier/CourierInbox";
 import CourierStatusBadge, {
   COURIER_STATUS,
   COURIER_STATUS_ORDER,
@@ -45,6 +46,8 @@ export default function CourierPage() {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
 
+  const [inbox, setInbox] = useState<InboxState | null>(null);
+
   const load = useCallback(
     () =>
       fetch("/api/courier")
@@ -52,6 +55,7 @@ export default function CourierPage() {
           const data = await res.json();
           if (!res.ok) throw new Error(data.error);
           setSheets(data.sheets);
+          setInbox(data.inbox);
           setError(null);
         })
         .catch(() => setError("Could not load courier trip sheets"))
@@ -59,8 +63,15 @@ export default function CourierPage() {
     []
   );
 
+  // Each load also schedules a look at the courier folder (throttled on the
+  // server to once a minute), so a sheet the Trip application saves turns up
+  // here without anyone pressing anything — while the tab is open and seen.
   useEffect(() => {
     void load();
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, 60_000);
+    return () => clearInterval(timer);
   }, [load]);
 
   const counts = useMemo(() => {
@@ -102,6 +113,8 @@ export default function CourierPage() {
           {showUpload ? "Close" : "Upload courier sheet"}
         </button>
       </div>
+
+      {inbox && <CourierInbox inbox={inbox} onChanged={() => void load()} />}
 
       {showUpload && (
         <div className="mb-6">
