@@ -9,6 +9,26 @@ import CollectionSheetPanel, { type SheetCollection } from "@/components/admin/C
 import RemoveCollectionButton from "@/components/admin/RemoveCollectionButton";
 import { DocChip, StatusBadge, collectionKind, collectionTone, invoiceTone } from "@/components/ui/Chips";
 import { awaitingCreditReview, creditReviewRequired } from "@/lib/collection-confirm";
+import MappingWizard from "@/components/admin/import-mapping/MappingWizard";
+import ReadWithBar from "@/components/admin/import-mapping/ReadWithBar";
+import type { TemplateRef, TemplateSummary } from "@/components/admin/import-mapping/types";
+
+/**
+ * A sheet that could not be read: no layout Signex knows fits it
+ * (NEEDS_TEMPLATE), or the template meant for it is missing columns
+ * (MISSING_COLUMNS). `file` is null for a cloud-folder file — the browser does
+ * not hold it, so the wizard cannot be opened on it from here.
+ */
+interface TemplateProblem {
+  code: "NEEDS_TEMPLATE" | "MISSING_COLUMNS";
+  message: string;
+  file: File | null;
+  filename: string;
+  template?: { id: string; name: string };
+}
+
+const isTemplateProblem = (code: unknown): code is TemplateProblem["code"] =>
+  code === "NEEDS_TEMPLATE" || code === "MISSING_COLUMNS";
 
 interface TripStop {
   id: string;
@@ -195,7 +215,7 @@ interface PreviewData {
   filename?: string;
   /** The import template that read the sheet — sent back with the deploy so
    *  the server's re-parse reads it the same way. */
-  template?: { id: string; name: string };
+  template?: TemplateRef;
   preview: {
     totalRows: number;
     matchedInvoices: number;
@@ -364,6 +384,13 @@ export default function TripSheetPage() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [showUpload, setShowUpload] = useState(false);
   const [showActiveTrips, setShowActiveTrips] = useState(true);
+
+  // Import templates: a sheet no layout reads, the wizard opened for it, the
+  // values a template wants typed in, and the templates to choose between.
+  const [templateProblem, setTemplateProblem] = useState<TemplateProblem | null>(null);
+  const [wizard, setWizard] = useState<{ file: File; editing: TemplateSummary | null } | null>(null);
+  const [importPrompts, setImportPrompts] = useState<Record<string, string>>({});
+  const [tripTemplates, setTripTemplates] = useState<TemplateSummary[]>([]);
 
   // Active trip sheets
   const [tripSheets, setTripSheets] = useState<TripSheet[]>([]);
@@ -865,10 +892,20 @@ export default function TripSheetPage() {
 
   // ─── File Upload ──────────────────────────────────────────────────────
 
-  const handleFile = async (file: File) => {
+  /**
+   * Preview an uploaded sheet. `templateId` reads it with a particular import
+   * template (the wizard's, or one picked from "Read with"); without one the
+   * server chooses. `prompts` are values the template asks to be typed in.
+   */
+  const handleFile = async (
+    file: File,
+    opts: { templateId?: string; prompts?: Record<string, string> } = {}
+  ) => {
     setError(null);
     setPreview(null);
+    setTemplateProblem(null);
     setUploadedFile(file);
+    setImportSourceFile(null);
     setUploading(true);
     setInvoiceUploads({});
     setInvoiceConflict(null);
@@ -876,6 +913,8 @@ export default function TripSheetPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
+      if (opts.templateId) formData.append("templateId", opts.templateId);
+      if (opts.prompts) formData.append("prompts", JSON.stringify(opts.prompts));
 
       const res = await fetch("/api/trip-sheet", {
         method: "POST",
@@ -884,10 +923,15 @@ export default function TripSheetPage() {
       const data = await res.json();
 
       if (!res.ok) {
-        setError(data.error || "Upload failed");
+        if (isTemplateProblem(data.code)) {
+          setTemplateProblem({ code: data.code, message: data.error, file, filename: file.name, template: data.template });
+        } else {
+          setError(data.error || "Upload failed");
+        }
         setUploadedFile(null);
       } else {
         setPreview(data);
+        setImportPrompts(opts.prompts ?? {});
         // Auto-select all already-signed invoices for skipping
         const signed = data.preview?.alreadySigned || [];
         setSkippedInvoices(new Set(signed.map((s: AlreadySignedInvoice) => s.invoiceNumber)));
@@ -899,6 +943,74 @@ export default function TripSheetPage() {
       setUploading(false);
     }
   };
+
+  /** Preview a file from the cloud trip sheet folder — handleFile's twin. */
+  const previewCloudFile = async (
+    filename: string,
+    opts: { templateId?: string; prompts?: Record<string, string> } = {}
+  ) => {
+    setCloudImporting(filename);
+    setError(null);
+    setTemplateProblem(null);
+    try {
+      const res = await fetch("/api/trip-sheet/folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename, templateId: opts.templateId, prompts: opts.prompts }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (isTemplateProblem(data.code)) {
+          setTemplateProblem({ code: data.code, message: data.error, file: null, filename, template: data.template });
+        } else {
+          setError(data.error || "Import failed");
+        }
+      } else {
+        setPreview(data);
+        setImportSourceFile(filename);
+        setUploadedFile(null);
+        setImportPrompts(opts.prompts ?? {});
+        // Auto-select all already-signed invoices for skipping
+        const signed = data.preview?.alreadySigned || [];
+        setSkippedInvoices(new Set(signed.map((s: AlreadySignedInvoice) => s.invoiceNumber)));
+        setInvoiceUploads({});
+        setInvoiceConflict(null);
+      }
+    } catch {
+      setError("Failed to import file");
+    } finally {
+      setCloudImporting(null);
+    }
+  };
+
+  /** Read the sheet being previewed again — with another template, or new typed-in values. */
+  const rereadWith = (templateId: string | undefined, prompts: Record<string, string>) => {
+    if (uploadedFile) void handleFile(uploadedFile, { templateId, prompts });
+    else if (importSourceFile) void previewCloudFile(importSourceFile, { templateId, prompts });
+  };
+
+  /** Open the wizard on the sheet that could not be read, editing its template if it has one. */
+  const openWizardFor = async (problem: TemplateProblem) => {
+    if (!problem.file) return;
+    let editing: TemplateSummary | null = null;
+    if (problem.code === "MISSING_COLUMNS" && problem.template && problem.template.id !== "builtin") {
+      try {
+        const res = await fetch(`/api/import-templates/${problem.template.id}`);
+        if (res.ok) editing = await res.json();
+      } catch {
+        // Fall through to a new template from this file.
+      }
+    }
+    setWizard({ file: problem.file, editing });
+  };
+
+  // The templates "Read with" offers. A plain database read, done once.
+  useEffect(() => {
+    fetch("/api/import-templates?sheetType=TRIP_SHEET")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => data && setTripTemplates(data.templates))
+      .catch(() => {});
+  }, []);
 
   // ─── Missing Invoices ─────────────────────────────────────────────────
 
@@ -923,12 +1035,13 @@ export default function TripSheetPage() {
         const formData = new FormData();
         formData.append("file", uploadedFile);
         if (templateId) formData.append("templateId", templateId);
+        formData.append("prompts", JSON.stringify(importPrompts));
         res = await fetch("/api/trip-sheet", { method: "POST", body: formData });
       } else {
         res = await fetch("/api/trip-sheet/folder", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ filename: importSourceFile, templateId }),
+          body: JSON.stringify({ filename: importSourceFile, templateId, prompts: importPrompts }),
         });
       }
 
@@ -1051,6 +1164,7 @@ export default function TripSheetPage() {
           filename: importSourceFile,
           action: "deploy",
           templateId: preview?.template?.id,
+          prompts: importPrompts,
         };
 
         if (hasUnassigned && assignToDriverId) {
@@ -1093,6 +1207,7 @@ export default function TripSheetPage() {
         formData.append("file", uploadedFile);
         formData.append("action", "deploy");
         if (preview?.template?.id) formData.append("templateId", preview.template.id);
+        formData.append("prompts", JSON.stringify(importPrompts));
 
         if (hasUnassigned && assignToDriverId) {
           const selectedDriver = drivers.find((d) => d.id === assignToDriverId);
@@ -1737,34 +1852,7 @@ export default function TripSheetPage() {
                     </span>
                   ) : (
                     <button
-                      onClick={async () => {
-                        setCloudImporting(file.filename);
-                        setError(null);
-                        try {
-                          const res = await fetch("/api/trip-sheet/folder", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ filename: file.filename }),
-                          });
-                          const data = await res.json();
-                          if (!res.ok) {
-                            setError(data.error || "Import failed");
-                          } else {
-                            setPreview(data);
-                            setImportSourceFile(file.filename);
-                            setUploadedFile(null);
-                            // Auto-select all already-signed invoices for skipping
-                            const signed = data.preview?.alreadySigned || [];
-                            setSkippedInvoices(new Set(signed.map((s: AlreadySignedInvoice) => s.invoiceNumber)));
-                            setInvoiceUploads({});
-                            setInvoiceConflict(null);
-                          }
-                        } catch {
-                          setError("Failed to import file");
-                        } finally {
-                          setCloudImporting(null);
-                        }
-                      }}
+                      onClick={() => previewCloudFile(file.filename)}
                       disabled={cloudImporting === file.filename}
                       className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-medium text-ink-green bg-ink-green-dim border border-ink-green/20 rounded hover:bg-ink-green hover:text-white transition-all shrink-0"
                     >
@@ -2021,6 +2109,58 @@ export default function TripSheetPage() {
         </div>
       )}
 
+      {/* ─── A sheet no layout reads: set up (or fix) its import template ── */}
+      {templateProblem && (
+        <div className="mt-4 px-4 py-4 bg-ink-amber-dim rounded border border-ink-amber/40 animate-fade-in">
+          <p className="text-sm font-medium text-ink-black">
+            {templateProblem.code === "MISSING_COLUMNS" && templateProblem.template
+              ? `${templateProblem.filename} does not match “${templateProblem.template.name}”`
+              : `Signex does not recognise the layout of ${templateProblem.filename}`}
+          </p>
+          <p className="text-xs text-ink-muted mt-1 font-mono break-words">{templateProblem.message}</p>
+          {templateProblem.file ? (
+            <div className="flex flex-wrap gap-2 mt-3">
+              <button type="button" className="act act-primary" onClick={() => setWizard({ file: templateProblem.file!, editing: null })}>
+                Set up a template from this file
+              </button>
+              {templateProblem.code === "MISSING_COLUMNS" &&
+                templateProblem.template &&
+                templateProblem.template.id !== "builtin" && (
+                  <button type="button" className="act" onClick={() => openWizardFor(templateProblem)}>
+                    Edit “{templateProblem.template.name}”
+                  </button>
+                )}
+              <button type="button" className="act" onClick={() => setTemplateProblem(null)}>
+                Dismiss
+              </button>
+            </div>
+          ) : (
+            <p className="text-xs text-ink-black mt-3">
+              Download the file from the folder and set up a template for it under{" "}
+              <Link href="/settings" className="underline">
+                Settings → Import Templates
+              </Link>
+              , then import it again.
+            </p>
+          )}
+        </div>
+      )}
+
+      {wizard && (
+        <MappingWizard
+          sheetType="TRIP_SHEET"
+          file={wizard.file}
+          editing={wizard.editing}
+          onClose={() => setWizard(null)}
+          onSaved={(saved) => {
+            const file = wizard.file;
+            setWizard(null);
+            setTripTemplates((list) => [...list.filter((t) => t.id !== saved.id), saved]);
+            void handleFile(file, { templateId: saved.id });
+          }}
+        />
+      )}
+
       {/* ─── Preview Results ────────────────────────────────────────────── */}
       {preview && preview.preview && (
         <div className="mt-6 space-y-4 animate-fade-in">
@@ -2075,6 +2215,15 @@ export default function TripSheetPage() {
                 )}
               </div>
             </div>
+
+            <ReadWithBar
+              key={`${preview.template?.id}:${JSON.stringify(importPrompts)}`}
+              template={preview.template}
+              templates={tripTemplates}
+              prompts={importPrompts}
+              busy={uploading || cloudImporting !== null}
+              onReread={rereadWith}
+            />
 
             {/* A missing collection document is a note, not a blocker. The
                 missing-INVOICE gate below is the hard one: the signature is

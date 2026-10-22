@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import InvoiceNumberSettings from "@/components/admin/InvoiceNumberSettings";
 import CollectionDeclarationSettings from "@/components/admin/CollectionDeclarationSettings";
 import CreditNoteSettings from "@/components/admin/CreditNoteSettings";
+import ImportTemplatesSettings from "@/components/admin/import-mapping/ImportTemplatesSettings";
 
 interface OneDriveAccount {
   connected: boolean;
@@ -1342,6 +1343,9 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+
+      {/* ─── Import Templates: reading each customer's own sheet layout ─ */}
+      <ImportTemplatesSettings />
 
       {/* ─── Invoice Numbers ───────────────────────────────────────── */}
       <InvoiceNumberSettings

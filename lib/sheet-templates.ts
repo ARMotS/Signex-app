@@ -27,7 +27,7 @@
 
 import type { ImportTemplate, Prisma } from "@prisma/client";
 import { scopedPrisma } from "./db-scoped";
-import { normalizeHeader, SHEET_TYPES, type ImportSheetType } from "./import-fields";
+import { fieldsFor, normalizeHeader, SHEET_TYPES, type ImportSheetType } from "./import-fields";
 import {
   aliasColumns,
   BUILT_IN_TRIP_SHEET,
@@ -263,9 +263,24 @@ export function readPrompts(raw: unknown): Record<string, string> {
   return prompts;
 }
 
-/** How a response names the template that read (or was meant to read) a sheet. */
-export function templateRef(choice: TemplateChosen): { id: string; name: string } {
-  return { id: choice.id ?? BUILT_IN_ID, name: choice.name };
+/** A field the template wants typed in at import, as the import screen asks for it. */
+export interface TemplatePrompt {
+  key: string;
+  label: string;
+}
+
+export function templatePrompts(template: SheetTemplate): TemplatePrompt[] {
+  return fieldsFor(template.sheetType)
+    .filter((field) => template.mappings[field.key]?.source === "promptAtImport")
+    .map((field) => ({ key: field.key, label: field.label }));
+}
+
+/**
+ * How a response names the template that read (or was meant to read) a sheet,
+ * with the values it wants typed in at import.
+ */
+export function templateRef(choice: TemplateChosen): { id: string; name: string; prompts: TemplatePrompt[] } {
+  return { id: choice.id ?? BUILT_IN_ID, name: choice.name, prompts: templatePrompts(choice.template) };
 }
 
 /** What a trip sheet keeps of the template that read it. */

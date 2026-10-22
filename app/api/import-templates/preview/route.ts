@@ -10,7 +10,13 @@ import {
   suggestMappings,
   type SheetTemplate,
 } from "@/lib/sheet-mapping";
-import { findTemplate, readDraftTemplate, readPrompts, recordTemplate } from "@/lib/sheet-templates";
+import {
+  findTemplate,
+  readDraftTemplate,
+  readPrompts,
+  recordTemplate,
+  templatePrompts,
+} from "@/lib/sheet-templates";
 import { parseTripSheet } from "@/lib/trip-parser";
 
 /** Parsing lists the invoice folder for a trip sheet — see ../../trip-sheet/route.ts. */
@@ -125,7 +131,10 @@ export const POST = withAuth(async (request: NextRequest) => {
       Array.from({ length: Math.min(row.length, GRID_COLS) }, (_, i) => clip(row[i]))
     ),
     detectedHeaderRow,
-    headers: Array.from({ length: Math.min(headers.length, GRID_COLS) }, (_, i) => clip(headers[i])),
+    // Unclipped (within what a template accepts): saving takes the
+    // fingerprint from this, and a shortened header would never match again.
+    headers: Array.from({ length: Math.min(headers.length, 200) }, (_, i) => String(headers[i] ?? "").slice(0, 200)),
+    prompts: templatePrompts(template),
     suggestions: suggestMappings(headers, sheetType),
     template,
     check,

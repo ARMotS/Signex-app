@@ -190,6 +190,17 @@ describe("finding columns", () => {
     expect(sheet.rows[0].values.customerName).toBe("Right");
   });
 
+  it("falls back to the row naming the most fields, then to row 1", () => {
+    const ownHeaders = grid([
+      ["DAILY RUN", "", "Driver:", "Jane"],
+      [],
+      ["Inv Ref", "Client Name", "Boxes"],
+      ["IV-1", "Kilo", "2"],
+    ]);
+    expect(detectHeaderRow(ownHeaders, "TRIP_SHEET")).toBe(3);
+    expect(detectHeaderRow(grid([["a", "b"], ["1", "2"]]), "TRIP_SHEET")).toBe(1);
+  });
+
   it("finds the header row under a title block", () => {
     const sheet = grid([
       ["COURIER TRIP SHEET 200189"],

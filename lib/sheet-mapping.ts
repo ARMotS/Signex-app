@@ -261,12 +261,14 @@ export function suggestMappings(
 }
 
 /**
- * The 1-based row that looks like the header row: the first of the top rows
- * in which at least three cells name a field of this sheet type. Row 1 when
- * none does — a title block above the table is common, a table with fewer
- * than three recognisable headers is the ADMIN's to point at.
+ * The 1-based row that looks like the header row — the wizard's first guess,
+ * which the ADMIN can change. The first of the top rows in which at least
+ * three cells name a field of this sheet type; failing that, the row naming
+ * the most (a customer's own headers may share only one name with ours, under
+ * a title block); row 1 when no row names any.
  */
 export function detectHeaderRow(grid: Grid, sheetType: ImportSheetType, scanRows = 30): number {
+  let best = { row: 1, hits: 0 };
   for (let r = 0; r < Math.min(scanRows, grid.length); r++) {
     const fields = new Set<string>();
     for (const cell of grid[r] ?? []) {
@@ -274,8 +276,9 @@ export function detectHeaderRow(grid: Grid, sheetType: ImportSheetType, scanRows
       if (field) fields.add(field);
     }
     if (fields.size >= 3) return r + 1;
+    if (fields.size > best.hits) best = { row: r + 1, hits: fields.size };
   }
-  return 1;
+  return best.row;
 }
 
 // ─── Values ───────────────────────────────────────────────────────────────

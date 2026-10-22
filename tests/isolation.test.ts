@@ -869,7 +869,11 @@ suite("cross-ADMIN isolation", () => {
       const asB = await upload(f.b, sheetIn("B"), { prompts: JSON.stringify({ driverName: f.b.driver.name }) });
       const theirs = await db().importTemplate.findFirstOrThrow({ where: { tenantId: f.b.tenantId } });
       expect(asB.status).toBe(200);
-      expect(asB.body.template).toEqual({ id: theirs.id, name: "Depot layout" });
+      expect(asB.body.template).toEqual({
+        id: theirs.id,
+        name: "Depot layout",
+        prompts: [{ key: "driverName", label: "Driver" }],
+      });
     });
 
     it("asking for another scope's template by id is 404", async () => {
