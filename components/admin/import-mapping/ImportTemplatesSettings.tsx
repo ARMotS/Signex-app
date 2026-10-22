@@ -16,6 +16,13 @@ import type { BuiltInLayout, TemplateSummary } from "./types";
 
 type WizardState = { editing: TemplateSummary | null } | null;
 
+/** What each built-in layout reads, in the office's words. */
+const BUILT_IN_COLUMNS: Record<string, string> = {
+  TRIP_SHEET: "Date · Driver · REG No · Customer · INVOICENO · COLLECTNO · NOP, found by their usual names.",
+  COURIER_TRIP_SHEET:
+    "Waybill No · Customer · Invoice No · Date · NOP, found by their usual names; the sheet number from the file name (cts-200189-p5).",
+};
+
 export default function ImportTemplatesSettings() {
   const [templates, setTemplates] = useState<TemplateSummary[]>([]);
   const [builtIn, setBuiltIn] = useState<BuiltInLayout[]>([]);
@@ -111,8 +118,8 @@ export default function ImportTemplatesSettings() {
               <StatusBadge tone="green">Default</StatusBadge>
             )}
             <p className="basis-full text-xs text-ink-muted">
-              Date · Driver · REG No · Customer · INVOICENO · COLLECTNO · NOP, found by their usual names. Used for
-              any {SHEET_TYPES[b.sheetType].label.toLowerCase()} no template fits.
+              {BUILT_IN_COLUMNS[b.sheetType]} Used for any {SHEET_TYPES[b.sheetType].label.toLowerCase()} no template
+              fits.
             </p>
           </li>
         ))}

@@ -101,6 +101,25 @@ export const BUILT_IN_TRIP_SHEET: SheetTemplate = {
   matchAliases: true,
 };
 
+/**
+ * The courier trip sheet the client's Trip application exports: a flat table
+ * (Waybillno | Customer | INVOICENO | Date | NOP) with the sheet number in the
+ * filename only (cts-200189-p5.xlsx) and no courier named anywhere — so the
+ * courier company is asked for at import. Columns by alias, as above.
+ */
+export const BUILT_IN_COURIER_TRIP_SHEET: SheetTemplate = {
+  sheetType: "COURIER_TRIP_SHEET",
+  worksheet: null,
+  headerRow: 1,
+  dataStartRow: 2,
+  stopAtBlankRows: 2,
+  mappings: {
+    courierSheetNo: { source: "filename" },
+    courierCompany: { source: "promptAtImport" },
+  },
+  matchAliases: true,
+};
+
 // ─── Reading a file ───────────────────────────────────────────────────────
 
 /**

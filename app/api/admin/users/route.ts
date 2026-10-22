@@ -461,7 +461,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
           id: true,
           slug: true,
           _count: {
-            select: { drivers: true, contacts: true, tripSheets: true, invoices: true, creditNotes: true },
+            select: { drivers: true, contacts: true, tripSheets: true, invoices: true, creditNotes: true, courierTripSheets: true },
           },
         },
       },
@@ -495,12 +495,20 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     tripSheets: 0,
     invoices: 0,
     creditNotes: 0,
+    courierTripSheets: 0,
   };
   // Invoices count: the registry fills as soon as the Invoices page is
   // opened, and a workspace holding only those would otherwise skip the purge
-  // and fail on the Tenant delete's foreign key.
+  // and fail on the Tenant delete's foreign key. Courier sheets are customer
+  // records like trip sheets: they ask for confirmation, then go in the purge.
   const hasData =
-    counts.drivers + counts.contacts + counts.tripSheets + counts.invoices + counts.creditNotes > 0;
+    counts.drivers +
+      counts.contacts +
+      counts.tripSheets +
+      counts.invoices +
+      counts.creditNotes +
+      counts.courierTripSheets >
+    0;
 
   if (hasData && !deleteScopeData) {
     return NextResponse.json(
@@ -528,6 +536,9 @@ export const DELETE = withAuth(async (request: NextRequest) => {
       // Credit notes before both: they Restrict-reference the invoice, and
       // their lines and collection links cascade with them.
       await tx.creditNote.deleteMany({ where: { tenantId } });
+      // Courier sheets Restrict-reference contacts and invoices; their invoice
+      // lines cascade with them.
+      await tx.courierTripSheet.deleteMany({ where: { tenantId } });
       await tx.collection.deleteMany({ where: { tenantId } });
       await tx.stop.deleteMany({ where: { tenantId } });
       await tx.tripSheet.deleteMany({ where: { tenantId } });

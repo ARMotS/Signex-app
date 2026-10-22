@@ -1235,6 +1235,42 @@ export async function uploadFileToFolder(
 }
 
 /**
+ * Upload a file that must not replace anything: null when the folder already
+ * holds one of that name, so the caller can pick another. (uploadFileToFolder
+ * replaces — right for our own output, wrong for an original kept as a record.)
+ */
+export async function uploadNewFileToFolder(
+  tenantId: string,
+  folderItemId: string,
+  filename: string,
+  buffer: Buffer,
+  contentType: string
+): Promise<OneDriveItem | null> {
+  const token = await requireToken(tenantId);
+  const safe = assertSafeItemName(filename);
+  const url = `${GRAPH_API_URL}/me/drive/items/${folderItemId}:/${encodeURIComponent(safe)}:/content?@microsoft.graph.conflictBehavior=fail`;
+
+  const res = await graphFetch(url, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": contentType },
+    body: new Uint8Array(buffer),
+  });
+  if (res.status === 409) return null;
+  if (!res.ok) {
+    throw new Error(`Graph API upload error (${res.status}): ${await res.text()}`);
+  }
+  return res.json();
+}
+
+/** The folder an item sits in, or null at the drive root. */
+export async function getParentFolderId(tenantId: string, itemId: string): Promise<string | null> {
+  const item = await graphGet(tenantId, `/me/drive/items/${encodeURIComponent(itemId)}?$select=id,parentReference`);
+  const parent = item?.parentReference;
+  // The drive root has a parentReference with no id.
+  return parent?.id ?? null;
+}
+
+/**
  * Ensure a subfolder exists inside a parent folder. Creates if missing.
  * Returns the subfolder item ID.
  */

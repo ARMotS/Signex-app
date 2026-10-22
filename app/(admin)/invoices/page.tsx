@@ -30,6 +30,8 @@ interface InvoiceFile {
   /** Where the invoice's chain stands (lib/invoice-chain.ts). */
   chainStatus: string | null;
   chainLabel: string | null;
+  /** On a courier trip sheet — it goes by courier, not with one of our drivers. */
+  courier?: { id: string; courierSheetNo: string; status: string } | null;
 }
 
 /** The chain status tints, as on the invoice page. */
@@ -819,6 +821,7 @@ export default function InvoicesPage() {
                       </div>
                     </td>
                     <td className="px-5 py-3.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
                       {/* The chain's status where there is more to say than signed
                           or not: a collection, a credit, an exception. */}
                       {inv.chainStatus && inv.chainStatus !== "DELIVERED" && inv.chainStatus !== "NOT_DELIVERED" ? (
@@ -830,6 +833,19 @@ export default function InvoicesPage() {
                       ) : (
                         <StatusBadge tone="idle" dot>Unsigned</StatusBadge>
                       )}
+                      {/* Delivery method: no chip is in-house, with one of our drivers. */}
+                      {inv.courier && (
+                        <Link
+                          href={`/courier/${inv.courier.id}`}
+                          className="chip tone-ref hover:underline"
+                          title="Goes by courier — open the courier trip sheet"
+                        >
+                          <b>Courier</b>
+                          <span className="chip-sep">·</span>
+                          <span className="chip-no">{inv.courier.courierSheetNo}</span>
+                        </Link>
+                      )}
+                      </div>
                     </td>
                     <td className="px-5 py-3.5 text-ink-muted hidden md:table-cell font-mono text-xs">
                       {inv.filename}

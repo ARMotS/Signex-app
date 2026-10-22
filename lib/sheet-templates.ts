@@ -30,6 +30,7 @@ import { scopedPrisma } from "./db-scoped";
 import { fieldsFor, normalizeHeader, SHEET_TYPES, type ImportSheetType } from "./import-fields";
 import {
   aliasColumns,
+  BUILT_IN_COURIER_TRIP_SHEET,
   BUILT_IN_TRIP_SHEET,
   checkTemplate,
   readGrid,
@@ -48,6 +49,7 @@ export const BUILT_IN_ID = "builtin";
 
 const BUILT_IN: Partial<Record<ImportSheetType, { template: SheetTemplate; name: string }>> = {
   TRIP_SHEET: { template: BUILT_IN_TRIP_SHEET, name: "Built-in trip sheet layout" },
+  COURIER_TRIP_SHEET: { template: BUILT_IN_COURIER_TRIP_SHEET, name: "Built-in courier trip sheet layout" },
 };
 
 export function builtInLayout(sheetType: ImportSheetType) {
@@ -56,9 +58,9 @@ export function builtInLayout(sheetType: ImportSheetType) {
 
 /** Whether the built-in layout can read this header row at all. */
 function builtInReads(sheetType: ImportSheetType, headers: string[]): boolean {
-  if (sheetType !== "TRIP_SHEET") return false;
   const columns = aliasColumns(headers, sheetType);
-  return "invoiceNumber" in columns || "collectionNo" in columns;
+  if (sheetType === "TRIP_SHEET") return "invoiceNumber" in columns || "collectionNo" in columns;
+  return "invoiceNumber" in columns && "waybillNo" in columns && "customerName" in columns;
 }
 
 // ─── Fingerprints ─────────────────────────────────────────────────────────

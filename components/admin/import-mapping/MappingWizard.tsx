@@ -25,12 +25,8 @@ import {
   type TemplateSummary,
 } from "./types";
 
-/**
- * Sheet types the wizard offers. Courier trip sheets are not imported yet —
- * a template for one would have nowhere to go — so they join this list when
- * the courier import does.
- */
-export const WIZARD_SHEET_TYPES: ImportSheetType[] = ["TRIP_SHEET"];
+/** Sheet types the wizard offers — every type Signex imports. */
+export const WIZARD_SHEET_TYPES: ImportSheetType[] = ["TRIP_SHEET", "COURIER_TRIP_SHEET"];
 
 const PREVIEW_DELAY_MS = 350;
 const RESULT_ROWS_SHOWN = 50;

@@ -68,11 +68,25 @@ export const GET = withAuth(async () => {
   });
   const statuses = await chainStatuses(ctx.tenantId, [...delivered.keys()], delivered);
 
+  // Delivery method: an invoice on a courier trip sheet goes by courier; any
+  // other goes with one of our drivers. One query for the whole listing.
+  const keys = [...new Set(files.map((f) => normalizeInvoiceNo(f.invoiceNumber, pattern)).filter(Boolean))];
+  const courierLines = keys.length
+    ? await ctx.db.courierTripSheetInvoice.findMany({
+        where: { invoiceNoNormalized: { in: keys } },
+        select: { invoiceNoNormalized: true, courierSheet: { select: { id: true, courierSheetNo: true, status: true } } },
+      })
+    : [];
+  const courierByKey = new Map(courierLines.map((l) => [l.invoiceNoNormalized, l.courierSheet]));
+
   const invoices = files.map((f, i) => {
     const r = rowOf[i];
     const chain = r ? statuses.get(r.id) ?? null : null;
+    const courier = courierByKey.get(normalizeInvoiceNo(f.invoiceNumber, pattern)) ?? null;
     return {
       ...f,
+      deliveryMethod: courier ? ("COURIER" as const) : ("IN_HOUSE" as const),
+      courier,
       recordId: r?.id ?? null,
       chainStatus: chain,
       chainLabel: chain ? CHAIN_STATUS_LABEL[chain] : null,
