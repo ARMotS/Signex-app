@@ -786,6 +786,166 @@ suite("cross-ADMIN isolation", () => {
     });
   });
 
+  // ── Import templates ─────────────────────────────────────────────────
+  //
+  // A template is an ADMIN's description of their own export. Matching an
+  // upload to another scope's template would read one company's sheet with
+  // another's column choices — and reveal that the other layout exists.
+  describe("import templates", () => {
+    const headers = (prefix: string) => [`${prefix} Pickup`, `${prefix} Client`, `${prefix} Boxes`];
+    const templateBody = (name: string, prefix: string, extra: Record<string, unknown> = {}) => {
+      const [pickup, client, boxes] = headers(prefix);
+      return {
+        sheetType: "TRIP_SHEET",
+        name,
+        headerRow: 1,
+        dataStartRow: 2,
+        stopAtBlankRows: 2,
+        headers: headers(prefix),
+        mappings: {
+          collectionNo: { source: "column", column: pickup },
+          customerName: { source: "column", column: client },
+          nop: { source: "column", column: boxes },
+          driverName: { source: "promptAtImport" },
+        },
+        ...extra,
+      };
+    };
+    // Collection-only rows: nothing to deliver, so a deploy needs no invoice PDF.
+    const sheetIn = (prefix: string) =>
+      new File([[headers(prefix).join(","), "COL-T1,Acme Trading,2"].join("\n")], "own-layout.csv", { type: "text/csv" });
+
+    async function create(fx: typeof f.a, body: Record<string, unknown>) {
+      const { POST } = await import("@/app/api/import-templates/route");
+      useSession(adminSession(fx));
+      const res = await POST(req("/api/import-templates", { method: "POST", body }));
+      return { status: res.status, body: await res.json() };
+    }
+
+    async function upload(fx: typeof f.a, file: File, fields: Record<string, string> = {}) {
+      const { POST } = await import("@/app/api/trip-sheet/route");
+      useSession(adminSession(fx));
+      const form = new FormData();
+      form.append("file", file);
+      for (const [k, v] of Object.entries(fields)) form.append(k, v);
+      const res = await POST(formReq("/api/trip-sheet", form));
+      return { status: res.status, body: await res.json() };
+    }
+
+    it("each ADMIN lists only their own, even under the same name", async () => {
+      const a = await create(f.a, templateBody("Depot layout", "A"));
+      const b = await create(f.b, templateBody("Depot layout", "B"));
+      expect([a.status, b.status]).toEqual([201, 201]);
+
+      const { GET } = await import("@/app/api/import-templates/route");
+      useSession(adminSession(f.a));
+      const list = await (await GET(req("/api/import-templates"))).json();
+      expect(list.templates.map((t: { id: string }) => t.id)).toEqual([a.body.id]);
+      expect(JSON.stringify(list)).not.toContain(b.body.id);
+    });
+
+    it("another scope's template is 404 to read, change or delete", async () => {
+      const theirs = await db().importTemplate.findFirstOrThrow({ where: { tenantId: f.b.tenantId } });
+      const route = await import("@/app/api/import-templates/[id]/route");
+      useSession(adminSession(f.a));
+
+      expect((await route.GET(req(`/api/import-templates/${theirs.id}`), params({ id: theirs.id }))).status).toBe(404);
+      expect(
+        (await route.PUT(req(`/api/import-templates/${theirs.id}`, { method: "PUT", body: { name: "Taken over" } }), params({ id: theirs.id }))).status
+      ).toBe(404);
+      expect((await route.DELETE(req(`/api/import-templates/${theirs.id}`, { method: "DELETE" }), params({ id: theirs.id }))).status).toBe(404);
+
+      const after = await db().importTemplate.findUniqueOrThrow({ where: { id: theirs.id } });
+      expect(after.name).toBe(theirs.name);
+    });
+
+    it("an upload is never read with another scope's template", async () => {
+      // B's layout, uploaded by A: A has no template for it and the built-in
+      // layout cannot read it.
+      const asA = await upload(f.a, sheetIn("B"), { prompts: JSON.stringify({ driverName: f.a.driver.name }) });
+      expect(asA.status).toBe(400);
+      expect(asA.body.code).toBe("NEEDS_TEMPLATE");
+
+      const asB = await upload(f.b, sheetIn("B"), { prompts: JSON.stringify({ driverName: f.b.driver.name }) });
+      const theirs = await db().importTemplate.findFirstOrThrow({ where: { tenantId: f.b.tenantId } });
+      expect(asB.status).toBe(200);
+      expect(asB.body.template).toEqual({ id: theirs.id, name: "Depot layout" });
+    });
+
+    it("asking for another scope's template by id is 404", async () => {
+      const theirs = await db().importTemplate.findFirstOrThrow({ where: { tenantId: f.b.tenantId } });
+      const res = await upload(f.a, sheetIn("B"), { templateId: theirs.id });
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe("TEMPLATE_NOT_FOUND");
+    });
+
+    it("a deploy records the template that read the sheet", async () => {
+      const mine = await db().importTemplate.findFirstOrThrow({ where: { tenantId: f.b.tenantId } });
+      const res = await upload(f.b, sheetIn("B"), {
+        action: "deploy",
+        templateId: mine.id,
+        prompts: JSON.stringify({ driverName: f.b.driver.name }),
+      });
+      expect(res.status).toBe(200);
+
+      const trip = await db().tripSheet.findFirstOrThrow({
+        where: { tenantId: f.b.tenantId, importTemplateId: mine.id },
+      });
+      expect(trip.driverId).toBe(f.b.driver.id);
+      expect(trip.mappingSnapshot).toMatchObject({ id: mine.id, name: "Depot layout", headerRow: 1 });
+      expect(await db().tripSheet.count({ where: { tenantId: f.a.tenantId, importTemplateId: mine.id } })).toBe(0);
+
+      // Later suites count B's trip sheets against the fixtures; the run (and
+      // its stops and collection, which cascade) goes again.
+      await db().tripSheet.delete({ where: { id: trip.id } });
+    });
+
+    it("a new default replaces only the caller's own previous default", async () => {
+      await create(f.b, templateBody("B default", "BD", { isDefault: true }));
+      await create(f.a, templateBody("A first default", "A1", { isDefault: true }));
+      const second = await create(f.a, templateBody("A second default", "A2", { isDefault: true }));
+
+      const defaults = await db().importTemplate.findMany({ where: { isDefault: true }, select: { tenantId: true, name: true } });
+      expect(defaults.filter((d) => d.tenantId === f.a.tenantId).map((d) => d.name)).toEqual(["A second default"]);
+      expect(defaults.filter((d) => d.tenantId === f.b.tenantId).map((d) => d.name)).toEqual(["B default"]);
+      expect(second.body.isDefault).toBe(true);
+    });
+
+    it("deleting an admin takes their workspace's templates with it", async () => {
+      const { POST, DELETE } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+      const created = await (
+        await POST(
+          req("/api/admin/users", {
+            method: "POST",
+            body: { name: "Admin T", email: "admin-t@example.test", username: "office.t", password: "office-t-pass1" },
+          })
+        )
+      ).json();
+      const tenantId: string = created.scope.tenantId;
+      const admin = await db().admin.findUniqueOrThrow({ where: { email: "admin-t@example.test" } });
+      await db().importTemplate.create({
+        data: {
+          tenantId,
+          sheetType: "TRIP_SHEET",
+          name: "Only config",
+          headerRow: 1,
+          dataStartRow: 2,
+          headerFingerprint: "x",
+          mappings: {},
+          createdById: admin.id,
+        },
+      });
+
+      // No drivers, contacts or trips: the workspace is "empty", so there is
+      // no purge — the template must still not block dropping the scope.
+      const res = await DELETE(req("/api/admin/users", { method: "DELETE", body: { id: admin.id } }));
+      expect(res.status).toBe(200);
+      expect(await db().importTemplate.count({ where: { tenantId } })).toBe(0);
+      expect(await db().tenant.count({ where: { id: tenantId } })).toBe(0);
+    });
+  });
+
   // ── Collections ──────────────────────────────────────────────────────
   //
   // Collections carry a credit against a customer's account, so a leak here is

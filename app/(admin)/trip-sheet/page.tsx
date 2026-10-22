@@ -193,6 +193,9 @@ interface MissingInvoice {
 interface PreviewData {
   success: boolean;
   filename?: string;
+  /** The import template that read the sheet — sent back with the deploy so
+   *  the server's re-parse reads it the same way. */
+  template?: { id: string; name: string };
   preview: {
     totalRows: number;
     matchedInvoices: number;
@@ -915,15 +918,17 @@ export default function TripSheetPage() {
 
     try {
       let res: Response;
+      const templateId = preview?.template?.id;
       if (uploadedFile) {
         const formData = new FormData();
         formData.append("file", uploadedFile);
+        if (templateId) formData.append("templateId", templateId);
         res = await fetch("/api/trip-sheet", { method: "POST", body: formData });
       } else {
         res = await fetch("/api/trip-sheet/folder", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ filename: importSourceFile }),
+          body: JSON.stringify({ filename: importSourceFile, templateId }),
         });
       }
 
@@ -1045,6 +1050,7 @@ export default function TripSheetPage() {
         const bodyPayload: Record<string, unknown> = {
           filename: importSourceFile,
           action: "deploy",
+          templateId: preview?.template?.id,
         };
 
         if (hasUnassigned && assignToDriverId) {
@@ -1086,6 +1092,7 @@ export default function TripSheetPage() {
         const formData = new FormData();
         formData.append("file", uploadedFile);
         formData.append("action", "deploy");
+        if (preview?.template?.id) formData.append("templateId", preview.template.id);
 
         if (hasUnassigned && assignToDriverId) {
           const selectedDriver = drivers.find((d) => d.id === assignToDriverId);

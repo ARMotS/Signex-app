@@ -42,6 +42,8 @@ import {
   parseWithTemplate,
   readGrid,
   type MappedValue,
+  type MissingColumn,
+  type SheetTemplate,
 } from "./sheet-mapping";
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -99,6 +101,13 @@ export interface MissingInvoice {
 export interface ParseResult {
   success: boolean;
   error?: string;
+  /**
+   * Why the sheet could not be read, where the office has something to do
+   * about it: NEEDS_TEMPLATE (no layout Signex knows reads it) or
+   * MISSING_COLUMNS (the template's columns are not all in the file).
+   */
+  code?: "NEEDS_TEMPLATE" | "MISSING_COLUMNS";
+  missingColumns?: MissingColumn[];
   rows: ParsedRow[];
   driverResults: MatchResult[];
   totalRows: number;
@@ -130,10 +139,14 @@ export interface ParseResult {
 }
 
 /** An empty result, so the early returns below stay one line each. */
-function emptyResult(error?: string): ParseResult {
+function emptyResult(
+  error?: string,
+  why?: Pick<ParseResult, "code" | "missingColumns">
+): ParseResult {
   return {
     success: !error,
     ...(error ? { error } : {}),
+    ...why,
     rows: [],
     driverResults: [],
     totalRows: 0,
@@ -248,12 +261,17 @@ function toParsedRow(values: Record<string, MappedValue>): ParsedRow {
 export async function parseTripSheet(
   tenantId: string,
   fileBuffer: Buffer,
-  filename: string
+  filename: string,
+  options: {
+    /** Chosen by lib/sheet-templates.ts; the built-in layout when absent. */
+    template?: SheetTemplate;
+    /** Values typed at import, for fields the template maps `promptAtImport`. */
+    prompts?: Record<string, string>;
+  } = {}
 ): Promise<ParseResult> {
   try {
-    // 1. Read the file. Every trip sheet is read through the built-in layout
-    //    for now; saved import templates choose their own.
-    const template = BUILT_IN_TRIP_SHEET;
+    // 1. Read the file.
+    const template = options.template ?? BUILT_IN_TRIP_SHEET;
     const read = readGrid(fileBuffer, filename, template.worksheet);
     if (!read.ok) return emptyResult(read.error);
 
@@ -267,13 +285,29 @@ export async function parseTripSheet(
     //    ORIGINALINVOICENO read as blank (the "reference" fields): a "0"
     //    COLLECTNO is a plain delivery, and a "0" INVOICENO beside a COLLECTNO
     //    is an ad hoc collection not credited against any invoice.
-    const mapped = parseWithTemplate(read.grid, template);
+    const mapped = parseWithTemplate(read.grid, template, { prompts: options.prompts, filename });
+
+    // Chosen templates are checked for this before parsing; kept here so a
+    // caller that skipped the check still cannot read a column that is not
+    // there as blank.
+    if (mapped.missingColumns.length > 0) {
+      return emptyResult(
+        `This sheet is missing ${mapped.missingColumns.map((m) => `"${m.column}" (${m.label})`).join(", ")}.`,
+        { code: "MISSING_COLUMNS", missingColumns: mapped.missingColumns }
+      );
+    }
 
     // A sheet needs one or the other, not both: a run can legitimately be
-    // nothing but collections.
-    if (!("invoiceNumber" in mapped.columns) && !("collectionNo" in mapped.columns)) {
+    // nothing but collections. (A saved template cannot be saved without
+    // mapping one of them; the built-in layout has to find one.)
+    if (
+      template.matchAliases &&
+      !("invoiceNumber" in mapped.columns) &&
+      !("collectionNo" in mapped.columns)
+    ) {
       return emptyResult(
-        `Could not detect an invoice number or collection number column. Headers found: ${mapped.headers.filter(Boolean).join(", ")}`
+        `Could not detect an invoice number or collection number column. Headers found: ${mapped.headers.filter(Boolean).join(", ")}`,
+        { code: "NEEDS_TEMPLATE" }
       );
     }
 

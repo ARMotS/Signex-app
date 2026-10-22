@@ -36,6 +36,7 @@ exports[`trip sheet golden output — errors > header row only 1`] = `
 exports[`trip sheet golden output — errors > no invoice or collection column 1`] = `
 {
   "alreadySigned": [],
+  "code": "NEEDS_TEMPLATE",
   "driverResults": [],
   "error": "Could not detect an invoice number or collection number column. Headers found: Customer, Driver, Amount",
   "matchedCollections": 0,

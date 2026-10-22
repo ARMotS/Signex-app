@@ -14,6 +14,7 @@ import { describeCloudProvider } from "@/lib/cloud-detect";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { matchStopsToContacts, applyContactMatches } from "@/lib/contact-matcher";
+import { chooseTemplate, readPrompts, templateRef, templateSnapshot } from "@/lib/sheet-templates";
 
 /** Cloud imports list a remote folder and parse a spreadsheet — see the note
  *  on maxDuration in ../route.ts. */
@@ -70,14 +71,42 @@ export const POST = withAuth(async (request: NextRequest) => {
     );
   }
 
-  const parseResult = await parseTripSheet(ctx.tenantId, file.buffer, file.filename);
+  // As on the upload path: this scope's template, and on a deploy the one the
+  // preview used.
+  const choice = await chooseTemplate(
+    ctx.tenantId,
+    "TRIP_SHEET",
+    file.buffer,
+    file.filename,
+    typeof body.templateId === "string" ? body.templateId : null
+  );
+  if (!choice.ok) {
+    return NextResponse.json(
+      { error: choice.error, code: choice.code, missingColumns: choice.missingColumns, template: choice.template },
+      { status: choice.code === "TEMPLATE_NOT_FOUND" ? 404 : 400 }
+    );
+  }
+
+  const parseResult = await parseTripSheet(ctx.tenantId, file.buffer, file.filename, {
+    template: choice.template,
+    prompts: readPrompts(body.prompts),
+  });
 
   if (!parseResult.success) {
     return NextResponse.json(
-      { error: parseResult.error },
+      {
+        error: parseResult.error,
+        code: parseResult.code,
+        missingColumns: parseResult.missingColumns,
+        template: templateRef(choice),
+      },
       { status: 400 }
     );
   }
+  const readWith = {
+    importTemplateId: choice.id,
+    mappingSnapshot: templateSnapshot(choice),
+  };
 
   if (action === "deploy") {
     // assignTo.driverId is client-supplied — confirm it is in this scope before
@@ -133,6 +162,7 @@ export const POST = withAuth(async (request: NextRequest) => {
             uploadedBy: ctx.userId,
             sourceFilename: filename,
             stops: renumberedStops,
+            ...readWith,
           });
           savedTrips.push(trip);
         }
@@ -146,6 +176,7 @@ export const POST = withAuth(async (request: NextRequest) => {
         uploadedBy: ctx.userId,
         sourceFilename: filename,
         stops: renumberedStops,
+        ...readWith,
       });
       savedTrips.push(trip);
     }
@@ -184,6 +215,8 @@ export const POST = withAuth(async (request: NextRequest) => {
     deployed: false,
     filename,
     preview: parseResult,
+    // Sent back with the deploy as templateId.
+    template: templateRef(choice),
   });
 });
 

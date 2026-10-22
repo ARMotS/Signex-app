@@ -548,6 +548,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
       await tx.importedFile.deleteMany({ where: { tenantId } });
       await tx.cloudAccount.deleteMany({ where: { tenantId } });
       await tx.appConfig.deleteMany({ where: { tenantId } });
+      await tx.importTemplate.deleteMany({ where: { tenantId } });
     }
 
     if (targetUser) {
@@ -573,6 +574,10 @@ export const DELETE = withAuth(async (request: NextRequest) => {
           where: { tenantId },
           data: { tenantId: null },
         });
+        // Templates are configuration, not counted as workspace data, so a
+        // scope holding only those skips the purge above — and they would
+        // block the Tenant delete on its foreign key.
+        await tx.importTemplate.deleteMany({ where: { tenantId } });
         await tx.tenant.delete({ where: { id: tenantId } });
       }
     }

@@ -213,6 +213,37 @@ export interface MissingColumn {
   column: string;
 }
 
+/**
+ * Where each column field of a template is in this header row, and which of
+ * its mapped columns the row does not have. Aliases first (built-in layouts),
+ * then explicit mappings on top.
+ */
+export function resolveColumns(
+  headers: string[],
+  template: SheetTemplate
+): { columns: Record<string, number>; missingColumns: MissingColumn[] } {
+  const columns: Record<string, number> = template.matchAliases
+    ? aliasColumns(headers, template.sheetType)
+    : {};
+  const missingColumns: MissingColumn[] = [];
+  for (const field of fieldsFor(template.sheetType)) {
+    const mapping = template.mappings[field.key];
+    if (!mapping || (mapping.source !== "column" && mapping.source !== "firstValueInColumn")) continue;
+    const index = locateColumn(headers, mapping);
+    if (index === null) {
+      delete columns[field.key];
+      missingColumns.push({
+        field: field.key,
+        label: field.label,
+        column: mapping.column?.trim() || mapping.columnLetter || "",
+      });
+    } else {
+      columns[field.key] = index;
+    }
+  }
+  return { columns, missingColumns };
+}
+
 /** Wizard suggestions for a header row: the built-in alias rule, as mappings. */
 export function suggestMappings(
   headers: string[],
@@ -447,26 +478,7 @@ export function parseWithTemplate(
   const headers = grid[template.headerRow - 1] ?? [];
   const issues: MappingIssue[] = [];
 
-  // Columns: aliases first (built-in layouts), then explicit mappings on top.
-  const columns: Record<string, number> = template.matchAliases
-    ? aliasColumns(headers, template.sheetType)
-    : {};
-  const missingColumns: MissingColumn[] = [];
-  for (const field of fields) {
-    const mapping = template.mappings[field.key];
-    if (!mapping || (mapping.source !== "column" && mapping.source !== "firstValueInColumn")) continue;
-    const index = locateColumn(headers, mapping);
-    if (index === null) {
-      delete columns[field.key];
-      missingColumns.push({
-        field: field.key,
-        label: field.label,
-        column: mapping.column?.trim() || mapping.columnLetter || "",
-      });
-    } else {
-      columns[field.key] = index;
-    }
-  }
+  const { columns, missingColumns } = resolveColumns(headers, template);
 
   const patterns = new Map<string, RegExp>();
   for (const field of fields) {

@@ -303,6 +303,9 @@ export async function saveTripSheet(
     uploadedBy: string;
     sourceFilename: string;
     stops: (Omit<TripStop, "id"> & { collections?: Omit<TripCollection, "id">[] })[];
+    /** The saved import template that read the sheet; absent for the built-in layout. */
+    importTemplateId?: string | null;
+    mappingSnapshot?: Prisma.InputJsonValue;
   }
 ): Promise<TripSheet> {
   const db = scopedPrisma(tenantId);
@@ -346,6 +349,8 @@ export async function saveTripSheet(
       driverId: trip.driverId,
       regNo: trip.regNo || null,
       status,
+      importTemplateId: trip.importTemplateId ?? null,
+      ...(trip.mappingSnapshot !== undefined ? { mappingSnapshot: trip.mappingSnapshot } : {}),
       stops: {
         create: trip.stops.map((stop) => ({
           stopNumber: stop.stopNumber,
