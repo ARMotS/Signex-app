@@ -14,6 +14,7 @@ import { saveUploadedFile } from "@/lib/trip-sheet-folder";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { scheduleCollectionSheets } from "@/lib/collection-sheet-sync";
+import { chooseTemplate, readPrompts, templateRef, templateSnapshot } from "@/lib/sheet-templates";
 
 /**
  * Parsing a spreadsheet, and batch-completing a day's trip sheets, both do real
@@ -45,14 +46,44 @@ export const POST = withAuth(async (request: NextRequest) => {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const parseResult = await parseTripSheet(ctx.tenantId, buffer, file.name);
+
+  // The template is this scope's own (an id from another scope is not found),
+  // and on a deploy it is the one the preview used, so the re-parse reads the
+  // sheet the same way.
+  const choice = await chooseTemplate(
+    ctx.tenantId,
+    "TRIP_SHEET",
+    buffer,
+    file.name,
+    formData.get("templateId") as string | null
+  );
+  if (!choice.ok) {
+    return NextResponse.json(
+      { error: choice.error, code: choice.code, missingColumns: choice.missingColumns, template: choice.template },
+      { status: choice.code === "TEMPLATE_NOT_FOUND" ? 404 : 400 }
+    );
+  }
+
+  const parseResult = await parseTripSheet(ctx.tenantId, buffer, file.name, {
+    template: choice.template,
+    prompts: readPrompts(formData.get("prompts")),
+  });
 
   if (!parseResult.success) {
     return NextResponse.json(
-      { error: parseResult.error },
+      {
+        error: parseResult.error,
+        code: parseResult.code,
+        missingColumns: parseResult.missingColumns,
+        template: templateRef(choice),
+      },
       { status: 400 }
     );
   }
+  const readWith = {
+    importTemplateId: choice.id,
+    mappingSnapshot: templateSnapshot(choice),
+  };
 
   const action = formData.get("action") as string | null;
 
@@ -142,6 +173,7 @@ export const POST = withAuth(async (request: NextRequest) => {
             uploadedBy: ctx.userId,
             sourceFilename: file.name,
             stops: renumberedStops,
+            ...readWith,
           });
           savedTrips.push(trip);
         }
@@ -155,6 +187,7 @@ export const POST = withAuth(async (request: NextRequest) => {
         uploadedBy: ctx.userId,
         sourceFilename: file.name,
         stops: renumberedStops,
+        ...readWith,
       });
       savedTrips.push(trip);
     }
@@ -184,6 +217,8 @@ export const POST = withAuth(async (request: NextRequest) => {
     success: true,
     deployed: false,
     preview: parseResult,
+    // Sent back with the deploy as templateId.
+    template: templateRef(choice),
   });
 });
 

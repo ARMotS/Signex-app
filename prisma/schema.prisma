@@ -62,6 +62,7 @@ model Tenant {
   creditNoteLines CreditNoteLine[]
   creditNoteCollections CreditNoteCollection[]
   creditNoteAllocations CreditNoteAllocation[]
+  importTemplates ImportTemplate[]
 }
 
 model User {
@@ -187,6 +188,12 @@ model TripSheet {
   regNo          String?
   status         TripSheetStatus @default(ACTIVE)
   adminId        String?
+  /// The import template the sheet was read with; null for the built-in
+  /// layout. No foreign key: a template can be edited or deleted, and
+  /// mappingSnapshot (the template as it was used) is the record of how this
+  /// sheet was read.
+  importTemplateId String?
+  mappingSnapshot  Json?
   tenantId       String          @default("")
   tenant         Tenant          @relation(fields: [tenantId], references: [id])
   stops          Stop[]
@@ -731,6 +738,52 @@ model CloudAccount {
 
   @@unique([tenantId, provider])
   @@index([tenantId])
+}
+
+// ─── Import Templates (column mapping) ────────────────────────────────────
+//
+// An ADMIN's description of their own spreadsheet layout: which worksheet,
+// which row holds the headers, and which column or cell each Signex field
+// comes from. Read by lib/sheet-mapping.ts; stored and chosen by
+// lib/sheet-templates.ts. The layout trip sheets have always used is NOT a row
+// here — it is BUILT_IN_TRIP_SHEET, defined in code.
+
+enum ImportSheetType {
+  TRIP_SHEET
+  COURIER_TRIP_SHEET
+}
+
+model ImportTemplate {
+  id                String          @id @default(cuid())
+  tenantId          String          @default("")
+  tenant            Tenant          @relation(fields: [tenantId], references: [id])
+  sheetType         ImportSheetType
+  name              String
+  /// At most one default per scope and sheet type. Kept so by
+  /// lib/sheet-templates.ts in one transaction rather than by a partial unique
+  /// index, which the schema cannot express — a hand-written one would read as
+  /// drift and the next generated migration would drop it.
+  isDefault         Boolean         @default(false)
+  /// null reads the first worksheet.
+  worksheet         String?
+  headerRow         Int
+  dataStartRow      Int
+  stopAtBlankRows   Int             @default(2)
+  /// The sample file's header row, normalised and joined — how an upload is
+  /// recognised as this layout. See headerFingerprint().
+  headerFingerprint String
+  /// Field key → FieldMapping (lib/sheet-mapping.ts). Validated on write.
+  mappings          Json
+  /// Who saved it. Not a foreign key: a SUPER_ADMIN viewing this scope is not
+  /// one of its admins, and the template outlives the account.
+  createdById       String
+  createdByName     String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([tenantId, sheetType, name])
+  @@unique([tenantId, id])
+  @@index([tenantId, sheetType])
 }
 
 // ─── Imported Files (Trip Sheet Cloud Folder Tracking) ────────────────────
