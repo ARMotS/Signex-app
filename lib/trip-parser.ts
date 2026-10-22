@@ -1,8 +1,10 @@
 /**
  * Trip sheet parser — handles CSV and Excel files.
- * Auto-detects columns and matches invoice numbers to PDF files + driver accounts.
+ * Reads the sheet through an import template (lib/sheet-mapping.ts) and
+ * matches invoice numbers to PDF files + driver accounts.
  *
- * Expected columns (auto-detected by header):
+ * Expected columns, on the built-in layout (found by header — the aliases are
+ * in lib/import-fields.ts):
  *   1. Date       — trip date for reference
  *   2. Driver     — driver name (used for matching as fallback)
  *   3. REGNO      — vehicle registration (used for matching as priority)
@@ -18,8 +20,6 @@
  * the column is detected, never required.
  */
 
-import Papa from "papaparse";
-import * as XLSX from "xlsx";
 import crypto from "crypto";
 import { listInvoiceFiles } from "./invoices";
 import {
@@ -36,6 +36,13 @@ import {
   type InvoiceNoPattern,
 } from "./invoice-number";
 import type { TripCollection, TripStop } from "./trip-data";
+import { fieldForHeader } from "./import-fields";
+import {
+  BUILT_IN_TRIP_SHEET,
+  parseWithTemplate,
+  readGrid,
+  type MappedValue,
+} from "./sheet-mapping";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -142,144 +149,16 @@ function emptyResult(error?: string): ParseResult {
 
 // ─── Column Detection ─────────────────────────────────────────────────────
 
-const COLUMN_PATTERNS: Record<string, RegExp[]> = {
-  date: [
-    /^date$/i,
-    /^trip\s*date$/i,
-    /^delivery\s*date$/i,
-    /^del\.\s*date$/i,
-  ],
-  driverName: [
-    /^driver\s*name$/i,
-    /^driver$/i,
-    /^assigned\s*to$/i,
-    /^assigned$/i,
-  ],
-  regNo: [
-    /^regno$/i,
-    /^reg\s*no\.?$/i,
-    /^reg$/i,
-    /^registration$/i,
-    /^vehicle\s*reg/i,
-    /^vehicle$/i,
-    /^reg\s*num/i,
-    /^plate/i,
-    /^number\s*plate/i,
-  ],
-  customerName: [
-    /^customer\s*name$/i,
-    /^customer$/i,
-    /^client\s*name$/i,
-    /^client$/i,
-    /^name$/i,
-    /^company$/i,
-    /^deliver\s*to$/i,
-  ],
-  invoiceNumber: [
-    /^invoiceno$/i,
-    /^invoice\s*no\.?$/i,
-    /^invoice\s*#?\s*n/i,
-    /^invoice\s*#/i,
-    /^invoice\s*num/i,
-    /^inv\s*#/i,
-    /^inv\.?\s*no/i,
-    /^invoice$/i,
-    /^inv$/i,
-  ],
-  // Tolerant on purpose: the same column is written COLLECTNO, "Collection No",
-  // "Coll No" and "Collect #" by different depots, and a header that fails to
-  // match silently drops every collection on the sheet.
-  collectionNo: [
-    /^collectno$/i,
-    /^collection\s*no\.?$/i,
-    /^collect\s*no\.?$/i,
-    /^coll\s*no\.?$/i,
-    /^collection\s*#/i,
-    /^collect\s*#/i,
-    /^coll\s*#/i,
-    /^collection\s*num/i,
-    /^collection$/i,
-    /^collect$/i,
-  ],
-  collectionType: [
-    /^collecttype$/i,
-    /^collection\s*type$/i,
-    /^collect\s*type$/i,
-    /^coll\s*type$/i,
-    /^uplift\s*type$/i,
-  ],
-  originalInvoiceNo: [
-    /^originalinvoiceno$/i,
-    /^original\s*invoice\s*no\.?$/i,
-    /^original\s*invoice$/i,
-    /^orig\s*inv(oice)?\s*no\.?$/i,
-    /^credit\s*against$/i,
-    /^against\s*invoice$/i,
-  ],
-  collectQty: [
-    /^collectqty$/i,
-    /^collect\s*qty$/i,
-    /^collection\s*qty$/i,
-    /^coll\s*qty$/i,
-    /^expected\s*qty$/i,
-  ],
-  nop: [
-    /^nop$/i,
-    /^n\.?o\.?p\.?$/i,
-    /^num\s*(of\s*)?parcels$/i,
-    /^number\s*of\s*parcels$/i,
-    /^parcels$/i,
-    /^qty$/i,
-    /^quantity$/i,
-    /^pcs$/i,
-    /^pieces$/i,
-  ],
-};
-
-/** Exported for tests: the template headers must land on the right fields. */
-export function detectColumn(header: string): string | null {
-  const trimmed = header.trim();
-  if (!trimmed) return null;
-
-  for (const [field, patterns] of Object.entries(COLUMN_PATTERNS)) {
-    for (const pattern of patterns) {
-      if (pattern.test(trimmed)) {
-        return field;
-      }
-    }
-  }
-  return null;
-}
-
-function mapColumns(headers: string[]): Record<string, number> {
-  const mapping: Record<string, number> = {};
-  headers.forEach((header, index) => {
-    if (!header) return; // skip null/empty headers
-    const field = detectColumn(header);
-    if (field && !(field in mapping)) {
-      mapping[field] = index;
-    }
-  });
-  return mapping;
-}
-
-// ─── Invoice Number Normalization ─────────────────────────────────────────
-
 /**
- * A cell that is filled in but means "nothing here". Depots write "0", the
- * letter "O" or a dash in INVOICENO / COLLECTNO rather than leaving the cell
- * blank, and taken literally that is an invoice called "0" with no PDF, or a
- * collection called "-" for the driver to go and fetch.
+ * The field a header names on the built-in layout. Exported for tests: the
+ * template headers must land on the right fields.
  */
-export function isPlaceholderCell(raw: string): boolean {
-  return /^(?:[0O]+(?:\.0+)?|[-–—‐‑−_.]+|N\/?A|NIL|NONE|NULL)$/i.test(String(raw ?? "").trim());
+export function detectColumn(header: string): string | null {
+  return fieldForHeader(header, "TRIP_SHEET");
 }
 
-/** A sheet cell, with placeholders ("0", "-", "N/A") read as blank. */
-function cellValue(raw: unknown): string {
-  const value = String(raw ?? "").trim();
-  return isPlaceholderCell(value) ? "" : value;
-}
+// Read here before the registry existed; re-exported so callers keep working.
+export { isPlaceholderCell } from "./import-fields";
 
 // The matching itself lives in lib/invoice-number.ts, which has no imports so
 // the Settings page can preview a tenant pattern with the same code.
@@ -336,25 +215,26 @@ export function parseCollectionTyping(raw: string): CollectionTyping {
   return { type: "CREDIT_RETURN", upliftSubtype: null };
 }
 
-// ─── File Parsing ─────────────────────────────────────────────────────────
-
-function parseCSVContent(content: string): string[][] {
-  const result = Papa.parse<string[]>(content, {
-    skipEmptyLines: true,
-  });
-  return result.data;
-}
-
-function parseExcelContent(buffer: Buffer): string[][] {
-  const workbook = XLSX.read(buffer, { type: "buffer" });
-  const sheetName = workbook.SheetNames[0];
-  const sheet = workbook.Sheets[sheetName];
-  const data = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1 });
-  // Convert all values to strings
-  return data.map((row) => row.map((cell) => String(cell ?? "")));
-}
-
 // ─── Main Parse Function ──────────────────────────────────────────────────
+
+/** A mapped row as the stop builder reads it. Keys are the TRIP_SHEET fields. */
+function toParsedRow(values: Record<string, MappedValue>): ParsedRow {
+  const text = (key: string) => String(values[key] ?? "");
+  const collectQty = values.collectQty;
+  const nop = values.nop;
+  return {
+    date: text("date"),
+    driverName: text("driverName"),
+    regNo: text("regNo"),
+    customerName: text("customerName"),
+    invoiceNumber: text("invoiceNumber"),
+    collectionNo: text("collectionNo"),
+    collectionType: text("collectionType"),
+    originalInvoiceNo: text("originalInvoiceNo"),
+    collectQty: typeof collectQty === "number" ? collectQty : null,
+    nop: typeof nop === "number" ? nop : 0,
+  };
+}
 
 /**
  * Parse a trip sheet within ONE scope.
@@ -371,81 +251,35 @@ export async function parseTripSheet(
   filename: string
 ): Promise<ParseResult> {
   try {
-    // 1. Parse the file into rows
-    const ext = filename.toLowerCase().split(".").pop();
-    let rawRows: string[][];
+    // 1. Read the file. Every trip sheet is read through the built-in layout
+    //    for now; saved import templates choose their own.
+    const template = BUILT_IN_TRIP_SHEET;
+    const read = readGrid(fileBuffer, filename, template.worksheet);
+    if (!read.ok) return emptyResult(read.error);
 
-    if (ext === "csv") {
-      rawRows = parseCSVContent(fileBuffer.toString("utf-8"));
-    } else if (ext === "xlsx" || ext === "xls") {
-      rawRows = parseExcelContent(fileBuffer);
-    } else {
-      return emptyResult(
-        `Unsupported file type: .${ext}. Use CSV or Excel (.xlsx/.xls)`
-      );
-    }
-
-    if (rawRows.length < 2) {
+    if (read.grid.length < template.dataStartRow) {
       return emptyResult(
         "File has no data rows (needs a header row + at least one data row)"
       );
     }
 
-    // 2. Detect columns from header row
-    const headers = rawRows[0];
-    const columnMap = mapColumns(headers);
+    // 2. Map the columns. "0" / "-" in INVOICENO, COLLECTNO or
+    //    ORIGINALINVOICENO read as blank (the "reference" fields): a "0"
+    //    COLLECTNO is a plain delivery, and a "0" INVOICENO beside a COLLECTNO
+    //    is an ad hoc collection not credited against any invoice.
+    const mapped = parseWithTemplate(read.grid, template);
 
     // A sheet needs one or the other, not both: a run can legitimately be
-    // nothing but collections. Compared against undefined rather than tested for
-    // truthiness because column index 0 is a real column — INVOICENO in the
-    // first column used to be reported as "no invoice column found".
-    if (columnMap.invoiceNumber === undefined && columnMap.collectionNo === undefined) {
+    // nothing but collections.
+    if (!("invoiceNumber" in mapped.columns) && !("collectionNo" in mapped.columns)) {
       return emptyResult(
-        `Could not detect an invoice number or collection number column. Headers found: ${headers.filter(Boolean).join(", ")}`
+        `Could not detect an invoice number or collection number column. Headers found: ${mapped.headers.filter(Boolean).join(", ")}`
       );
     }
 
-    // 3. Parse data rows
-    const dataRows = rawRows.slice(1).filter((row) =>
-      row.some((cell) => cell && cell.trim() !== "")
-    );
-
-    const parsedRows: ParsedRow[] = dataRows
-      .map((row) => ({
-        date: columnMap.date !== undefined
-          ? row[columnMap.date]?.trim() || ""
-          : "",
-        driverName: columnMap.driverName !== undefined
-          ? row[columnMap.driverName]?.trim() || ""
-          : "",
-        regNo: columnMap.regNo !== undefined
-          ? row[columnMap.regNo]?.trim() || ""
-          : "",
-        customerName: columnMap.customerName !== undefined
-          ? row[columnMap.customerName]?.trim() || ""
-          : "",
-        // "0" / "-" in either cell means there is none: a "0" COLLECTNO is a
-        // plain delivery, and a "0" INVOICENO beside a COLLECTNO is an ad hoc
-        // collection not credited against any invoice.
-        invoiceNumber: columnMap.invoiceNumber !== undefined
-          ? cellValue(row[columnMap.invoiceNumber])
-          : "",
-        collectionNo: columnMap.collectionNo !== undefined
-          ? cellValue(row[columnMap.collectionNo])
-          : "",
-        collectionType: columnMap.collectionType !== undefined
-          ? String(row[columnMap.collectionType] ?? "").trim()
-          : "",
-        originalInvoiceNo: columnMap.originalInvoiceNo !== undefined
-          ? cellValue(row[columnMap.originalInvoiceNo])
-          : "",
-        collectQty: columnMap.collectQty !== undefined
-          ? parseInt(row[columnMap.collectQty]) || null
-          : null,
-        nop: columnMap.nop !== undefined
-          ? parseInt(row[columnMap.nop]) || 0
-          : 0,
-      }))
+    // 3. Rows
+    const parsedRows: ParsedRow[] = mapped.rows
+      .map(({ values }) => toParsedRow(values))
       // A row has to carry something. Before collections, a blank invoice cell
       // could only mean a blank row; now it can mean a collection-only visit.
       .filter((row) => row.invoiceNumber !== "" || row.collectionNo !== "")
