@@ -24,6 +24,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import * as XLSX from "xlsx";
 import {
   HAS_TEST_DB,
   db,
@@ -947,6 +948,161 @@ suite("cross-ADMIN isolation", () => {
       expect(res.status).toBe(200);
       expect(await db().importTemplate.count({ where: { tenantId } })).toBe(0);
       expect(await db().tenant.count({ where: { id: tenantId } })).toBe(0);
+    });
+  });
+
+  // ── Courier trip sheets ──────────────────────────────────────────────
+  //
+  // A courier sheet names a customer, their contact and their invoices, and
+  // its checks consult stops and other sheets. Every one of those must be the
+  // importer's own: a sheet must never link another company's contact, nor be
+  // blocked (or cleared) by another company's delivery runs.
+  describe("courier trip sheets", () => {
+    const HEAD = ["Waybillno", "Customer", "INVOICENO", "Date", "NOP"];
+    const courierFile = (name: string, rows: (string | number)[][]) => {
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([HEAD, ...rows]), "Sheet1");
+      const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+      return new File([new Uint8Array(buf)], name, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    };
+    const sheet500001 = () => courierFile("cts-500001-p5.xlsx", [["W500", "ACME TRADING", "5001", "14/10/2026", 1]]);
+
+    async function post(fx: typeof f.a | null, file: File, fields: Record<string, string> = {}) {
+      const { POST } = await import("@/app/api/courier/route");
+      useSession(fx ? adminSession(fx) : null);
+      const form = new FormData();
+      form.append("file", file);
+      for (const [k, v] of Object.entries(fields)) form.append(k, v);
+      const res = await POST(formReq("/api/courier", form));
+      return { status: res.status, body: await res.json() };
+    }
+
+    afterAll(async () => {
+      await db().courierTripSheet.deleteMany({});
+    });
+
+    it("an import is the importer's own; the same sheet number is free in another scope", async () => {
+      const a = await post(f.a, sheet500001(), { action: "import" });
+      const b = await post(f.b, sheet500001(), { action: "import" });
+      expect([a.status, b.status]).toEqual([201, 201]);
+      expect(a.body.id).not.toBe(b.body.id);
+
+      const again = await post(f.a, sheet500001(), { action: "import" });
+      expect(again.status).toBe(409);
+      expect(again.body).toMatchObject({ code: "DUPLICATE", existingId: a.body.id });
+
+      const { GET } = await import("@/app/api/courier/route");
+      useSession(adminSession(f.a));
+      const list = await (await GET(req("/api/courier"))).json();
+      expect(list.sheets.map((s: { id: string }) => s.id)).toEqual([a.body.id]);
+    });
+
+    it("links the customer's contact from the importer's own scope", async () => {
+      const mine = await db().courierTripSheet.findFirstOrThrow({ where: { tenantId: f.a.tenantId, courierSheetNo: "500001" } });
+      const theirs = await db().courierTripSheet.findFirstOrThrow({ where: { tenantId: f.b.tenantId, courierSheetNo: "500001" } });
+      // "ACME TRADING" on the sheet, "Acme Trading" in both scopes' contacts.
+      expect(mine.contactId).toBe(f.a.contact.id);
+      expect(mine.customerEmail).toBe("acme-a@example.test");
+      expect(theirs.contactId).toBe(f.b.contact.id);
+    });
+
+    it("another scope's sheet is 404 to read, change, download or delete", async () => {
+      const theirs = await db().courierTripSheet.findFirstOrThrow({ where: { tenantId: f.b.tenantId } });
+      const route = await import("@/app/api/courier/[id]/route");
+      const original = await import("@/app/api/courier/[id]/original/route");
+      useSession(adminSession(f.a));
+      const p = params({ id: theirs.id });
+
+      expect((await route.GET(req(`/api/courier/${theirs.id}`), p)).status).toBe(404);
+      for (const body of [{ action: "recheck" }, { action: "update", courierCompany: "X" }, { action: "linkContact", contactId: f.a.contact.id }]) {
+        expect((await route.PUT(req(`/api/courier/${theirs.id}`, { method: "PUT", body }), p)).status).toBe(404);
+      }
+      expect((await route.DELETE(req(`/api/courier/${theirs.id}`, { method: "DELETE" }), p)).status).toBe(404);
+      expect((await original.GET(req(`/api/courier/${theirs.id}/original`), p)).status).toBe(404);
+      expect((await original.POST(req(`/api/courier/${theirs.id}/original`, { method: "POST" }), p)).status).toBe(404);
+
+      const after = await db().courierTripSheet.findUniqueOrThrow({ where: { id: theirs.id } });
+      expect(after.courierCompany).toBe(theirs.courierCompany);
+      expect(after.contactId).toBe(f.b.contact.id);
+    });
+
+    it("cannot link another scope's contact", async () => {
+      const mine = await db().courierTripSheet.findFirstOrThrow({ where: { tenantId: f.a.tenantId } });
+      const route = await import("@/app/api/courier/[id]/route");
+      useSession(adminSession(f.a));
+      const res = await route.PUT(
+        req(`/api/courier/${mine.id}`, { method: "PUT", body: { action: "linkContact", contactId: f.b.contact.id } }),
+        params({ id: mine.id })
+      );
+      expect(res.status).toBe(404);
+      expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: mine.id } })).contactId).toBe(f.a.contact.id);
+    });
+
+    it("is blocked by an invoice on a live run only in the scope whose run it is", async () => {
+      const stop = await db().stop.create({
+        data: {
+          tenantId: f.b.tenantId,
+          tripSheetId: f.b.tripSheet.id,
+          stopNumber: 77,
+          invoiceNumber: "IV-7777",
+          invoiceNoNormalized: "7777",
+          customerName: "Acme Trading",
+        },
+      });
+      try {
+        const file = () => courierFile("cts-500002-p5.xlsx", [["W777", "Acme Trading", "7777", "", 1]]);
+        const asA = await post(f.a, file(), { action: "preview" });
+        const asB = await post(f.b, file(), { action: "preview" });
+        const codes = (r: typeof asA) => r.body.preview.issues.map((i: { code: string }) => i.code);
+        expect(codes(asA)).not.toContain("ON_LIVE_RUN");
+        expect(codes(asB)).toContain("ON_LIVE_RUN");
+        expect(JSON.stringify(asA.body)).not.toContain("Jane Delivery");
+      } finally {
+        await db().stop.delete({ where: { id: stop.id } });
+      }
+    });
+
+    it("a DRIVER cannot reach courier sheets", async () => {
+      const { GET } = await import("@/app/api/courier/route");
+      useSession(driverSession(f.a));
+      expect((await GET(req("/api/courier"))).status).toBe(403);
+      const imported = await post(null, sheet500001(), { action: "import" });
+      expect([401, 403]).toContain(imported.status);
+    });
+
+    it("a workspace holding courier sheets asks before it is purged, then takes them with it", async () => {
+      const { POST, DELETE } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+      const created = await (
+        await POST(
+          req("/api/admin/users", {
+            method: "POST",
+            body: { name: "Admin K", email: "admin-k@example.test", username: "office.k", password: "office-k-pass1" },
+          })
+        )
+      ).json();
+      const tenantId: string = created.scope.tenantId;
+      const admin = await db().admin.findUniqueOrThrow({ where: { email: "admin-k@example.test" } });
+      await db().courierTripSheet.create({
+        data: {
+          tenantId,
+          courierSheetNo: "900001",
+          sheetDate: new Date("2026-10-22"),
+          customerName: "Only courier",
+          sourceFileName: "cts-900001.xlsx",
+          importedById: admin.id,
+          invoices: { create: [{ lineNo: 1, invoiceNo: "9001", waybillNo: "W9" }] },
+        },
+      });
+
+      const asked = await DELETE(req("/api/admin/users", { method: "DELETE", body: { id: admin.id } }));
+      expect(asked.status).toBe(409);
+      expect((await asked.json()).counts.courierTripSheets).toBe(1);
+
+      const purged = await DELETE(req("/api/admin/users", { method: "DELETE", body: { id: admin.id, deleteScopeData: true } }));
+      expect(purged.status).toBe(200);
+      expect(await db().courierTripSheet.count({ where: { tenantId } })).toBe(0);
+      expect(await db().courierTripSheetInvoice.count({ where: { tenantId } })).toBe(0);
     });
   });
 

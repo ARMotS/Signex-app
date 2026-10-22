@@ -63,6 +63,8 @@ model Tenant {
   creditNoteCollections CreditNoteCollection[]
   creditNoteAllocations CreditNoteAllocation[]
   importTemplates ImportTemplate[]
+  courierTripSheets CourierTripSheet[]
+  courierTripSheetInvoices CourierTripSheetInvoice[]
 }
 
 model User {
@@ -677,6 +679,7 @@ model Invoice {
 
   collections Collection[]
   creditNotes CreditNote[]
+  courierInvoices CourierTripSheetInvoice[]
 
   @@unique([tenantId, invoiceNoNormalized])
   // Composite-FK target, as Stop's.
@@ -786,6 +789,107 @@ model ImportTemplate {
   @@index([tenantId, sheetType])
 }
 
+// ─── Courier Trip Sheets ──────────────────────────────────────────────────
+//
+// Invoices that leave by courier rather than with one of our drivers. The
+// client's Trip application exports one sheet per customer (Excel, sheet
+// number in the filename: cts-200189-p5.xlsx); the dispatcher has the courier
+// driver sign for every invoice on it at once, and the customer confirms
+// receipt from an emailed link. See lib/courier-import.ts.
+//
+// Never deployed to a DRIVER. Signed copies go to the existing signed-invoice
+// location under the existing names; the only new folder is Courier Trip
+// Sheets/ (beside Trip Sheets/) for the original Excel files.
+
+enum CourierStatus {
+  /// Something blocks the handover — see `issues` (level "block").
+  NEEDS_ATTENTION
+  AWAITING_COLLECTION
+  /// The courier driver signed for the goods.
+  COLLECTED
+  /// The customer confirmed receipt.
+  DELIVERED
+}
+
+model CourierTripSheet {
+  id               String        @id @default(cuid())
+  tenantId         String        @default("")
+  tenant           Tenant        @relation(fields: [tenantId], references: [id])
+  /// From the filename (cts-200189-p5 → 200189). Unique per scope.
+  courierSheetNo   String
+  sheetDate        DateTime      @db.Date
+  /// Not in the client's export; typed at import or at signing.
+  courierCompany   String?
+  courierService   String?
+  courierContact   String?
+  /// One customer per sheet — a sheet naming two is refused at import.
+  customerName     String
+  contactId        String?
+  /// Copied from the contact when linked; null when it has no email.
+  customerEmail    String?
+  /// Consignment total: per waybill, the one value the sheet fills in.
+  parcels          Int?
+  /// Distinct waybills in sheet order — several are allowed (client decision).
+  waybills         String[]      @default([])
+  status           CourierStatus @default(AWAITING_COLLECTION)
+  /// [{ code, level: "block" | "warning", invoiceNo?, message }]. A "block"
+  /// holds the sheet in NEEDS_ATTENTION; a missing email is only a warning
+  /// (client decision: the handover goes ahead, the email waits).
+  issues           Json?
+  checkedAt        DateTime?
+  /// As uploaded.
+  sourceFileName   String
+  /// Where the original was kept: OneDrive item id, and the path for display.
+  sourceFileId     String?
+  sourceFilePath   String?
+  /// The original's bytes, held only until they are stored (for Retry) —
+  /// a few KB, cleared once filed.
+  sourceFileBytes  Bytes?
+  sourceFileError  String?       @db.Text
+  importTemplateId String?
+  mappingSnapshot  Json?
+  importedById     String
+  importedByName   String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  invoices CourierTripSheetInvoice[]
+  // Restrict, as Stop's: the composite FK includes the required tenantId.
+  contact  Contact? @relation(fields: [tenantId, contactId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([tenantId, courierSheetNo])
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
+  @@index([tenantId, sheetDate])
+}
+
+model CourierTripSheetInvoice {
+  id                  String    @id @default(cuid())
+  tenantId            String    @default("")
+  tenant              Tenant    @relation(fields: [tenantId], references: [id])
+  courierSheetId      String
+  /// Order on the sheet.
+  lineNo              Int
+  /// As printed on the sheet; display only.
+  invoiceNo           String
+  invoiceNoNormalized String?
+  invoiceId           String?
+  /// The PDF in the invoice folder, when found.
+  invoiceFile         String?
+  invoiceDate         DateTime? @db.Date
+  waybillNo           String
+  /// As the sheet wrote it on this row; often only on a waybill's first row.
+  parcels             Int?
+  createdAt           DateTime  @default(now())
+
+  courierSheet CourierTripSheet @relation(fields: [tenantId, courierSheetId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  invoice      Invoice?         @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([tenantId, courierSheetId, lineNo])
+  @@index([tenantId, invoiceNoNormalized])
+  @@index([courierSheetId])
+}
+
 // ─── Imported Files (Trip Sheet Cloud Folder Tracking) ────────────────────
 
 model ImportedFile {
@@ -864,6 +968,7 @@ model Contact {
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
   stops         Stop[]
+  courierTripSheets CourierTripSheet[]
 
   // Composite-FK target so a Stop cannot reference a contact in another scope.
   @@unique([tenantId, id])

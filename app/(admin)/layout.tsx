@@ -33,6 +33,19 @@ const navItems = [
     ),
   },
   {
+    label: "Courier",
+    href: "/courier",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 18V6a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h1" />
+        <path d="M14 9h4l3 3.5V17a1 1 0 0 1-1 1h-1" />
+        <path d="M9 18h6" />
+        <circle cx="6.5" cy="18" r="2" />
+        <circle cx="17.5" cy="18" r="2" />
+      </svg>
+    ),
+  },
+  {
     label: "Invoices",
     href: "/invoices",
     icon: (

@@ -238,8 +238,13 @@ describe("decideTemplate", () => {
     expect(decideTemplate("TRIP_SHEET", [ownSaved()], only([["a", "b"], ["1", "2"]]))).toMatchObject({ ok: true, id: null });
   });
 
-  it("needs a template for a sheet type with no built-in layout", () => {
-    expect(decideTemplate("COURIER_TRIP_SHEET", [], only(STANDARD))).toMatchObject({ ok: false, code: "NEEDS_TEMPLATE" });
+  it("reads the client's courier export with the built-in courier layout", () => {
+    const courier: Grid = [["Waybillno", "Customer", "INVOICENO", "Date", "NOP"], ["700209", "Sample customer", "898714", "14/10/2026", "1"]];
+    expect(decideTemplate("COURIER_TRIP_SHEET", [], only(courier))).toMatchObject({
+      ok: true,
+      id: null,
+      name: "Built-in courier trip sheet layout",
+    });
   });
 
   describe("asked for by id", () => {
@@ -268,12 +273,9 @@ describe("decideTemplate", () => {
       expect(!choice.ok && choice.error).toContain('no worksheet called "Run"');
     });
 
-    it("can ask for the built-in layout, where there is one", () => {
+    it("can ask for the built-in layout by name", () => {
       expect(decideTemplate("TRIP_SHEET", [ownSaved()], only(OWN_LAYOUT), BUILT_IN_ID)).toMatchObject({ ok: true, id: null });
-      expect(decideTemplate("COURIER_TRIP_SHEET", [], only(STANDARD), BUILT_IN_ID)).toMatchObject({
-        ok: false,
-        code: "TEMPLATE_NOT_FOUND",
-      });
+      expect(decideTemplate("COURIER_TRIP_SHEET", [], only(STANDARD), BUILT_IN_ID)).toMatchObject({ ok: true, id: null });
     });
   });
 });
