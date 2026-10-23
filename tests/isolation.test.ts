@@ -1186,6 +1186,215 @@ suite("cross-ADMIN isolation", () => {
       });
     });
 
+    // ── Collect & Sign ──
+    //
+    // The courier driver signs at the office and every invoice gets a stamped
+    // copy filed through the caller's own OneDrive. A leak here would put one
+    // company's courier on another company's invoices.
+    describe("collect & sign", () => {
+      const SIGNATURE =
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+      const handover = {
+        dispatcherName: "Office A",
+        courierDriverName: "Sipho K",
+        courierCompany: "The Courier Guy",
+        checked: true,
+        signature: SIGNATURE,
+      };
+      const uploads: { url: string; token: string | null; body: Buffer }[] = [];
+
+      async function sheetFor(fx: typeof f.a, no: string, invoiceNo: string) {
+        return db().courierTripSheet.create({
+          data: {
+            tenantId: fx.tenantId,
+            courierSheetNo: no,
+            sheetDate: new Date("2026-10-22"),
+            customerName: "Acme Trading",
+            contactId: fx.contact.id,
+            sourceFileName: `cts-${no}-p5.xlsx`,
+            importedById: fx.admin.id,
+            status: "AWAITING_COLLECTION",
+            waybills: ["W71"],
+            invoices: {
+              create: [{ lineNo: 1, invoiceNo, invoiceNoNormalized: invoiceNo, waybillNo: "W71", parcels: 2 }],
+            },
+          },
+        });
+      }
+
+      async function invoicePdf() {
+        const { PDFDocument, StandardFonts } = await import("pdf-lib");
+        const doc = await PDFDocument.create();
+        const page = doc.addPage([595, 842]);
+        page.drawText("TAX INVOICE", { x: 60, y: 780, size: 14, font: await doc.embedFont(StandardFonts.Helvetica) });
+        return Buffer.from(await doc.save());
+      }
+
+      /** A's invoice folder holding IV-{no}.pdf, as OneDrive would answer for it. */
+      function fakeInvoiceFolderA(original: (url: any, init: any) => Promise<Response>, pdf: Buffer, files: string[], failUpload = false) {
+        return async (url: any, init: any) => {
+          const u = String(url);
+          const method = init?.method ?? "GET";
+          const auth: string | undefined = init?.headers?.Authorization;
+          const token = auth ? auth.replace("Bearer ", "") : null;
+          graphCalls.push({ url: u, token });
+          const json = (body: unknown, status = 200) =>
+            new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+          if (method === "GET" && u.includes("/items/invoice-folder-A/children")) {
+            return json({
+              value: [
+                ...files.map((name) => ({ id: `item-${name}`, name, size: pdf.length, file: {}, lastModifiedDateTime: "2026-10-22T08:00:00Z" })),
+                { id: "signed-A", name: "signed", size: 0, folder: { childCount: 0 }, lastModifiedDateTime: "2026-10-01T00:00:00Z" },
+              ],
+            });
+          }
+          if (method === "GET" && u.includes("/items/signed-A/children")) return json({ value: [] });
+          if (method === "GET" && files.some((name) => u.includes(`/items/invoice-folder-A:/${name}:/content`))) {
+            return new Response(new Uint8Array(pdf));
+          }
+          if (method === "PUT" && u.includes("/items/signed-A:/")) {
+            if (failUpload) return json({ error: { code: "serviceNotAvailable" } }, 500);
+            uploads.push({ url: u, token, body: Buffer.from(init.body) });
+            return json({ id: `signed-item-${uploads.length}` });
+          }
+          return original(url, init);
+        };
+      }
+
+      async function collect(fx: typeof f.a | null, id: string, body: unknown = handover) {
+        const { POST } = await import("@/app/api/courier/[id]/collect/route");
+        useSession(fx ? adminSession(fx) : driverSession(f.a));
+        const res = await POST(req(`/api/courier/${id}/collect`, { method: "POST", body }), params({ id }));
+        return { status: res.status, body: await res.json() };
+      }
+
+      beforeEach(() => {
+        uploads.length = 0;
+      });
+
+      it("another scope's sheet is 404 to sign or file, and is left as it was", async () => {
+        const theirs = await sheetFor(f.b, "710001", "7101");
+        const { POST: file } = await import("@/app/api/courier/[id]/file/route");
+
+        expect((await collect(f.a, theirs.id)).status).toBe(404);
+        useSession(adminSession(f.a));
+        expect((await file(req(`/api/courier/${theirs.id}/file`, { method: "POST" }), params({ id: theirs.id }))).status).toBe(404);
+
+        const after = await db().courierTripSheet.findUniqueOrThrow({ where: { id: theirs.id } });
+        expect(after.status).toBe("AWAITING_COLLECTION");
+        expect(after.courierDriverName).toBeNull();
+        expect(after.driverSignature).toBeNull();
+      });
+
+      it("a DRIVER cannot sign for a courier sheet", async () => {
+        const mine = await sheetFor(f.a, "710002", "7102");
+        expect((await collect(null, mine.id)).status).toBe(403);
+        expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: mine.id } })).status).toBe("AWAITING_COLLECTION");
+      });
+
+      it("refuses a sheet whose invoice cannot be found, re-checked at signing", async () => {
+        // AWAITING_COLLECTION when imported, but the PDF is not in the folder now.
+        const mine = await sheetFor(f.a, "710003", "7103");
+        const res = await collect(f.a, mine.id);
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe("NEEDS_ATTENTION");
+        const after = await db().courierTripSheet.findUniqueOrThrow({ where: { id: mine.id } });
+        expect(after.status).toBe("NEEDS_ATTENTION");
+        expect(after.collectedAt).toBeNull();
+      });
+
+      it("refuses an incomplete form before touching the sheet", async () => {
+        const mine = await sheetFor(f.a, "710004", "7104");
+        const res = await collect(f.a, mine.id, { ...handover, checked: false, signature: "" });
+        expect(res.status).toBe(400);
+        expect(res.body.errors).toContain("The courier driver needs to sign.");
+        expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: mine.id } })).status).toBe("AWAITING_COLLECTION");
+      });
+
+      it("records the handover and files a stamped copy through the caller's own connection, once", async () => {
+        const mine = await sheetFor(f.a, "710005", "7105");
+        const pdf = await invoicePdf();
+        const fetchMock = vi.mocked(fetch);
+        const original = fetchMock.getMockImplementation()!;
+        fetchMock.mockImplementation(fakeInvoiceFolderA(original, pdf, ["IV-7105.pdf"]));
+        try {
+          const res = await collect(f.a, mine.id);
+          expect(res.status).toBe(200);
+          expect(res.body.filing).toEqual({ filed: 1, failed: [], complete: true });
+          expect(res.body.sheet.status).toBe("COLLECTED");
+          // The image never goes back to the browser.
+          expect(res.body.sheet.driverSignature).toBeUndefined();
+          expect(JSON.stringify(res.body)).not.toContain(SIGNATURE.slice(30));
+
+          const again = await collect(f.a, mine.id);
+          expect(again.status).toBe(409);
+          expect(again.body.code).toBe("ALREADY_COLLECTED");
+        } finally {
+          fetchMock.mockImplementation(original);
+        }
+
+        // One upload, into A's signed folder under the invoice's own name, A's token only.
+        expect(uploads.map((u) => u.url.replace(/^.*\/items\//, ""))).toEqual(["signed-A:/IV-7105.pdf:/content"]);
+        expect([...new Set(graphCalls.map((c) => c.token).filter(Boolean))]).toEqual(["access-token-A"]);
+        const { extractPageItems } = await import("@/lib/invoice-header");
+        const stamped = (await extractPageItems(uploads[0].body)).flat().map((i) => i.str).join(" ");
+        expect(stamped).toContain("Collected by Sipho K from The Courier Guy");
+        expect(stamped).toContain("Courier trip sheet 710005");
+
+        const after = await db().courierTripSheet.findUniqueOrThrow({ where: { id: mine.id }, include: { invoices: true } });
+        expect(after).toMatchObject({
+          status: "COLLECTED",
+          courierDriverName: "Sipho K",
+          courierCompany: "The Courier Guy",
+          dispatcherName: "Office A",
+          dispatcherUserId: f.a.admin.id,
+          filingError: null,
+          // Filed: the stamped PDFs are the record, the image is not kept.
+          driverSignature: null,
+        });
+        expect(after.collectedAt).not.toBeNull();
+        expect(after.filingCompletedAt).not.toBeNull();
+        expect(after.invoices[0]).toMatchObject({ signedFileName: "IV-7105.pdf", signedFileId: "signed-item-1" });
+
+        // B's sheet with the same invoice number is untouched.
+        expect(await db().courierTripSheet.count({ where: { tenantId: f.b.tenantId, status: "COLLECTED" } })).toBe(0);
+      });
+
+      it("keeps the handover when filing fails, and Retry filing finishes it", async () => {
+        const mine = await sheetFor(f.a, "710006", "7106");
+        const pdf = await invoicePdf();
+        const fetchMock = vi.mocked(fetch);
+        const original = fetchMock.getMockImplementation()!;
+        fetchMock.mockImplementation(fakeInvoiceFolderA(original, pdf, ["IV-7106.pdf"], true));
+        try {
+          const res = await collect(f.a, mine.id);
+          expect(res.status).toBe(200);
+          expect(res.body.filing.complete).toBe(false);
+          const failed = await db().courierTripSheet.findUniqueOrThrow({ where: { id: mine.id } });
+          expect(failed.status).toBe("COLLECTED");
+          expect(failed.filingError).toContain("Invoice 7106");
+          expect(failed.driverSignature).toBe(SIGNATURE);
+          expect(failed.filingCompletedAt).toBeNull();
+
+          // Another scope cannot retry it.
+          const { POST: file } = await import("@/app/api/courier/[id]/file/route");
+          useSession(adminSession(f.b));
+          expect((await file(req(`/api/courier/${mine.id}/file`, { method: "POST" }), params({ id: mine.id }))).status).toBe(404);
+
+          fetchMock.mockImplementation(fakeInvoiceFolderA(original, pdf, ["IV-7106.pdf"]));
+          useSession(adminSession(f.a));
+          const retried = await file(req(`/api/courier/${mine.id}/file`, { method: "POST" }), params({ id: mine.id }));
+          expect((await retried.json()).filing).toEqual({ filed: 1, failed: [], complete: true });
+        } finally {
+          fetchMock.mockImplementation(original);
+        }
+        const done = await db().courierTripSheet.findUniqueOrThrow({ where: { id: mine.id } });
+        expect(done).toMatchObject({ filingError: null, driverSignature: null });
+        expect(done.filingCompletedAt).not.toBeNull();
+        expect(uploads).toHaveLength(1);
+      });
+    });
+
     it("a workspace holding courier sheets asks before it is purged, then takes them with it", async () => {
       const { POST, DELETE } = await import("@/app/api/admin/users/route");
       useSession(superAdminSession(f));

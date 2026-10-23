@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { queryAuditLogs } from "@/lib/audit";
+import { readDispatchCompany } from "@/lib/config";
 import {
   CourierError,
   deleteCourierSheet,
@@ -33,10 +34,16 @@ export const GET = withAuth(async (_request: NextRequest, { params }: Ctx) => {
 
   const sheet = await getCourierSheet(ctx.tenantId, id);
   if (!sheet) return NextResponse.json({ error: "Courier trip sheet not found" }, { status: 404 });
-  const { logs } = await queryAuditLogs(ctx.tenantId, { entity: "courier_sheet", entityId: id, limit: 100 });
+  const [{ logs }, dispatchCompany] = await Promise.all([
+    queryAuditLogs(ctx.tenantId, { entity: "courier_sheet", entityId: id, limit: 100 }),
+    readDispatchCompany(ctx.tenantId),
+  ]);
   return NextResponse.json({
     sheet,
     audit: logs.map((l) => ({ action: l.action, userName: l.userName, details: l.details, createdAt: l.createdAt })),
+    // What Collect & Sign is prefilled with: the dispatcher is whoever is
+    // signed in (editable), the company is the branch's (not editable).
+    signer: { dispatcherName: ctx.name ?? "", dispatchCompany },
   });
 });
 

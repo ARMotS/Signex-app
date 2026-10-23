@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import CourierStatusBadge, { formatSheetDate, type CourierStatus } from "@/components/admin/courier/CourierStatusBadge";
+import CollectAndSign from "@/components/admin/courier/CollectAndSign";
 
 interface Issue {
   code: string;
@@ -39,6 +40,13 @@ interface Sheet {
   originalSaved: boolean;
   readWith: string;
   importedByName: string | null;
+  dispatcherName: string | null;
+  dispatchCompany: string | null;
+  courierDriverName: string | null;
+  collectedAt: string | null;
+  filingCompletedAt: string | null;
+  filingError: string | null;
+  signatureHeld: boolean;
   createdAt: string;
   contact: { id: string; companyName: string; email: string | null; contactPerson: string | null; phone: string | null } | null;
   invoices: {
@@ -49,6 +57,8 @@ interface Sheet {
     invoiceDate: string | null;
     waybillNo: string;
     parcels: number | null;
+    signedAt: string | null;
+    signedFileName: string | null;
   }[];
 }
 
@@ -82,6 +92,8 @@ export default function CourierSheetPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [signer, setSigner] = useState({ dispatcherName: "", dispatchCompany: "" });
+  const [collecting, setCollecting] = useState(false);
 
   const load = useCallback(
     () =>
@@ -95,6 +107,7 @@ export default function CourierSheetPage() {
           if (!res.ok) throw new Error(data.error);
           setSheet(data.sheet);
           setAudit(data.audit);
+          if (data.signer) setSigner(data.signer);
         })
         .catch(() => setMessage({ ok: false, text: "Could not load the sheet" }))
         .finally(() => setLoading(false)),
@@ -138,6 +151,22 @@ export default function CourierSheetPage() {
     setBusy(null);
     if (res.ok) router.push("/courier");
     else setMessage({ ok: false, text: (await res.json()).error || "Could not delete the sheet" });
+  };
+
+  /** "Retry filing": stamp and file the signed copies not filed yet. */
+  const retryFiling = async () => {
+    setBusy("filing");
+    setMessage(null);
+    const res = await fetch(`/api/courier/${id}/file`, { method: "POST" }).catch(() => null);
+    const data = res ? await res.json().catch(() => ({})) : {};
+    setBusy(null);
+    const failed = (data.filing?.failed ?? []) as unknown[];
+    setMessage(
+      res?.ok && failed.length === 0
+        ? { ok: true, text: "Every signed copy is filed" }
+        : { ok: false, text: data.error || `${failed.length} signed cop${failed.length === 1 ? "y is" : "ies are"} still not filed` }
+    );
+    void load();
   };
 
   const retryOriginal = async () => {
@@ -191,14 +220,17 @@ export default function CourierSheetPage() {
               {busy === "recheck" ? "Checking…" : "Re-check"}
             </button>
           )}
-          <button
-            type="button"
-            className="act act-primary"
-            disabled
-            title={blocks.length ? "Fix what is listed below first" : "Collect & sign arrives in the next update"}
-          >
-            Collect &amp; sign
-          </button>
+          {open && (
+            <button
+              type="button"
+              className="act act-primary"
+              disabled={sheet.status !== "AWAITING_COLLECTION" || busy !== null}
+              title={sheet.status === "AWAITING_COLLECTION" ? undefined : "Fix what is listed below first"}
+              onClick={() => setCollecting(true)}
+            >
+              Collect &amp; sign
+            </button>
+          )}
           {open && (
             <button type="button" className="act act-danger" disabled={busy !== null} onClick={() => setConfirmDelete(true)}>
               Delete
@@ -211,6 +243,44 @@ export default function CourierSheetPage() {
         <p className={`text-sm font-mono ${message.ok ? "text-ink-green" : "text-ink-red"}`}>
           {message.ok ? "✓" : "✕"} {message.text}
         </p>
+      )}
+
+      {/* The handover, once the courier has signed */}
+      {sheet.collectedAt && (
+        <section className="bg-ink-card border border-ink-border rounded overflow-hidden">
+          <h2 className="px-5 py-3 border-b border-ink-border font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
+            Handover
+          </h2>
+          <div className="px-5 py-4 space-y-2 text-sm">
+            <p className="text-ink-black">
+              Collected by <strong>{sheet.courierDriverName}</strong> from {sheet.courierCompany} on {fmtTime(sheet.collectedAt)}
+            </p>
+            <p className="text-ink-muted">
+              Dispatched by {sheet.dispatcherName} from {sheet.dispatchCompany}
+            </p>
+            {(() => {
+              const filed = sheet.invoices.filter((l) => l.signedAt).length;
+              return sheet.filingCompletedAt ? (
+                <p className="text-ink-green">
+                  ✓ {filed === 1 ? "Signed copy filed" : `Signed copies filed for all ${filed} invoices`}
+                </p>
+              ) : (
+                <div className="px-3 py-2 rounded bg-ink-red-dim border border-ink-red/20 space-y-2">
+                  <p className="text-ink-red">
+                    {filed} of {sheet.invoices.length} signed copies filed.{" "}
+                    {sheet.filingError ?? "The rest have not been filed yet."}
+                  </p>
+                  <p className="text-xs text-ink-muted">
+                    The handover is recorded either way. The customer&apos;s email waits until every copy is filed.
+                  </p>
+                  <button type="button" className="act act-amber" disabled={busy !== null || !sheet.signatureHeld} onClick={retryFiling}>
+                    {busy === "filing" ? "Filing…" : "Retry filing"}
+                  </button>
+                </div>
+              );
+            })()}
+          </div>
+        </section>
       )}
 
       {/* What stands in the way */}
@@ -300,7 +370,16 @@ export default function CourierSheetPage() {
                   <td className="px-5 py-2.5 font-mono text-ink-muted">{l.waybillNo}</td>
                   <td className="px-5 py-2.5 text-right">{l.parcels ?? ""}</td>
                   <td className="px-5 py-2.5">
-                    {l.invoiceFile ? (
+                    {l.signedAt && l.signedFileName ? (
+                      <a
+                        href={`/api/invoices/${encodeURIComponent(l.signedFileName)}?signed=true`}
+                        target="_blank"
+                        rel="noopener"
+                        className="text-ink-green underline-offset-2 hover:underline"
+                      >
+                        Signed copy
+                      </a>
+                    ) : l.invoiceFile ? (
                       <a
                         href={`/api/invoices/${encodeURIComponent(l.invoiceFile)}`}
                         target="_blank"
@@ -390,6 +469,19 @@ export default function CourierSheetPage() {
           </ul>
         </section>
       </div>
+
+      {collecting && (
+        <CollectAndSign
+          sheet={sheet}
+          signer={signer}
+          onClose={() => setCollecting(false)}
+          onDone={({ filingProblem }) => {
+            setCollecting(false);
+            setMessage(filingProblem ? { ok: false, text: filingProblem } : { ok: true, text: "Handover recorded — signed copies filed" });
+            void load();
+          }}
+        />
+      )}
 
       {confirmDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={() => busy === null && setConfirmDelete(false)}>

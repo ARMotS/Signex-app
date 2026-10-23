@@ -713,6 +713,13 @@ export async function getCourierSheet(tenantId: string, id: string) {
       importTemplateId: true,
       mappingSnapshot: true,
       importedByName: true,
+      dispatcherName: true,
+      dispatchCompany: true,
+      courierDriverName: true,
+      collectedAt: true,
+      filingCompletedAt: true,
+      filingError: true,
+      driverSignature: true,
       createdAt: true,
       updatedAt: true,
       contact: { select: { id: true, companyName: true, email: true, contactPerson: true, phone: true } },
@@ -727,6 +734,8 @@ export async function getCourierSheet(tenantId: string, id: string) {
           waybillNo: true,
           parcels: true,
           invoiceId: true,
+          signedAt: true,
+          signedFileName: true,
         },
       },
     },
@@ -742,6 +751,9 @@ export async function getCourierSheet(tenantId: string, id: string) {
     originalSaved: !!row.sourceFilePath,
     readWith: snapshot?.name ?? "Built-in courier trip sheet layout",
     mappingSnapshot: undefined,
+    // The image is not sent to the browser; whether it is still held is enough.
+    driverSignature: undefined,
+    signatureHeld: !!row.driverSignature,
     invoices: row.invoices.map((i) => ({ ...i, invoiceDate: i.invoiceDate?.toISOString().slice(0, 10) ?? null })),
   };
 }

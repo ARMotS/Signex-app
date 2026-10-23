@@ -1355,12 +1355,13 @@ export async function ensureSubfolder(
 
 /**
  * Upload a signed invoice to this scope's invoice folder "signed" subfolder.
+ * Returns the uploaded item's id (null if Graph did not say).
  */
 export async function uploadSignedInvoiceToOneDrive(
   tenantId: string,
   filename: string,
   buffer: Buffer
-): Promise<void> {
+): Promise<string | null> {
   const account = await getAccount(tenantId);
 
   if (!account?.invoiceFolderItemId) {
@@ -1393,6 +1394,8 @@ export async function uploadSignedInvoiceToOneDrive(
     const err = await res.text();
     throw new Error(`Graph API upload error (${res.status}): ${err}`);
   }
+  const item = await res.json().catch(() => null);
+  return item?.id ?? null;
 }
 
 /**
