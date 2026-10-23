@@ -211,12 +211,22 @@ export async function saveSignedInvoice(
   pdfBuffer: Buffer,
   saveToSubfolder: boolean = true
 ): Promise<string> {
+  return (await saveSignedInvoiceDetailed(tenantId, filename, pdfBuffer, saveToSubfolder)).path;
+}
+
+/** saveSignedInvoice, also returning the OneDrive item id (null on a local folder). */
+export async function saveSignedInvoiceDetailed(
+  tenantId: string,
+  filename: string,
+  pdfBuffer: Buffer,
+  saveToSubfolder: boolean = true
+): Promise<{ path: string; itemId: string | null }> {
   // Upload to OneDrive if invoice folder is configured there
   const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
     try {
-      await uploadSignedInvoiceToOneDrive(tenantId, filename, pdfBuffer);
-      return `onedrive://signed/${filename}`;
+      const itemId = await uploadSignedInvoiceToOneDrive(tenantId, filename, pdfBuffer);
+      return { path: `onedrive://signed/${filename}`, itemId };
     } catch (err) {
       console.error("Failed to upload signed invoice to OneDrive:", err);
       throw err;
@@ -245,7 +255,7 @@ export async function saveSignedInvoice(
   }
 
   fs.writeFileSync(resolved, pdfBuffer);
-  return resolved;
+  return { path: resolved, itemId: null };
 }
 
 /**

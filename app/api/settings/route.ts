@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readConfig, writeConfig, validateFolderPath, parseVatRatePercent, parseAlertDays } from "@/lib/config";
 import { assertCollectionsFolderIsSibling } from "@/lib/collections";
 import { compileInvoiceNoPattern, type InvoiceNoPattern } from "@/lib/invoice-number";
+import { readStampArea } from "@/lib/courier-stamp-text";
 import { renormalizeInvoiceNumbers } from "@/lib/trip-data";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
@@ -102,6 +103,18 @@ export const PUT = withAuth(async (request: NextRequest) => {
       return NextResponse.json({ error: "Enter a number of days between 1 and 365." }, { status: 400 });
     }
     body.uncreditedAlertDays = raw ? String(parseAlertDays(raw)) : "";
+  }
+
+  // Where the courier handover is stamped: on the page, and big enough.
+  if (body.courierStampArea !== undefined) {
+    const area = readStampArea(body.courierStampArea);
+    if (!area) {
+      return NextResponse.json(
+        { error: "The stamp area must sit on the page and be at least 40% wide and 12% high." },
+        { status: 400 }
+      );
+    }
+    body.courierStampArea = area;
   }
 
   // The invoice-number pattern runs server-side on every import, so it is

@@ -5,6 +5,8 @@ import InvoiceNumberSettings from "@/components/admin/InvoiceNumberSettings";
 import CollectionDeclarationSettings from "@/components/admin/CollectionDeclarationSettings";
 import CreditNoteSettings from "@/components/admin/CreditNoteSettings";
 import ImportTemplatesSettings from "@/components/admin/import-mapping/ImportTemplatesSettings";
+import CourierStampSettings from "@/components/admin/CourierStampSettings";
+import { DEFAULT_STAMP_AREA, type StampArea } from "@/lib/courier-stamp-text";
 
 interface OneDriveAccount {
   connected: boolean;
@@ -84,6 +86,7 @@ interface Settings {
   collectionDeclarationText: string;
   vatRatePercent: string;
   uncreditedAlertDays: string;
+  courierStampArea?: StampArea;
 }
 
 /** The three folders an ADMIN configures. Collections is a SIBLING of invoices. */
@@ -1410,6 +1413,12 @@ export default function SettingsPage() {
 
       {/* ─── Import Templates: reading each customer's own sheet layout ─ */}
       <ImportTemplatesSettings />
+
+      {/* ─── Courier handover stamp on each invoice ───────────────────── */}
+      <CourierStampSettings
+        savedArea={settings.courierStampArea ?? DEFAULT_STAMP_AREA}
+        onSaved={(courierStampArea) => setSettings((prev) => ({ ...prev, courierStampArea }))}
+      />
 
       {/* ─── Invoice Numbers ───────────────────────────────────────── */}
       <InvoiceNumberSettings

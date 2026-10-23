@@ -860,6 +860,23 @@ model CourierTripSheet {
   mappingSnapshot  Json?
   importedById     String
   importedByName   String?
+  // ── The handover (lib/courier-collect.ts) ──
+  /// Typed at signing (prefilled with the office login's name).
+  dispatcherName   String?
+  /// The office login that recorded the handover — the authority.
+  dispatcherUserId String?
+  /// The branch it left from, set by the server, never typed.
+  dispatchCompany  String?
+  courierDriverName String?
+  /// PNG data URL, as Stop.signatureData. Cleared once every signed copy is
+  /// filed — the stamped PDFs are then the record.
+  driverSignature  String?       @db.Text
+  /// When the courier signed, captured by the server. Set with status COLLECTED.
+  collectedAt      DateTime?
+  /// Every invoice's signed copy is filed. Null while filing is unfinished
+  /// (filingError says why) — the confirmation email waits for this.
+  filingCompletedAt DateTime?
+  filingError      String?       @db.Text
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
@@ -890,6 +907,12 @@ model CourierTripSheetInvoice {
   waybillNo           String
   /// As the sheet wrote it on this row; often only on a waybill's first row.
   parcels             Int?
+  /// The stamped copy in the existing signed-invoice location, under the
+  /// existing name (the invoice's own filename). Set when it is filed.
+  signedAt            DateTime?
+  signedFileName      String?
+  signedFileId        String?
+  signedFilePath      String?
   createdAt           DateTime  @default(now())
 
   courierSheet CourierTripSheet @relation(fields: [tenantId, courierSheetId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)

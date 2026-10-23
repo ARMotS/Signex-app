@@ -15,6 +15,7 @@ import { logAudit } from "./audit";
 import { detectCloudProvider, type CloudProvider } from "./cloud-detect";
 import { compileInvoiceNoPattern, type InvoiceNoPattern } from "./invoice-number";
 import { collectionDeclaration } from "./collection-confirm";
+import { DEFAULT_STAMP_AREA, readStampArea, type StampArea } from "./courier-stamp-text";
 
 export interface SignaturePosition {
   xPercent: number;      // 0-100, left edge of signature box as % of page width
@@ -67,6 +68,11 @@ export interface SignexConfig {
    * the Exceptions screen lists it. Empty means DEFAULT_UNCREDITED_ALERT_DAYS.
    */
   uncreditedAlertDays: string;
+  /**
+   * Where the courier handover is stamped on an invoice's last page
+   * (percent of the page, from the bottom-left). See lib/courier-stamp.ts.
+   */
+  courierStampArea: StampArea;
 }
 
 export const DEFAULT_UNCREDITED_ALERT_DAYS = 7;
@@ -85,6 +91,7 @@ const DEFAULT_CONFIG: SignexConfig = {
   collectionDeclarationText: "",
   vatRatePercent: "",
   uncreditedAlertDays: "",
+  courierStampArea: DEFAULT_STAMP_AREA,
 };
 
 /**
@@ -115,6 +122,9 @@ export async function readConfig(tenantId: string): Promise<SignexConfig> {
         config.vatRatePercent = row.value;
       } else if (row.key === "uncreditedAlertDays") {
         config.uncreditedAlertDays = row.value;
+      } else if (row.key === "courierStampArea") {
+        // A stored area that no longer validates falls back to the default.
+        config.courierStampArea = readStampArea(row.value) ?? DEFAULT_STAMP_AREA;
       } else if (row.key === "signaturePosition") {
         try {
           config.signaturePosition = JSON.parse(row.value);
@@ -205,6 +215,19 @@ export async function readCollectionDeclaration(tenantId: string): Promise<strin
   ]);
   const company = process.env.COMPANY_NAME || tenant?.companyName || tenant?.name || "";
   return collectionDeclaration(config.collectionDeclarationText, company);
+}
+
+/**
+ * The branch a courier handover is dispatched from, as the stamp names it:
+ * this scope's company name, then its name, then the installation's. Set by
+ * the server at signing — the dispatcher cannot type a different one.
+ */
+export async function readDispatchCompany(tenantId: string): Promise<string> {
+  const tenant = await scopedPrisma(tenantId).tenant.findUnique({
+    where: { id: tenantId },
+    select: { name: true, companyName: true },
+  });
+  return tenant?.companyName || tenant?.name || process.env.COMPANY_NAME || "";
 }
 
 /** "15" → 15. Blank or out of range is the default. */
