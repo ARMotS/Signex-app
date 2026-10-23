@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { scheduleWaitingCourierEmails } from "@/lib/courier-confirm";
 
 // ─── PATCH ────────────────────────────────────────────────────────────────────
 
@@ -53,6 +54,10 @@ export const PATCH = withAuth(async (
     where: { id },
     data,
   });
+
+  // A courier delivery may be waiting on an address for its confirmation
+  // email. Best-effort, after the response: the contact is saved either way.
+  if (contact.email) await scheduleWaitingCourierEmails(ctx.tenantId).catch((err) => console.error("[contacts] Courier emails:", err));
 
   return NextResponse.json(contact);
 });

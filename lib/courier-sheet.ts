@@ -331,3 +331,43 @@ export function blocksHandover(issues: CourierIssue[]): boolean {
 export function todayInJohannesburg(now = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Johannesburg" }).format(now);
 }
+
+// ─── After the handover ───────────────────────────────────────────────────
+
+/**
+ * Where a collected sheet stands with its customer, for the list, the
+ * dashboard and the nav badge (null while the sheet is still open):
+ * - filing: signed copies not all filed yet — the email waits for them
+ * - email_problem: no address on file, or the email failed
+ * - sending: the email is due or going out now
+ * - awaiting: sent, not confirmed yet
+ * - reminded: the one reminder went, not confirmed yet
+ * - no_answer: two days after the reminder and still nothing — phone them
+ * - confirmed: the customer confirmed the parcels arrived
+ */
+export type ConfirmationState = "filing" | "email_problem" | "sending" | "awaiting" | "reminded" | "no_answer" | "confirmed";
+
+/** How long after the reminder the office is asked to follow up by phone. */
+export const NO_ANSWER_AFTER_MS = 2 * 24 * 60 * 60 * 1000;
+
+export function confirmationState(
+  r: {
+    status: string;
+    filingCompletedAt: Date | string | null;
+    emailStatus: string;
+    reminderSentAt: Date | string | null;
+    confirmedAt: Date | string | null;
+  },
+  now = new Date()
+): ConfirmationState | null {
+  if (r.status === "DELIVERED" || r.confirmedAt) return "confirmed";
+  if (r.status !== "COLLECTED") return null;
+  if (!r.filingCompletedAt) return "filing";
+  if (r.emailStatus === "FAILED" || r.emailStatus === "NO_EMAIL") return "email_problem";
+  if (r.emailStatus !== "SENT") return "sending";
+  if (!r.reminderSentAt) return "awaiting";
+  return now.getTime() - new Date(r.reminderSentAt).getTime() >= NO_ANSWER_AFTER_MS ? "no_answer" : "reminded";
+}
+
+/** The states the office has to act on — what the nav badge counts. */
+export const NEEDS_OFFICE: ConfirmationState[] = ["filing", "email_problem", "no_answer"];

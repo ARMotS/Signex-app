@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { relinkUnmatchedStops, type RelinkSummary } from "@/lib/contact-matcher";
+import { scheduleWaitingCourierEmails } from "@/lib/courier-confirm";
 
 // ─── GET ──────────────────────────────────────────────────────────────────────
 
@@ -105,6 +106,10 @@ export const POST = withAuth(async (request: NextRequest) => {
   } catch (err) {
     console.error("[contacts] Could not re-link stops after adding a contact:", err);
   }
+
+  // A courier delivery may be waiting on an address for its confirmation
+  // email. Best-effort, after the response: the contact is saved either way.
+  if (contact.email) await scheduleWaitingCourierEmails(ctx.tenantId).catch((err) => console.error("[contacts] Courier emails:", err));
 
   return NextResponse.json({ ...contact, relinked }, { status: 201 });
 });

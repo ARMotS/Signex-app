@@ -3,6 +3,7 @@ import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { queryAuditLogs } from "@/lib/audit";
 import { readDispatchCompany } from "@/lib/config";
+import { scheduleCourierConfirmation } from "@/lib/courier-confirm";
 import {
   CourierError,
   deleteCourierSheet,
@@ -48,7 +49,8 @@ export const GET = withAuth(async (_request: NextRequest, { params }: Ctx) => {
 });
 
 /**
- * The office's actions on a sheet the courier has not signed for yet:
+ * The office's actions on a sheet the courier has not signed for yet
+ * (linkContact also after, for the confirmation email):
  *   { action: "recheck" }
  *   { action: "linkContact", contactId }
  *   { action: "update", courierCompany?, courierService?, courierContact? }
@@ -69,7 +71,11 @@ export const PUT = withAuth(async (request: NextRequest, { params }: Ctx) => {
         break;
       case "linkContact":
         if (typeof body.contactId !== "string") throw new CourierError("BAD_REQUEST", "Choose a contact.", 400);
-        await linkCourierContact(ctx.tenantId, id, body.contactId, who);
+        // After the handover the contact is where the email goes: send it
+        // now if it was waiting for an address (a no-op otherwise).
+        if ((await linkCourierContact(ctx.tenantId, id, body.contactId, who)).status === "COLLECTED") {
+          await scheduleCourierConfirmation(ctx.tenantId, id);
+        }
         break;
       case "update":
         await updateCourierFields(ctx.tenantId, id, body, who);

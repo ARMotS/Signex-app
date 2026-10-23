@@ -2,7 +2,9 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useLiveSync } from "@/hooks/useLiveSync";
+import Link from "next/link";
 import { DocChip } from "@/components/ui/Chips";
+import type { CourierOverview } from "@/lib/courier-confirm";
 
 interface TripStop {
   id: string;
@@ -100,6 +102,8 @@ interface DashboardData {
     untriedWindowDays: number;
     queue: EmailQueueItem[];
   };
+  /** Absent from a server older than the courier confirmation. */
+  courier?: CourierOverview;
   drivers: DriverProgress[];
   tripSheets: TripSheet[];
   completedToday: CompletedSheet[];
@@ -653,6 +657,8 @@ export default function DashboardPage() {
                   </div>
                 </div>
               )}
+
+              {data.courier && <CourierCard courier={data.courier} />}
 
               {/* Closed out today */}
               {data.completedToday.length > 0 && (
@@ -1248,6 +1254,67 @@ function shiftBack(iso: string) {
 
 function pctOf(part: number, whole: number) {
   return whole > 0 ? Math.round((part / whole) * 100) : 0;
+}
+
+const COURIER_ITEM: Record<CourierOverview["items"][number]["state"], string> = {
+  needs_attention: "Fix before the courier signs",
+  filing: "Signed copies not filed",
+  email_problem: "Customer email not sent",
+  no_answer: "No answer after the reminder — phone them",
+  sending: "Emailing the customer",
+  awaiting: "Awaiting confirmation",
+  reminded: "Reminder sent",
+  confirmed: "Confirmed",
+};
+
+/** Courier sheets: what waits on the courier, the customer, or the office. */
+function CourierCard({ courier }: { courier: CourierOverview }) {
+  const total = courier.needsAttention + courier.awaitingCollection + courier.awaitingConfirmation + courier.confirmedToday;
+  if (total === 0) return null;
+  const figures: [string, number, string][] = [
+    ["Needs attention", courier.needsAttention, courier.needsAttention ? "text-ink-red" : "text-ink-black"],
+    ["Awaiting collection", courier.awaitingCollection, "text-ink-black"],
+    ["Awaiting confirmation", courier.awaitingConfirmation, "text-ink-black"],
+    ["Confirmed today", courier.confirmedToday, "text-ink-green"],
+  ];
+  return (
+    <div className="bg-ink-card border border-ink-border rounded xl:col-span-2">
+      <div className="px-5 py-4 border-b border-ink-border flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="font-mono text-sm font-medium text-ink-black uppercase tracking-wide">Courier</h2>
+          {courier.attention > 0 && (
+            <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-mono rounded-full bg-ink-amber-dim" style={{ color: "var(--tone-amber-fg)" }}>
+              {courier.attention} need you
+            </span>
+          )}
+        </div>
+        <Link href="/courier" className="text-xs font-mono text-ink-muted hover:text-ink-black transition-colors">
+          Open courier →
+        </Link>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-px bg-ink-border">
+        {figures.map(([label, value, tone]) => (
+          <div key={label} className="bg-ink-card px-5 py-3">
+            <p className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">{label}</p>
+            <p className={`text-xl font-mono font-medium ${tone}`}>{value}</p>
+          </div>
+        ))}
+      </div>
+      {courier.items.length > 0 && (
+        <div className="divide-y divide-ink-border border-t border-ink-border">
+          {courier.items.map((item) => (
+            <Link key={item.id} href={`/courier/${item.id}`} className="flex items-center gap-3 px-5 py-3 hover:bg-ink-surface/60">
+              <span className="font-mono text-sm text-ink-black">{item.courierSheetNo}</span>
+              <span className="flex-1 min-w-0 text-sm text-ink-muted truncate">{item.customerName}</span>
+              <span className={`text-xs ${item.state === "needs_attention" || item.state === "no_answer" || item.state === "filing" ? "text-ink-red" : ""}`} style={item.state === "email_problem" ? { color: "var(--tone-amber-fg)" } : undefined}>
+                {COURIER_ITEM[item.state]}
+              </span>
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function EmptyRow({ title, hint }: { title: string; hint: string }) {

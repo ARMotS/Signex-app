@@ -877,6 +877,26 @@ model CourierTripSheet {
   /// (filingError says why) — the confirmation email waits for this.
   filingCompletedAt DateTime?
   filingError      String?       @db.Text
+  // ── The customer's confirmation (lib/courier-confirm.ts) ──
+  /// Same lease semantics as Stop.emailStatus. NO_EMAIL waits for a contact
+  /// email; the daily job and the office's Send pick it up.
+  emailStatus        EmailStatus @default(NOT_SENT)
+  emailAttempts      Int         @default(0)
+  emailLastAttemptAt DateTime?
+  emailSentAt        DateTime?
+  emailRecipient     String?
+  emailError         String?     @db.Text
+  /// SHA-256 of the link's token — what a visit is looked up by. Globally
+  /// unique: the link carries no scope, the row it finds does.
+  confirmTokenHash   String?     @unique
+  /// The same token encrypted (lib/crypto.ts), so the reminder can carry the
+  /// same link. Useless without TOKEN_ENCRYPTION_KEY, which is not in the DB.
+  confirmTokenEnc    String?     @db.Text
+  confirmTokenExpiresAt DateTime?
+  /// The one reminder. Set when claimed; cleared again if the send fails.
+  reminderSentAt     DateTime?
+  /// The customer pressed Confirm received. Set with status DELIVERED.
+  confirmedAt        DateTime?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 

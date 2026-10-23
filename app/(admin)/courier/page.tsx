@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import type { ConfirmationState } from "@/lib/courier-sheet";
 import CourierUpload from "@/components/admin/courier/CourierUpload";
 import CourierInbox, { type InboxState } from "@/components/admin/courier/CourierInbox";
 import CourierStatusBadge, {
@@ -33,7 +34,19 @@ interface SheetSummary {
   blockCount: number;
   warningCount: number;
   hasEmail: boolean;
+  confirmation: ConfirmationState | null;
 }
+
+/** After the handover, what the office reads beside the status. */
+const CONFIRMATION_NOTE: Record<ConfirmationState, { text: string; tone: "muted" | "amber" | "red" } | null> = {
+  filing: { text: "Copies not filed", tone: "red" },
+  email_problem: { text: "Email not sent", tone: "amber" },
+  sending: { text: "Emailing customer", tone: "muted" },
+  awaiting: { text: "Awaiting confirmation", tone: "muted" },
+  reminded: { text: "Reminder sent", tone: "muted" },
+  no_answer: { text: "No answer — phone them", tone: "red" },
+  confirmed: null,
+};
 
 export default function CourierPage() {
   const router = useRouter();
@@ -253,7 +266,15 @@ function SheetState({ s }: { s: SheetSummary }) {
           {s.blockCount} to fix
         </span>
       )}
-      {!s.hasEmail && (s.status === "NEEDS_ATTENTION" || s.status === "AWAITING_COLLECTION" || s.status === "COLLECTED") && (
+      {s.confirmation && CONFIRMATION_NOTE[s.confirmation] && (
+        <span
+          className={`text-xs ${CONFIRMATION_NOTE[s.confirmation]!.tone === "red" ? "text-ink-red" : CONFIRMATION_NOTE[s.confirmation]!.tone === "muted" ? "text-ink-muted" : ""}`}
+          style={CONFIRMATION_NOTE[s.confirmation]!.tone === "amber" ? { color: "var(--tone-amber-fg)" } : undefined}
+        >
+          {CONFIRMATION_NOTE[s.confirmation]!.text}
+        </span>
+      )}
+      {!s.hasEmail && (s.status === "NEEDS_ATTENTION" || s.status === "AWAITING_COLLECTION") && (
         <span className="text-xs" style={{ color: "var(--tone-amber-fg)" }}>
           No email
         </span>

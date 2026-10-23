@@ -47,6 +47,13 @@ interface Sheet {
   filingCompletedAt: string | null;
   filingError: string | null;
   signatureHeld: boolean;
+  emailStatus: "NOT_SENT" | "SENDING" | "SENT" | "FAILED" | "NO_EMAIL";
+  emailSentAt: string | null;
+  emailRecipient: string | null;
+  emailError: string | null;
+  reminderSentAt: string | null;
+  confirmedAt: string | null;
+  confirmTokenExpiresAt: string | null;
   createdAt: string;
   contact: { id: string; companyName: string; email: string | null; contactPerson: string | null; phone: string | null } | null;
   invoices: {
@@ -169,6 +176,26 @@ export default function CourierSheetPage() {
     void load();
   };
 
+  /** Send (or with force, re-send) the customer's confirmation email. */
+  const sendEmail = async (force: boolean) => {
+    setBusy("email");
+    setMessage(null);
+    const res = await fetch(`/api/courier/${id}/notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force }),
+    }).catch(() => null);
+    const data = res ? await res.json().catch(() => ({})) : {};
+    setBusy(null);
+    setMessage(
+      data.outcome === "sent"
+        ? { ok: true, text: `Email sent to ${data.recipient}` }
+        : { ok: false, text: data.error || "The email could not be sent" }
+    );
+    if (data.sheet) setSheet(data.sheet);
+    void load();
+  };
+
   const retryOriginal = async () => {
     setBusy("original");
     setMessage(null);
@@ -279,6 +306,7 @@ export default function CourierSheetPage() {
                 </div>
               );
             })()}
+            <CustomerConfirmation sheet={sheet} busy={busy !== null} onSend={sendEmail} />
           </div>
         </section>
       )}
@@ -332,7 +360,7 @@ export default function CourierSheetPage() {
           </h2>
           <div className="px-5 py-4 space-y-3 text-sm">
             <p className="text-ink-black font-medium">{sheet.customerName}</p>
-            <ContactFixer sheet={sheet} open={open} busy={busy !== null} act={act} setMessage={setMessage} />
+            <ContactFixer sheet={sheet} open={open || sheet.status === "COLLECTED"} busy={busy !== null} act={act} setMessage={setMessage} />
           </div>
         </section>
 
@@ -510,6 +538,61 @@ export default function CourierSheetPage() {
 
 // ─── Pieces ─────────────────────────────────────────────────────────────────
 
+/** The customer's email and confirmation, once every signed copy is filed. */
+function CustomerConfirmation({ sheet, busy, onSend }: { sheet: Sheet; busy: boolean; onSend: (force: boolean) => void }) {
+  if (!sheet.filingCompletedAt && !sheet.confirmedAt) return null;
+  const day = (iso: string) =>
+    new Date(iso).toLocaleDateString("en-ZA", { timeZone: "Africa/Johannesburg", weekday: "short", day: "numeric", month: "short" });
+
+  if (sheet.confirmedAt) {
+    return (
+      <p className="text-ink-green pt-2 border-t border-ink-border">
+        ✓ The customer confirmed the parcels arrived on {fmtTime(sheet.confirmedAt)}
+      </p>
+    );
+  }
+
+  const button = (label: string, force: boolean) => (
+    <button type="button" className="act" disabled={busy} onClick={() => onSend(force)}>
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="pt-2 border-t border-ink-border space-y-2">
+      {sheet.emailStatus === "SENT" && sheet.emailSentAt ? (
+        <>
+          <p className="text-ink-black">
+            Confirmation email sent to {sheet.emailRecipient} on {fmtTime(sheet.emailSentAt)} — not confirmed yet.
+          </p>
+          <p className="text-xs text-ink-muted">
+            {sheet.reminderSentAt
+              ? `Reminder sent on ${fmtTime(sheet.reminderSentAt)}. If there is still no answer, phone the customer.`
+              : `One reminder goes on ${day(new Date(new Date(sheet.emailSentAt).getTime() + 2 * 86_400_000).toISOString())} if they have not confirmed.`}
+            {sheet.confirmTokenExpiresAt ? ` The link works until ${day(sheet.confirmTokenExpiresAt)}.` : ""}
+          </p>
+          {button("Resend email", true)}
+        </>
+      ) : sheet.emailStatus === "NO_EMAIL" ? (
+        <div className="px-3 py-2 rounded bg-ink-amber-dim border border-ink-amber/30 space-y-2" style={{ color: "var(--tone-amber-fg)" }}>
+          <p>No email address for this customer. Add one under Customer and the confirmation email goes by itself.</p>
+          {button("Send email", false)}
+        </div>
+      ) : sheet.emailStatus === "FAILED" ? (
+        <div className="px-3 py-2 rounded bg-ink-red-dim border border-ink-red/20 space-y-2">
+          <p className="text-ink-red">The confirmation email did not go: {sheet.emailError ?? "the mail server rejected it"}</p>
+          {button("Send again", false)}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <p className="text-ink-muted">The confirmation email is being sent…</p>
+          {button("Send email", false)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type Act = (label: string, body: Record<string, unknown>, done?: string) => Promise<boolean>;
 
 const inputClass =
@@ -601,7 +684,11 @@ function ContactFixer({
           body: JSON.stringify({ email }),
         });
         if (!res.ok) throw new Error((await res.json()).error);
-        await act("recheck", { action: "recheck" }, "Email added");
+        await act(
+          "recheck",
+          { action: "recheck" },
+          sheet.status === "COLLECTED" ? "Email added — the confirmation email is on its way" : "Email added"
+        );
       } else {
         const res = await fetch("/api/contacts", {
           method: "POST",

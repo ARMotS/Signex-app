@@ -56,10 +56,13 @@ interface TableStamp {
 export function formatCursor(
   tripSheets: TableStamp,
   stops: TableStamp,
-  collections: TableStamp
+  collections: TableStamp,
+  /** The office's cursor only: courier sheets are no driver's work. */
+  courier?: TableStamp
 ): string {
   const stamp = (t: TableStamp) => `${t.max ? t.max.getTime() : 0}.${t.count}`;
-  return `${stamp(tripSheets)}-${stamp(stops)}-${stamp(collections)}`;
+  const base = `${stamp(tripSheets)}-${stamp(stops)}-${stamp(collections)}`;
+  return courier ? `${base}-${stamp(courier)}` : base;
 }
 
 /**
@@ -77,7 +80,7 @@ export async function buildSyncCursor(
   const db = scopedPrisma(tenantId);
   const { driverId } = opts;
 
-  const [sheetAgg, stopAgg, collectionAgg] = await Promise.all([
+  const [sheetAgg, stopAgg, collectionAgg, courierAgg] = await Promise.all([
     db.tripSheet.aggregate({
       where: driverId ? { driverId } : {},
       _max: { updatedAt: true },
@@ -106,6 +109,9 @@ export async function buildSyncCursor(
       _max: { updatedAt: true },
       _count: true,
     }),
+    // A customer confirming a courier delivery moves the office's dashboard;
+    // a driver's cursor never carries it, so it wakes no phone.
+    driverId ? Promise.resolve(null) : db.courierTripSheet.aggregate({ _max: { updatedAt: true }, _count: true }),
   ]);
 
   const tripSheets: TableStamp = {
@@ -122,7 +128,12 @@ export async function buildSyncCursor(
   };
 
   return {
-    cursor: formatCursor(tripSheets, stops, collections),
+    cursor: formatCursor(
+      tripSheets,
+      stops,
+      collections,
+      courierAgg ? { max: courierAgg._max.updatedAt, count: courierAgg._count } : undefined
+    ),
     tripSheets: tripSheets.count,
     stops: stops.count,
     collections: collections.count,

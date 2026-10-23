@@ -8,6 +8,7 @@ import nodemailer from "nodemailer";
 import { render } from "@react-email/render";
 import { DeliveryConfirmation } from "@/emails/DeliveryConfirmation";
 import { CollectionReceipt } from "@/emails/CollectionReceipt";
+import { CourierDispatch, type CourierDispatchProps } from "@/emails/CourierDispatch";
 import { format } from "date-fns";
 
 const transporter = nodemailer.createTransport({
@@ -151,6 +152,46 @@ export async function sendCollectionReceipt(
     return { success: true, emailId: info.messageId };
   } catch (err) {
     console.error("[email] Error sending collection receipt:", err);
+    return { success: false, error: describeMailError(err) };
+  }
+}
+
+export interface CourierDispatchParams extends Omit<CourierDispatchProps, "attached"> {
+  customerEmail: string;
+  attachments: { filename: string; content: Buffer }[];
+}
+
+/**
+ * A courier delivery: the first email (signed copies attached) or the one
+ * reminder. Same transport, sender and error reporting as the delivery
+ * confirmation — see sendDeliveryConfirmation.
+ */
+export async function sendCourierDispatch(
+  params: CourierDispatchParams
+): Promise<{ success: boolean; emailId?: string; error?: string }> {
+  try {
+    const { customerEmail, attachments, ...props } = params;
+    const html = await render(CourierDispatch({ ...props, attached: attachments.length }));
+
+    const fromName = process.env.EMAIL_FROM_NAME || "Signex Deliveries";
+    const fromEmail = process.env.EMAIL_FROM || "signexapp@gmail.com";
+    const waybills = params.waybills.join(", ");
+
+    const info = await transporter.sendMail({
+      from: `${fromName} <${fromEmail}>`,
+      to: customerEmail,
+      subject: params.reminder
+        ? `Reminder: please confirm your delivery arrived${waybills ? ` — waybill ${waybills}` : ""}`
+        : `Your order is on its way with ${params.courierCompany}${waybills ? ` — waybill ${waybills}` : ""}`,
+      html,
+      ...(attachments.length && {
+        attachments: attachments.map((a) => ({ filename: a.filename, content: a.content, contentType: "application/pdf" })),
+      }),
+    });
+
+    return { success: true, emailId: info.messageId };
+  } catch (err) {
+    console.error("[email] Error sending courier dispatch email:", err);
     return { success: false, error: describeMailError(err) };
   }
 }

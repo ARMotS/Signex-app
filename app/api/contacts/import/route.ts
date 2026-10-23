@@ -3,6 +3,7 @@ import { parseContactSheet } from "@/lib/contact-parser";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { relinkUnmatchedStops, type RelinkSummary } from "@/lib/contact-matcher";
+import { scheduleWaitingCourierEmails } from "@/lib/courier-confirm";
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
@@ -87,6 +88,10 @@ export const POST = withAuth(async (request: NextRequest) => {
   } catch (err) {
     console.error("[contacts/import] Could not re-link stops after import:", err);
   }
+
+  // A courier delivery may be waiting on an address for its confirmation
+  // email. Best-effort, after the response: the contact is saved either way.
+  await scheduleWaitingCourierEmails(ctx.tenantId).catch((err) => console.error("[contacts] Courier emails:", err));
 
   return NextResponse.json({ saved, skipped, updated, relinked });
 });
