@@ -51,6 +51,7 @@ export interface CourierIssue {
     | "ON_OTHER_COURIER_SHEET"
     | "NO_CONTACT"
     | "NO_EMAIL"
+    /** No longer raised (parcels are summed per row); kept so stored issues still type-check. */
     | "PARCELS_CONFLICT"
     | "DUPLICATE_INVOICE";
   /** "block" holds the sheet in NEEDS_ATTENTION; "warning" is shown only. */
@@ -70,7 +71,7 @@ export interface CourierSheetRead {
   lines: CourierLine[];
   waybills: string[];
   parcels: number | null;
-  /** Found while reading (duplicate rows, parcel counts that disagree). */
+  /** Found while reading (duplicate rows). */
   warnings: CourierIssue[];
 }
 
@@ -172,28 +173,13 @@ export function readCourierSheet(
     };
   }
 
-  // Parcels are per consignment: each waybill's filled-in value, once.
-  const waybills: string[] = [];
-  const perWaybill = new Map<string, number[]>();
-  for (const line of lines) {
-    if (!perWaybill.has(line.waybillNo)) {
-      perWaybill.set(line.waybillNo, []);
-      waybills.push(line.waybillNo);
-    }
-    if (line.parcels !== null) perWaybill.get(line.waybillNo)!.push(line.parcels);
-  }
-  let parcels: number | null = null;
-  for (const [wb, values] of perWaybill) {
-    if (values.length === 0) continue;
-    if (new Set(values).size > 1) {
-      warnings.push({
-        code: "PARCELS_CONFLICT",
-        level: "warning",
-        message: `Waybill ${wb || "(blank)"} gives different parcel counts (${[...new Set(values)].join(", ")}) — ${values[0]} is used. Check it with the courier.`,
-      });
-    }
-    parcels = (parcels ?? 0) + values[0];
-  }
+  // Parcels are per invoice row: every filled-in NOP counts, down the whole
+  // sheet. A blank row's goods are packed in with a row that has a count — when
+  // there are only one or two parcels for several invoices, the export writes
+  // the total on one row and leaves the rest empty (client).
+  const waybills = [...new Set(lines.map((l) => l.waybillNo))];
+  const counted = lines.filter((l) => l.parcels !== null);
+  const parcels = counted.length ? counted.reduce((sum, l) => sum + l.parcels!, 0) : null;
 
   return {
     ok: true,

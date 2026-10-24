@@ -837,7 +837,7 @@ model CourierTripSheet {
   contactId        String?
   /// Copied from the contact when linked; null when it has no email.
   customerEmail    String?
-  /// Consignment total: per waybill, the one value the sheet fills in.
+  /// Total parcels: every row's NOP added up (blank rows are packed with another).
   parcels          Int?
   /// Distinct waybills in sheet order — several are allowed (client decision).
   waybills         String[]      @default([])
