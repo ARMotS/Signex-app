@@ -46,7 +46,13 @@ import {
   type Fixtures,
 } from "./helpers/fixtures";
 
-vi.mock("@/lib/session", () => sessionMockFactory());
+// The cookie-facing functions are stubbed; the database ones (startSession,
+// revokeSession, revokeSessionsWrite) stay real so account changes exercise
+// the real session revocation.
+vi.mock("@/lib/session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/session")>()),
+  ...sessionMockFactory(),
+}));
 
 /**
  * The SMTP relay is stubbed. Beyond keeping the suite off the network, the
@@ -2360,12 +2366,11 @@ suite("cross-ADMIN isolation", () => {
     it("resetting a driver's password signs them out and replaces the old one", async () => {
       const { PUT } = await import("@/app/api/drivers/route");
       const { login } = await import("@/lib/accounts");
+      const { startSession } = await import("@/lib/session");
       useSession(adminSession(f.a));
 
-      await db().driver.update({
-        where: { id: f.a.driver.id },
-        data: { sessionToken: "live-token" },
-      });
+      const phone = await startSession({ id: f.a.driver.id, role: "driver" });
+      expect(phone.ok).toBe(true);
 
       const res = await PUT(
         req("/api/drivers", {
@@ -2377,6 +2382,9 @@ suite("cross-ADMIN isolation", () => {
 
       const row = await db().driver.findUnique({ where: { id: f.a.driver.id } });
       expect(row?.sessionToken).toBeNull();
+      const sessions = await db().userSession.findMany({ where: { driverId: f.a.driver.id } });
+      expect(sessions.length).toBeGreaterThan(0);
+      expect(sessions.every((s) => s.revokedReason === "password_reset" && s.revokedAt)).toBe(true);
       expect((await login(CREDENTIALS.driver("A").username, CREDENTIALS.driver("A").password)).success).toBe(false);
       expect((await login(CREDENTIALS.driver("A").username, "rotated-pass-1")).success).toBe(true);
 
@@ -2653,14 +2661,12 @@ suite("cross-ADMIN isolation", () => {
       ).toBe(true);
     });
 
-    it("deactivating revokes the session token so the admin is logged out at once", async () => {
+    it("deactivating revokes every session so the admin is logged out at once", async () => {
       const { PUT } = await import("@/app/api/admin/users/route");
+      const { startSession } = await import("@/lib/session");
       useSession(superAdminSession(f));
 
-      await db().admin.update({
-        where: { id: f.b.admin.id },
-        data: { sessionToken: "live-token", sessionTokens: ["t1", "t2", "live-token"] },
-      });
+      for (let i = 0; i < 3; i++) await startSession({ id: f.b.admin.id, role: "admin" });
 
       await PUT(
         req("/api/admin/users", {
@@ -2673,6 +2679,9 @@ suite("cross-ADMIN isolation", () => {
       expect(row?.sessionToken).toBeNull();
       // Every device, not just the most recent one.
       expect(row?.sessionTokens).toEqual([]);
+      expect(
+        await db().userSession.count({ where: { adminId: f.b.admin.id, revokedAt: null } })
+      ).toBe(0);
 
       await db().admin.update({
         where: { id: f.b.admin.id },
@@ -2680,103 +2689,219 @@ suite("cross-ADMIN isolation", () => {
       });
     });
 
-    // lib/session is mocked for the route handlers; these exercise the real
-    // SQL that records and revokes admin sessions.
-    describe("an admin signed in on several devices", () => {
+    // lib/session's cookie functions are mocked for the route handlers; these
+    // exercise the real session store.
+    describe("sessions and devices", () => {
       const realSession = () =>
         vi.importActual<typeof import("@/lib/session")>("@/lib/session");
-      const tokens = async () =>
-        (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionTokens;
+      const HOUR = 3_600_000;
+      const liveOf = (where: { adminId?: string; driverId?: string }) =>
+        db().userSession.findMany({
+          where: { ...where, revokedAt: null, expiresAt: { gt: new Date() } },
+          orderBy: { createdAt: "asc" },
+        });
+      /** The cookie payload a token from startSession would sit in. */
+      const cookieFor = (
+        account: { id: string; role: "admin" | "driver" | "super_admin" },
+        token: string
+      ) => ({
+        id: account.id,
+        role: account.role,
+        name: "x",
+        sessionToken: token,
+        exp: Date.now() + HOUR,
+      });
+      const admin = () => ({ id: f.b.admin.id, role: "admin" as const });
+      const start = async (
+        account: { id: string; role: "admin" | "driver" | "super_admin" },
+        options: { evictOldest?: boolean; now?: number } = {}
+      ) => {
+        const { startSession } = await realSession();
+        const r = await startSession(account, options);
+        if (!r.ok) throw new Error(`refused: ${r.activeSessions} active`);
+        return r.token;
+      };
 
       beforeEach(async () => {
-        await db().admin.update({
-          where: { id: f.b.admin.id },
-          data: { sessionToken: null, sessionTokens: [] },
+        await db().userSession.deleteMany({
+          where: {
+            OR: [
+              { adminId: { in: [f.a.admin.id, f.b.admin.id, f.superAdmin.id] } },
+              { driverId: { in: [f.a.driver.id, f.b.driver.id] } },
+            ],
+          },
         });
+        await db().admin.updateMany({ data: { sessionToken: null, sessionTokens: [] } });
+        await db().driver.updateMany({ data: { sessionToken: null } });
       });
 
-      it("holds a fourth login back, and signs out the oldest only once confirmed", async () => {
-        const { addAdminSession, MAX_ADMIN_SESSIONS } = await realSession();
-        expect(MAX_ADMIN_SESSIONS).toBe(3);
+      it("holds a sixth admin login back, and signs out the oldest only once confirmed", async () => {
+        const { startSession, SESSION_LIMITS } = await realSession();
+        expect(SESSION_LIMITS.admin).toBe(5);
 
-        for (const t of ["d1", "d2", "d3"]) await addAdminSession(f.b.admin.id, t, false);
-        expect(await tokens()).toEqual(["d1", "d2", "d3"]);
+        const tokens: string[] = [];
+        for (let i = 0; i < 5; i++) tokens.push(await start(admin()));
+        expect(await liveOf({ adminId: f.b.admin.id })).toHaveLength(5);
 
         // Unconfirmed: nobody is signed out and the new device is not added.
-        expect(await addAdminSession(f.b.admin.id, "d4", false)).toEqual({
-          ok: false,
-          activeSessions: 3,
-        });
-        expect(await tokens()).toEqual(["d1", "d2", "d3"]);
+        expect(await startSession(admin())).toEqual({ ok: false, activeSessions: 5 });
+        expect(await liveOf({ adminId: f.b.admin.id })).toHaveLength(5);
 
-        // Confirmed: the oldest goes.
-        expect((await addAdminSession(f.b.admin.id, "d4", true)).ok).toBe(true);
-        expect(await tokens()).toEqual(["d2", "d3", "d4"]);
-        // Still written for the previous deploy during the rollout.
+        // Confirmed: the oldest goes, and only the oldest.
+        const newest = await start(admin(), { evictOldest: true });
+        const live = await liveOf({ adminId: f.b.admin.id });
+        expect(live).toHaveLength(5);
+        const { hashSessionToken } = await realSession();
+        expect(live.map((s) => s.tokenHash)).not.toContain(hashSessionToken(tokens[0]));
         expect(
-          (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionToken
-        ).toBe("d4");
+          (await db().userSession.findUnique({ where: { tokenHash: hashSessionToken(tokens[0]) } }))
+            ?.revokedReason
+        ).toBe("evicted");
+
+        // The legacy columns, for the previous deploy: the evicted token is gone.
+        const row = await db().admin.findUnique({ where: { id: f.b.admin.id } });
+        expect(row?.sessionTokens).toEqual([...tokens.slice(1), newest]);
+        expect(row?.sessionToken).toBe(newest);
       });
 
-      it("drops expired sessions instead of prompting over them", async () => {
-        const { addAdminSession } = await realSession();
-        const stale = `${(Date.now() - 25 * 3_600_000).toString(36)}.stale`;
-        await db().admin.update({
-          where: { id: f.b.admin.id },
-          data: { sessionTokens: [stale, "d2", "d3"] },
-        });
+      it("gives the super admin one device, and asks before taking it", async () => {
+        const { startSession } = await realSession();
+        const sa = { id: f.superAdmin.id, role: "super_admin" as const };
+        await start(sa);
+        expect(await startSession(sa)).toEqual({ ok: false, activeSessions: 1 });
+        await start(sa, { evictOldest: true });
+        expect(await liveOf({ adminId: f.superAdmin.id })).toHaveLength(1);
+      });
 
-        expect((await addAdminSession(f.b.admin.id, "d4", false)).ok).toBe(true);
-        expect(await tokens()).toEqual(["d2", "d3", "d4"]);
+      it("a driver's new phone signs the old one out without asking", async () => {
+        const { validateSession } = await realSession();
+        const driver = { id: f.a.driver.id, role: "driver" as const };
+        const oldPhone = await start(driver);
+        const newPhone = await start(driver);
+
+        expect(await validateSession(cookieFor(driver, oldPhone))).toBe(false);
+        expect(await validateSession(cookieFor(driver, newPhone))).toBe(true);
+        expect((await db().driver.findUnique({ where: { id: driver.id } }))?.sessionToken).toBe(
+          newPhone
+        );
+      });
+
+      it("does not count expired sessions, so no prompt is needed", async () => {
+        for (let i = 0; i < 5; i++) await start(admin(), { now: Date.now() - 25 * HOUR });
+        await expect((await realSession()).startSession(admin())).resolves.toMatchObject({ ok: true });
       });
 
       it("racing logins cannot both take the last free slot", async () => {
-        const { addAdminSession } = await realSession();
-        await addAdminSession(f.b.admin.id, "d1", false);
-        await addAdminSession(f.b.admin.id, "d2", false);
+        const { startSession } = await realSession();
+        for (let i = 0; i < 4; i++) await start(admin());
 
-        const results = await Promise.all(
-          ["r1", "r2"].map((t) => addAdminSession(f.b.admin.id, t, false))
-        );
+        const results = await Promise.all([startSession(admin()), startSession(admin())]);
         expect(results.filter((r) => r.ok)).toHaveLength(1);
-        expect(await tokens()).toHaveLength(3);
+        expect(await liveOf({ adminId: f.b.admin.id })).toHaveLength(5);
       });
 
       it("logging out of one device leaves the others signed in", async () => {
-        const { addAdminSession, removeAdminSession } = await realSession();
-        for (const t of ["d1", "d2", "d3"]) await addAdminSession(f.b.admin.id, t, false);
+        const { revokeSession, validateSession } = await realSession();
+        const [d1, d2, d3] = [await start(admin()), await start(admin()), await start(admin())];
 
-        await removeAdminSession(f.b.admin.id, "d2");
-        expect(await tokens()).toEqual(["d1", "d3"]);
-        expect(
-          (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionToken
-        ).toBe("d3");
+        await revokeSession(cookieFor(admin(), d2));
+        expect(await validateSession(cookieFor(admin(), d2))).toBe(false);
+        expect(await validateSession(cookieFor(admin(), d1))).toBe(true);
+        expect(await validateSession(cookieFor(admin(), d3))).toBe(true);
+        expect((await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionTokens).toEqual([
+          d1,
+          d3,
+        ]);
       });
 
       it("an evicted device signing out does not revoke the devices that replaced it", async () => {
-        const { addAdminSession, removeAdminSession } = await realSession();
-        for (const t of ["d1", "d2", "d3", "d4"]) await addAdminSession(f.b.admin.id, t, true);
+        const { revokeSession } = await realSession();
+        const first = await start(admin());
+        for (let i = 0; i < 5; i++) await start(admin(), { evictOldest: true });
 
-        await removeAdminSession(f.b.admin.id, "d1");
-        expect(await tokens()).toEqual(["d2", "d3", "d4"]);
+        await revokeSession(cookieFor(admin(), first));
+        expect(await liveOf({ adminId: f.b.admin.id })).toHaveLength(5);
       });
 
       it("one admin's sessions never touch another admin's", async () => {
-        const { addAdminSession } = await realSession();
-        await db().admin.update({ where: { id: f.a.admin.id }, data: { sessionTokens: ["a-only"] } });
+        const a = await start({ id: f.a.admin.id, role: "admin" });
+        for (let i = 0; i < 6; i++) await start(admin(), { evictOldest: true });
 
-        for (const t of ["d1", "d2", "d3", "d4"]) await addAdminSession(f.b.admin.id, t, true);
+        const { validateSession } = await realSession();
+        expect(await validateSession(cookieFor({ id: f.a.admin.id, role: "admin" }, a))).toBe(true);
+      });
+
+      it("a session is only good for the account it was issued to", async () => {
+        const { validateSession } = await realSession();
+        const token = await start({ id: f.a.admin.id, role: "admin" });
+        // B presenting A's token (a forged id inside a re-signed cookie).
+        expect(await validateSession(cookieFor(admin(), token))).toBe(false);
+        expect(await validateSession(cookieFor({ id: f.a.admin.id, role: "driver" }, token))).toBe(
+          false
+        );
+      });
+
+      it("an expired session is refused even before anyone revokes it", async () => {
+        const { validateSession } = await realSession();
+        const token = await start(admin(), { now: Date.now() - 25 * HOUR });
+        expect(await validateSession(cookieFor(admin(), token))).toBe(false);
+      });
+
+      it("moves lastSeenAt at most once a minute", async () => {
+        const { validateSession, hashSessionToken } = await realSession();
+        const t0 = Date.now() - 10 * 60_000;
+        const token = await start(admin(), { now: t0 });
+        const seen = async () =>
+          (await db().userSession.findUnique({ where: { tokenHash: hashSessionToken(token) } }))!
+            .lastSeenAt.getTime();
+
+        expect(await validateSession(cookieFor(admin(), token), t0 + 30_000)).toBe(true);
+        expect(await seen()).toBe(t0);
+        expect(await validateSession(cookieFor(admin(), token), t0 + 90_000)).toBe(true);
+        expect(await seen()).toBe(t0 + 90_000);
+      });
+
+      it("takes on a session the previous deploy signed in, and only a live one", async () => {
+        const { validateSession, hashSessionToken } = await realSession();
+        await db().admin.update({
+          where: { id: f.b.admin.id },
+          data: { sessionTokens: ["from-old-deploy"] },
+        });
+
+        expect(await validateSession(cookieFor(admin(), "from-old-deploy"))).toBe(true);
         expect(
-          (await db().admin.findUnique({ where: { id: f.a.admin.id } }))?.sessionTokens
-        ).toEqual(["a-only"]);
+          await db().userSession.findUnique({ where: { tokenHash: hashSessionToken("from-old-deploy") } })
+        ).toMatchObject({ adminId: f.b.admin.id, revokedAt: null });
 
-        await db().admin.update({ where: { id: f.a.admin.id }, data: { sessionTokens: [] } });
+        // A token the legacy columns no longer hold was signed out there.
+        expect(await validateSession(cookieFor(admin(), "never-issued"))).toBe(false);
+        expect(
+          await db().userSession.findUnique({ where: { tokenHash: hashSessionToken("never-issued") } })
+        ).toBeNull();
+      });
+
+      it("a revoked session is turned away by the next API request", async () => {
+        const { GET } = await import("@/app/api/drivers/route");
+        const mocked = await import("@/lib/session");
+        const { revokeSession, validateSession } = await realSession();
+        vi.mocked(mocked.validateSession).mockImplementation(validateSession);
+        try {
+          const token = await start({ id: f.a.admin.id, role: "admin" });
+          const session = { ...adminSession(f.a), sessionToken: token };
+          useSession(session);
+          expect((await GET(req("/api/drivers"))).status).toBe(200);
+
+          await revokeSession(session);
+          const res = await GET(req("/api/drivers"));
+          expect(res.status).toBe(401);
+        } finally {
+          vi.mocked(mocked.validateSession).mockImplementation(async () => true);
+        }
       });
 
       it("a password reset by the SUPER_ADMIN signs out every device", async () => {
         const { PATCH } = await import("@/app/api/admin/users/route");
-        const { addAdminSession } = await realSession();
-        for (const t of ["d1", "d2", "d3"]) await addAdminSession(f.b.admin.id, t, false);
+        for (let i = 0; i < 3; i++) await start(admin());
 
         useSession(superAdminSession(f));
         const res = await PATCH(
@@ -2786,7 +2911,44 @@ suite("cross-ADMIN isolation", () => {
           })
         );
         expect(res.status).toBe(200);
-        expect(await tokens()).toEqual([]);
+        expect(await liveOf({ adminId: f.b.admin.id })).toHaveLength(0);
+        expect((await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionTokens).toEqual(
+          []
+        );
+      });
+
+      it("changing your own password keeps the device you did it from", async () => {
+        const { PATCH } = await import("@/app/api/admin/users/route");
+        const { hashSessionToken } = await realSession();
+        const sa = { id: f.superAdmin.id, role: "super_admin" as const };
+        const here = await start(sa);
+
+        useSession({ ...superAdminSession(f), sessionToken: here });
+        const res = await PATCH(
+          req("/api/admin/users", {
+            method: "PATCH",
+            body: { id: f.superAdmin.id, password: CREDENTIALS.superAdmin.password },
+          })
+        );
+        expect(res.status).toBe(200);
+        const live = await liveOf({ adminId: f.superAdmin.id });
+        expect(live.map((s) => s.tokenHash)).toEqual([hashSessionToken(here)]);
+      });
+
+      it("deactivating a driver signs their phone out", async () => {
+        const { PUT } = await import("@/app/api/drivers/route");
+        const { validateSession } = await realSession();
+        const driver = { id: f.a.driver.id, role: "driver" as const };
+        const phone = await start(driver);
+
+        useSession(adminSession(f.a));
+        expect(
+          (await PUT(req("/api/drivers", { method: "PUT", body: { id: driver.id, active: false } })))
+            .status
+        ).toBe(200);
+        expect(await validateSession(cookieFor(driver, phone))).toBe(false);
+
+        await PUT(req("/api/drivers", { method: "PUT", body: { id: driver.id, active: true } }));
       });
     });
 

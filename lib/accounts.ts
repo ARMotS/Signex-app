@@ -15,6 +15,7 @@
 import crypto from "crypto";
 import { UNSAFE_unscopedPrisma, scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
+import { revokeSessionsWrite } from "./session";
 import {
   normalizeUsername,
   validateUsername,
@@ -223,7 +224,9 @@ export async function updateAdminAccount(
     }
 
     // Only a token that is still live is kept — a device already signed out
-    // must not be revived by the password change it made on its way out.
+    // must not be revived by the password change it made on its way out. (The
+    // nested revoke below only ever touches live sessions, so it cannot revive
+    // one either.)
     const keep =
       options.keepSessionToken && admin.sessionTokens.includes(options.keepSessionToken)
         ? options.keepSessionToken
@@ -238,6 +241,7 @@ export async function updateAdminAccount(
           passwordHash: hashPassword(updates.password!),
           // A reset password must lock out whoever held the old one, now —
           // on every device but the caller's own when they changed it themselves.
+          sessions: revokeSessionsWrite("password_reset", options.keepSessionToken),
           sessionToken: keep,
           sessionTokens: keep ? [keep] : [],
         }),
@@ -599,10 +603,13 @@ export async function updateDriver(
       data: {
         ...(updates.name !== undefined && { name: updates.name }),
         ...(updates.active !== undefined && { active: updates.active }),
-        ...(changingPassword && {
-          passwordHash: hashPassword(updates.password!),
-          // A reset password must lock out whoever held the old one, now.
+        ...(changingPassword && { passwordHash: hashPassword(updates.password!) }),
+        // A reset password must lock out whoever held the old one, now; a
+        // deactivated driver is signed out rather than left working until
+        // their cookie expires.
+        ...((changingPassword || updates.active === false) && {
           sessionToken: null,
+          sessions: revokeSessionsWrite(changingPassword ? "password_reset" : "deactivated"),
         }),
         ...(renaming && {
           login: {
@@ -691,9 +698,15 @@ export async function setAdminActive(
       where: { id: adminId },
       data: {
         active,
-        // Revoking every session token logs a deactivated admin out of all
-        // their devices immediately rather than letting cookies run to expiry.
-        ...(active ? {} : { sessionToken: null, sessionTokens: [] }),
+        // Revoking every session logs a deactivated admin out of all their
+        // devices immediately rather than letting cookies run to expiry.
+        ...(active
+          ? {}
+          : {
+              sessions: revokeSessionsWrite("deactivated"),
+              sessionToken: null,
+              sessionTokens: [],
+            }),
       },
     });
 

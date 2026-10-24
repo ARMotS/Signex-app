@@ -231,12 +231,13 @@ export default function SignInScreen() {
             className="p-4 bg-ink-amber-dim rounded-md border border-ink-amber/30 space-y-3 animate-fade-in"
           >
             <p id="session-limit-title" className="text-sm font-semibold text-ink-black">
-              Too many devices signed in
+              {sessionLimit === 1 ? "Already signed in elsewhere" : "Too many devices signed in"}
             </p>
             <p id="session-limit-body" className="text-sm text-ink-black/80">
-              This account is already signed in on {sessionLimit} devices. Continuing
-              will sign out the device that signed in longest ago — if someone is
-              using it, they will lose their place.
+              {sessionLimit === 1
+                ? "This account is already signed in on another device. Continuing will sign it out"
+                : `This account is already signed in on ${sessionLimit} devices. Continuing will sign out the device that signed in longest ago`}
+              {" "}— if someone is using it, they will lose their place.
             </p>
             <div className="flex flex-col sm:flex-row gap-2">
               <button

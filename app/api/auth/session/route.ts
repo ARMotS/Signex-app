@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { getSession, validateSessionToken, destroySession } from "@/lib/session";
+import { getSession, validateSession, destroySession } from "@/lib/session";
 import { getAdminCount } from "@/lib/accounts";
 
 /**
  * GET /api/auth/session
  * Returns the current session info, or null if not logged in.
- * Validates session token against DB, so a revoked or evicted session (driver:
- * one device; admin: MAX_ADMIN_SESSIONS devices) is signed out.
+ * Validates the session against its UserSession row, so a revoked or evicted
+ * session (see SESSION_LIMITS) is signed out and its cookie cleared.
  */
 export async function GET() {
   try {
@@ -14,7 +14,7 @@ export async function GET() {
     const adminCount = await getAdminCount();
 
     if (session) {
-      const isValid = await validateSessionToken(session);
+      const isValid = await validateSession(session);
       if (!isValid) {
         await destroySession();
         return NextResponse.json({

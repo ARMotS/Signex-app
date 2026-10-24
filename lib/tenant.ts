@@ -6,7 +6,7 @@
  * No route reads a tenant id from a body, query string, header or path param.
  */
 
-import { getSession } from '@/lib/session'
+import { getSession, validateSession } from '@/lib/session'
 import { scopedPrisma, type ScopedPrismaClient } from '@/lib/db-scoped'
 import { UserRole } from '@prisma/client'
 
@@ -42,6 +42,13 @@ export interface SessionContext {
 export async function getSessionContext(): Promise<SessionContext> {
   const session = await getSession()
   if (!session) throw new AuthError('Unauthenticated', 401)
+
+  // The cookie's signature proves who it was issued to, not that it is still
+  // signed in. Checked on every request, so a logout elsewhere, a password
+  // reset or a deactivation ends this session on its next call.
+  if (!(await validateSession(session))) {
+    throw new AuthError('Your session has ended. Please sign in again.', 401)
+  }
 
   const role = ROLE_MAP[session.role] || 'DRIVER'
   const homeTenantId = session.tenantId as string
