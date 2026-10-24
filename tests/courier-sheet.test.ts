@@ -91,7 +91,7 @@ describe("readCourierSheet", () => {
     ]);
   });
 
-  it("adds up parcels per waybill — several waybills are allowed", () => {
+  it("adds up every row's parcels — several waybills are allowed", () => {
     const result = read([
       HEAD,
       ["W1", "Kilo", "1001", "", "1"],
@@ -101,10 +101,30 @@ describe("readCourierSheet", () => {
     expect(result).toMatchObject({ ok: true, sheet: { waybills: ["W1", "W2"], parcels: 4, warnings: [] } });
   });
 
-  it("warns when one waybill gives two parcel counts", () => {
-    const result = read([HEAD, ["W1", "Kilo", "1001", "", "1"], ["W1", "Kilo", "1002", "", "2"]]);
-    expect(result.ok && result.sheet.parcels).toBe(1);
-    expect(result.ok && result.sheet.warnings.map((w) => [w.code, w.level])).toEqual([["PARCELS_CONFLICT", "warning"]]);
+  it("reads NOP right down one waybill, one count per invoice", () => {
+    const result = read([
+      HEAD,
+      ["613212", "Modest spares", "634727", "23/10/2026", "2"],
+      ["613212", "Modest spares", "634728", "23/10/2027", "3"],
+      ["613212", "Modest spares", "634729", "22/10/2026", "4"],
+    ]);
+    expect(result).toMatchObject({ ok: true, sheet: { waybills: ["613212"], parcels: 9, warnings: [] } });
+    expect(result.ok && result.sheet.lines.map((l) => l.parcels)).toEqual([2, 3, 4]);
+  });
+
+  it("counts a small consignment written on one row once", () => {
+    const result = read([
+      HEAD,
+      ["613212", "Modest spares", "634727", "", "2"],
+      ["613212", "Modest spares", "634728", "", ""],
+      ["613212", "Modest spares", "634729", "", ""],
+    ]);
+    expect(result).toMatchObject({ ok: true, sheet: { parcels: 2, warnings: [] } });
+  });
+
+  it("has no parcel count when no row gives one", () => {
+    const result = read([HEAD, ["W1", "Kilo", "1001", "", ""], ["W1", "Kilo", "1002", "", ""]]);
+    expect(result.ok && result.sheet.parcels).toBeNull();
   });
 
   it("lists an invoice once, however often the sheet repeats it", () => {
@@ -184,9 +204,9 @@ describe("assessCourierSheet", () => {
     const issues = assessCourierSheet({
       lines: [clean],
       contact: withEmail,
-      readWarnings: [{ code: "PARCELS_CONFLICT", level: "warning", message: "x" }],
+      readWarnings: [{ code: "DUPLICATE_INVOICE", level: "warning", message: "x" }],
     });
-    expect(issues.map((i) => i.code)).toEqual(["PARCELS_CONFLICT"]);
+    expect(issues.map((i) => i.code)).toEqual(["DUPLICATE_INVOICE"]);
   });
 });
 

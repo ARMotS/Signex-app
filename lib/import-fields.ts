@@ -284,7 +284,7 @@ const COURIER_TRIP_SHEET_FIELDS: ImportField[] = [
     requiresValue: false,
     valueType: "count",
     aliases: [/^nop$/i, /^no\.?\s*of\s*parcels$/i, /^num\s*(of\s*)?parcels$/i, /^parcels$/i, /^pcs$/i],
-    help: "Often filled on the first row only; the filled value is the consignment total.",
+    help: "Parcels per invoice row; every row is added up. A blank row is packed with another row's parcels.",
   },
   {
     key: "courierSheetNo",
