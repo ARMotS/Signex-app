@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getCloudAccountStatus, disconnectCloudAccount } from "@/lib/microsoft-graph";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { logAudit } from "@/lib/audit";
 
 /**
  * GET /api/cloud/onedrive
@@ -26,5 +27,11 @@ export const DELETE = withAuth(async () => {
   requireRole(ctx, "ADMIN", "SUPER_ADMIN");
 
   await disconnectCloudAccount(ctx.tenantId);
+  await logAudit({
+    action: "CONFIG_UPDATE",
+    entity: "cloud_account",
+    details: "OneDrive disconnected",
+    tenantId: ctx.tenantId,
+  });
   return NextResponse.json({ success: true });
 });

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { CreditNoteStatus, Prisma } from "@prisma/client";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { logAudit } from "@/lib/audit";
 import { looksLikePdf, MAX_INVOICE_UPLOAD_BYTES, sanitizeInvoiceFilename } from "@/lib/invoices";
 import { uploadCreditNote } from "@/lib/credit-intake";
 import { scheduleCreditsWork } from "@/lib/credit-signoff";
@@ -113,6 +114,13 @@ export const GET = withAuth(async (request: NextRequest) => {
     const rows = applyFilter(all, state, acc, new Date(), parseTzOffset(searchParams.get("tzOffset")));
 
     if (searchParams.get("format") === "csv") {
+      await logAudit({
+        action: "EXPORT",
+        entity: "credit_notes",
+        details: `Credit notes CSV exported (${rows.length} rows)`,
+        metadata: { format: "csv", rows: rows.length },
+        tenantId: ctx.tenantId,
+      });
       const csv = toCsv(
         CSV_HEADERS,
         rows.map((r) => [

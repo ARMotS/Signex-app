@@ -5957,4 +5957,162 @@ suite("cross-ADMIN isolation", () => {
       expect((await GET(req("/api/exceptions"))).status).toBe(403);
     });
   });
+  // ── The audit log ───────────────────────────────────────────────────
+  describe("the audit log", () => {
+    const latest = (where: Record<string, unknown>) =>
+      db().auditLog.findFirst({ where, orderBy: { createdAt: "desc" } });
+
+    it("is append-only: the database refuses to rewrite or erase an entry", async () => {
+      const row = await db().auditLog.create({
+        data: { action: "CONFIG_UPDATE", entity: "config", details: "original", tenantId: f.a.tenantId },
+      });
+      await expect(
+        db().auditLog.update({ where: { id: row.id }, data: { details: "rewritten" } })
+      ).rejects.toThrow(/append-only/);
+      await expect(db().auditLog.delete({ where: { id: row.id } })).rejects.toThrow(/append-only/);
+      expect((await db().auditLog.findUnique({ where: { id: row.id } }))?.details).toBe("original");
+    });
+
+    it("names who did it — the session's account, role and device — without the caller passing it", async () => {
+      const { PUT } = await import("@/app/api/drivers/route");
+      useSession(adminSession(f.a));
+      const before = (await db().driver.findUniqueOrThrow({ where: { id: f.a.driver.id } })).name;
+
+      const res = await PUT(
+        req("/api/drivers", { method: "PUT", body: { id: f.a.driver.id, name: "Audit Rename" } })
+      );
+      expect(res.status).toBe(200);
+
+      const entry = await latest({ action: "DRIVER_UPDATE", entityId: f.a.driver.id });
+      expect(entry).toMatchObject({
+        actorId: f.a.admin.id,
+        actorRole: "ADMIN",
+        deviceId: "test-device",
+        tenantId: f.a.tenantId,
+        metadata: { name: { from: before, to: "Audit Rename" } },
+      });
+
+      await PUT(req("/api/drivers", { method: "PUT", body: { id: f.a.driver.id, name: before } }));
+    });
+
+    it("records a failed sign-in against the account, and an unknown name without recording it", async () => {
+      const { login } = await import("@/lib/accounts");
+
+      expect((await login(CREDENTIALS.admin("A").username, "not-the-password1")).success).toBe(false);
+      expect(await latest({ action: "LOGIN_FAILED", entityId: f.a.admin.id })).toMatchObject({
+        entity: "admin",
+        userName: CREDENTIALS.admin("A").username,
+        details: "Wrong password",
+        tenantId: f.a.tenantId,
+        actorId: null,
+      });
+
+      // Possibly a password typed into the username box: not written down.
+      expect((await login("maybe.a.password1", "whatever-pass1")).success).toBe(false);
+      const unknown = await latest({ action: "LOGIN_FAILED", entity: "auth" });
+      expect(unknown).toMatchObject({ details: "Unknown username", userName: null, tenantId: null });
+    });
+
+    it("records the right password for a deactivated account as a refused sign-in", async () => {
+      const { login } = await import("@/lib/accounts");
+      await db().admin.update({ where: { id: f.b.admin.id }, data: { active: false } });
+      try {
+        expect((await login(CREDENTIALS.admin("B").username, CREDENTIALS.admin("B").password)).success).toBe(false);
+        expect(await latest({ action: "LOGIN_FAILED", entityId: f.b.admin.id })).toMatchObject({
+          details: "Account deactivated",
+        });
+      } finally {
+        await db().admin.update({ where: { id: f.b.admin.id }, data: { active: true } });
+      }
+    });
+
+    it("logs a sign-in once the session has started, as the account signing in", async () => {
+      const { POST } = await import("@/app/api/auth/login/route");
+      useSession(null);
+      const res = await POST(
+        req("/api/auth/login", {
+          method: "POST",
+          body: { username: CREDENTIALS.driver("A").username, password: CREDENTIALS.driver("A").password },
+        })
+      );
+      expect(res.status).toBe(200);
+      expect(await latest({ action: "LOGIN", entityId: f.a.driver.id })).toMatchObject({
+        actorId: f.a.driver.id,
+        actorRole: "DRIVER",
+        deviceId: "test-device",
+        tenantId: f.a.tenantId,
+      });
+    });
+
+    it("logs a sign-out as the account signing out", async () => {
+      const { POST } = await import("@/app/api/auth/logout/route");
+      useSession(adminSession(f.b));
+      expect((await POST()).status).toBe(200);
+      expect(await latest({ action: "LOGOUT", entityId: f.b.admin.id })).toMatchObject({
+        actorId: f.b.admin.id,
+        actorRole: "ADMIN",
+        tenantId: f.b.tenantId,
+      });
+    });
+
+    it("logs a password reset and a username change separately, and never the password", async () => {
+      const { PATCH } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+      const secret = "Audit-Secret-99";
+
+      const res = await PATCH(
+        req("/api/admin/users", {
+          method: "PATCH",
+          body: { id: f.b.admin.id, password: secret, username: "office.b.renamed" },
+        })
+      );
+      expect(res.status).toBe(200);
+
+      expect(await latest({ action: "PASSWORD_CHANGE", entityId: f.b.admin.id })).toMatchObject({
+        actorId: f.superAdmin.id,
+        actorRole: "SUPER_ADMIN",
+        metadata: { self: false },
+      });
+      expect(await latest({ action: "USERNAME_CHANGE", entityId: f.b.admin.id })).toMatchObject({
+        metadata: { from: CREDENTIALS.admin("B").username, to: "office.b.renamed" },
+      });
+      const leaks = await db().$queryRaw<{ n: bigint }[]>`
+        SELECT count(*) AS n FROM "AuditLog"
+        WHERE "details" LIKE ${"%" + secret + "%"} OR "metadata"::text LIKE ${"%" + secret + "%"}`;
+      expect(Number(leaks[0].n)).toBe(0);
+
+      // Restore for the rest of the suite.
+      await PATCH(
+        req("/api/admin/users", {
+          method: "PATCH",
+          body: {
+            id: f.b.admin.id,
+            password: CREDENTIALS.admin("B").password,
+            username: CREDENTIALS.admin("B").username,
+          },
+        })
+      );
+    });
+
+    it("logs an export in the exporter's own scope", async () => {
+      const { GET } = await import("@/app/api/exceptions/route");
+      useSession(adminSession(f.a));
+      expect((await GET(req("/api/exceptions?format=csv"))).status).toBe(200);
+      expect(await latest({ action: "EXPORT", entity: "exceptions" })).toMatchObject({
+        actorId: f.a.admin.id,
+        tenantId: f.a.tenantId,
+      });
+    });
+
+    it("keeps no IP, user agent or device on what a record's history page sends the browser", async () => {
+      const { queryAuditLogs } = await import("@/lib/audit");
+      const { logs } = await queryAuditLogs(f.a.tenantId, { limit: 5 });
+      expect(logs.length).toBeGreaterThan(0);
+      for (const log of logs) {
+        expect(log).not.toHaveProperty("ip");
+        expect(log).not.toHaveProperty("deviceId");
+        expect(log).not.toHaveProperty("userAgent");
+      }
+    });
+  });
 });

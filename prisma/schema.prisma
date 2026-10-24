@@ -50,7 +50,6 @@ model Tenant {
   appConfigs    AppConfig[]
   cloudAccounts CloudAccount[]
   importedFiles ImportedFile[]
-  auditLogs     AuditLog[]
   collections   Collection[]
   collectionLines CollectionLine[]
   removedStops  RemovedStop[]
@@ -1044,25 +1043,56 @@ enum AuditAction {
   DRIVER_DELETE
   CONFIG_UPDATE
   SCOPE_SWITCH
+  LOGIN_FAILED
+  PASSWORD_CHANGE
+  USERNAME_CHANGE
+  ROLE_CHANGE
+  ACCOUNT_CREATE
+  ACCOUNT_UPDATE
+  ACCOUNT_DEACTIVATE
+  ACCOUNT_REACTIVATE
+  ACCOUNT_DELETE
+  EXPORT
+  FILE_DELETE
 }
 
+// Append-only: a trigger in the migration (20261025090000_audit_log_actor)
+// refuses every UPDATE and DELETE, so no route — and no bug — can rewrite or
+// erase what happened. Tests clear it with TRUNCATE, which the trigger does
+// not cover; retention, if it is ever wanted, is a deliberate migration.
+//
+// tenantId deliberately has NO foreign key: the trail of what happened in a
+// workspace must outlive the workspace, and a key would force deleting a
+// tenant to rewrite (or delete) its history.
 model AuditLog {
   id        String      @id @default(cuid())
   action    AuditAction
-  entity    String // trip_sheet | stop | driver | admin | config | scope
+  entity    String // trip_sheet | stop | driver | admin | config | scope | auth | ...
   entityId  String?
   userName  String?
   details   String?     @db.Text
   // Nullable by design: failed logins and other pre-session events have no
   // scope yet. Everything post-authentication MUST set it.
   tenantId  String?
-  tenant    Tenant?     @relation(fields: [tenantId], references: [id])
+  // Who did it, filled in by logAudit from the request's session. Null for
+  // the system (cron, after() work with no session) and for anonymous
+  // callers (a failed sign-in, a customer's confirmation link).
+  actorId   String?
+  actorRole UserRole?
+  ip        String?
+  userAgent String?
+  // The signex-device cookie: which browser, across sign-ins.
+  deviceId  String?
+  // Structured detail (from/to of a rename, export row counts). Never a
+  // password, token or anything priced.
+  metadata  Json?
   createdAt DateTime    @default(now())
 
   @@index([action])
   @@index([createdAt])
   @@index([entity, entityId])
   @@index([tenantId, createdAt])
+  @@index([actorId, createdAt])
 }
 
 // ─── Contacts ─────────────────────────────────────────────────────────────

@@ -79,7 +79,8 @@ export async function resetDatabase() {
   await p.appConfig.deleteMany();
   await p.importTemplate.deleteMany();
   await p.courierImportFailure.deleteMany();
-  await p.auditLog.deleteMany();
+  // Append-only: a trigger refuses DELETE, and TRUNCATE is what it does not cover.
+  await p.$executeRawUnsafe(`TRUNCATE "AuditLog"`);
   await p.driver.deleteMany();
   await p.user.deleteMany();
   await p.tenant.update({ where: { slug: "root" }, data: {} }).catch(() => {});
@@ -368,7 +369,9 @@ let currentSession: FakeSession | null = null;
 export function sessionMockFactory() {
   return {
     getSession: vi.fn(async () => currentSession),
-    createSession: vi.fn(async () => ({ ok: true as const })),
+    createSession: vi.fn(async () => ({ ok: true as const, deviceId: "test-device", evicted: 0 })),
+    peekSession: vi.fn(async () => currentSession),
+    peekDeviceId: vi.fn(async () => "test-device"),
     setViewScope: vi.fn(async (tenantId: string | null) => {
       if (currentSession) currentSession.viewTenantId = tenantId;
       return true;
