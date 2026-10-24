@@ -42,6 +42,7 @@ describe("page routing by role", () => {
     expect(await landing("/run", "admin")).toBe("/dashboard");
     expect(await landing("/collect/abc", "admin")).toBe("/dashboard");
     expect(await landing("/sign/abc", "super_admin")).toBe("/users");
+    expect(await landing("/run", "company_admin")).toBe("/dashboard");
   });
 
   it("keeps an ADMIN out of the super-admin console", async () => {
@@ -49,9 +50,15 @@ describe("page routing by role", () => {
     expect(await landing("/users", "super_admin")).toBeNull();
   });
 
+  it("keeps a COMPANY_ADMIN out of the super-admin console", async () => {
+    expect(await landing("/users", "company_admin")).toBe("/dashboard");
+  });
+
   it("lets each role through to its own pages", async () => {
     expect(await landing("/dashboard", "admin")).toBeNull();
     expect(await landing("/dashboard", "super_admin")).toBeNull();
+    expect(await landing("/dashboard", "company_admin")).toBeNull();
+    expect(await landing("/trip-sheet", "company_admin")).toBeNull();
     expect(await landing("/run", "driver")).toBeNull();
     expect(await landing("/collect/abc", "driver")).toBeNull();
   });

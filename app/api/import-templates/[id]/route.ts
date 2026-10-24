@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
 import {
@@ -19,7 +19,7 @@ const notFound = () => NextResponse.json({ error: "Import template not found" },
 
 export const GET = withAuth(async (_request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const row = await findTemplate(ctx.tenantId, (await params).id);
   return row ? NextResponse.json(summarize(row)) : notFound();
@@ -36,7 +36,7 @@ export const GET = withAuth(async (_request: NextRequest, { params }: Ctx) => {
  */
 export const PUT = withAuth(async (request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { id } = await params;
   const row = await findTemplate(ctx.tenantId, id);
@@ -96,7 +96,7 @@ export const PUT = withAuth(async (request: NextRequest, { params }: Ctx) => {
 
 export const DELETE = withAuth(async (_request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { id } = await params;
   const row = await findTemplate(ctx.tenantId, id);

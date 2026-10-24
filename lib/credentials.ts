@@ -57,7 +57,7 @@ export function validatePassword(password: unknown): string | null {
   return null;
 }
 
-export type AppRole = "super_admin" | "admin" | "driver";
+export type AppRole = "super_admin" | "company_admin" | "admin" | "driver";
 
 /** Where each role lands after signing in, and where it is sent back to. */
 export function homePathForRole(role: AppRole | string | undefined): string {
@@ -65,6 +65,7 @@ export function homePathForRole(role: AppRole | string | undefined): string {
     case "super_admin":
       return "/users";
     case "admin":
+    case "company_admin":
       return "/dashboard";
     case "driver":
       return "/run";

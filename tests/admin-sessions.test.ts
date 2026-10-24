@@ -13,8 +13,8 @@ import { describe, it, expect } from "vitest";
 import { planSessionStart, SESSION_LIMITS, hashSessionToken } from "@/lib/session";
 
 describe("SESSION_LIMITS", () => {
-  it("is one device for the super admin and a driver, five for an admin", () => {
-    expect(SESSION_LIMITS).toEqual({ super_admin: 1, admin: 5, driver: 1 });
+  it("is one device for the super admin and a driver, three for a company admin, five for an admin", () => {
+    expect(SESSION_LIMITS).toEqual({ super_admin: 1, company_admin: 3, admin: 5, driver: 1 });
   });
 });
 

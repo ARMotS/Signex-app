@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { getCourierSheet } from "@/lib/courier-import";
 import { sendCourierConfirmation, type CourierEmailOutcome } from "@/lib/courier-confirm";
@@ -30,7 +30,7 @@ const MESSAGE: Partial<Record<CourierEmailOutcome, string>> = {
  */
 export const POST = withAuth(async (request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
   const body = await request.json().catch(() => ({}));
 

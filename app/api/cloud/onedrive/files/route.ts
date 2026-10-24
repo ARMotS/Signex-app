@@ -4,7 +4,7 @@ import {
   downloadFileById,
   assertItemInConfiguredFolder,
 } from "@/lib/microsoft-graph";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 /**
@@ -14,7 +14,7 @@ import { withAuth } from "@/lib/api-handler";
  */
 export const GET = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const items = await listOneDriveTripSheetFiles(ctx.tenantId);
 
@@ -64,7 +64,7 @@ export const GET = withAuth(async () => {
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { fileId, filename } = await request.json();
 

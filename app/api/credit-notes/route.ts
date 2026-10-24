@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { CreditNoteStatus, Prisma } from "@prisma/client";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
 import { looksLikePdf, MAX_INVOICE_UPLOAD_BYTES, sanitizeInvoiceFilename } from "@/lib/invoices";
@@ -73,7 +73,7 @@ const CSV_HEADERS = ["Credit No", "Credit date", "Invoice No", "Customer", "Acco
 
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { searchParams } = new URL(request.url);
 
@@ -207,7 +207,7 @@ export const GET = withAuth(async (request: NextRequest) => {
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const form = await request.formData();
   const file = form.get("file");

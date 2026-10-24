@@ -33,6 +33,7 @@ import {
   adminSession,
   driverSession,
   superAdminSession,
+  companyAdminSession,
   tamperedAdminSession,
   useSession,
   sessionMockFactory,
@@ -6113,6 +6114,273 @@ suite("cross-ADMIN isolation", () => {
         expect(log).not.toHaveProperty("deviceId");
         expect(log).not.toHaveProperty("userAgent");
       }
+    });
+  });
+  // ── Companies and COMPANY_ADMIN oversight ───────────────────────────
+  // Company X owns branch A; company Y owns branch B. The COMPANY_ADMIN of X
+  // ("ca") is allocated admin A. Nothing it does may reach B, the root scope,
+  // or reveal the SUPER_ADMIN.
+  describe("companies and company admins", () => {
+    let companyX: string;
+    let companyY: string;
+    let homeX: string;
+    let ca: { id: string; name: string; homeTenantId: string };
+
+    const driverIds = async (res: Response) =>
+      ((await res.json()).drivers as { id: string }[]).map((d) => d.id);
+
+    beforeAll(async () => {
+      const { backfillCompany } = await import("@/lib/company");
+      const x = await backfillCompany({
+        companyName: "Company X",
+        usernames: [CREDENTIALS.admin("A").username],
+        apply: true,
+      });
+      const y = await backfillCompany({
+        companyName: "Company Y",
+        usernames: [CREDENTIALS.admin("B").username],
+        apply: true,
+      });
+      companyX = x.company.id!;
+      companyY = y.company.id!;
+      homeX = x.homeTenant.id!;
+
+      const admin = await db().admin.create({
+        data: {
+          name: "Company X Lead",
+          email: "lead@company-x.test",
+          passwordHash: "unused",
+          tenantId: homeX,
+          companyId: companyX,
+          login: { create: { username: "company.x.lead" } },
+        },
+      });
+      await db().user.create({
+        data: { email: "lead@company-x.test", name: admin.name, role: "COMPANY_ADMIN", tenantId: homeX },
+      });
+      await db().companyAdminAllocation.create({
+        data: {
+          companyId: companyX,
+          companyAdminId: admin.id,
+          adminId: f.a.admin.id,
+          branchTenantId: f.a.tenantId,
+          allocatedBy: f.superAdmin.id,
+        },
+      });
+      ca = { id: admin.id, name: admin.name, homeTenantId: homeX };
+    });
+
+    // ── The backfill ──
+    it("the backfill attached each branch to its company, and a second run changes nothing", async () => {
+      const { backfillCompany } = await import("@/lib/company");
+      expect((await db().tenant.findUniqueOrThrow({ where: { id: f.a.tenantId } })).companyId).toBe(companyX);
+      expect((await db().tenant.findUniqueOrThrow({ where: { id: f.b.tenantId } })).companyId).toBe(companyY);
+      expect(await db().tenant.findUniqueOrThrow({ where: { id: homeX } })).toMatchObject({
+        kind: "COMPANY",
+        companyId: companyX,
+      });
+
+      const again = await backfillCompany({
+        companyName: "company x",
+        usernames: [CREDENTIALS.admin("A").username],
+        apply: true,
+      });
+      expect(again.company).toEqual({ id: companyX, created: false });
+      expect(again.homeTenant).toEqual({ id: homeX, created: false });
+      expect(again.branches.map((b) => b.action)).toEqual(["already"]);
+    });
+
+    it("the backfill writes nothing if any name is not a branch admin of no other company", async () => {
+      const { backfillCompany } = await import("@/lib/company");
+      const before = await db().company.count();
+      const r = await backfillCompany({
+        companyName: "Company Z",
+        usernames: [
+          CREDENTIALS.admin("A").username, // already Company X's
+          CREDENTIALS.driver("A").username, // a driver
+          CREDENTIALS.superAdmin.username, // the SUPER_ADMIN (root scope)
+          "nobody.here",
+        ],
+        apply: true,
+      });
+      expect(r.applied).toBe(false);
+      expect(r.branches.map((b) => b.action)).toEqual(["refused", "refused", "refused", "refused"]);
+      expect(await db().company.count()).toBe(before);
+    });
+
+    // ── The database refuses a wrong allocation outright ──
+    it("cannot store an allocation to another company's branch", async () => {
+      await expect(
+        db().companyAdminAllocation.create({
+          data: { companyId: companyX, companyAdminId: ca.id, adminId: f.b.admin.id, branchTenantId: f.b.tenantId },
+        })
+      ).rejects.toThrow();
+      // Nor by claiming the other company on the row: the COMPANY_ADMIN is X's.
+      await expect(
+        db().companyAdminAllocation.create({
+          data: { companyId: companyY, companyAdminId: ca.id, adminId: f.b.admin.id, branchTenantId: f.b.tenantId },
+        })
+      ).rejects.toThrow();
+    });
+
+    it("cannot store an allocation of anything but a branch admin", async () => {
+      // The COMPANY_ADMIN itself, in its company-home scope.
+      await expect(
+        db().companyAdminAllocation.create({
+          data: { companyId: companyX, companyAdminId: ca.id, adminId: ca.id, branchTenantId: homeX },
+        })
+      ).rejects.toThrow();
+      // The SUPER_ADMIN, in the root scope (which belongs to no company).
+      await expect(
+        db().companyAdminAllocation.create({
+          data: {
+            companyId: companyX,
+            companyAdminId: ca.id,
+            adminId: f.superAdmin.id,
+            branchTenantId: f.superAdmin.tenantId,
+          },
+        })
+      ).rejects.toThrow();
+    });
+
+    it("refuses to move an allocated branch to another company", async () => {
+      await expect(
+        db().tenant.update({ where: { id: f.a.tenantId }, data: { companyId: companyY } })
+      ).rejects.toThrow();
+      expect((await db().tenant.findUniqueOrThrow({ where: { id: f.a.tenantId } })).companyId).toBe(companyX);
+    });
+
+    // ── Requests ──
+    it("works in an allocated branch as that branch's admin", async () => {
+      const { GET, POST, DELETE } = await import("@/app/api/drivers/route");
+      useSession(companyAdminSession(ca, f.a.tenantId));
+
+      const res = await GET(req("/api/drivers"));
+      expect(res.status).toBe(200);
+      const ids = await driverIds(res);
+      expect(ids).toContain(f.a.driver.id);
+      expect(ids).not.toContain(f.b.driver.id);
+
+      // A change lands in the branch, not in the company's own scope.
+      const created = await POST(
+        req("/api/drivers", {
+          method: "POST",
+          body: { name: "Company Made", username: "company.made", password: "company-made-1" },
+        })
+      );
+      expect(created.status).toBe(200);
+      const row = await db().driver.findFirstOrThrow({ where: { name: "Company Made" } });
+      expect(row.tenantId).toBe(f.a.tenantId);
+      await DELETE(req("/api/drivers", { method: "DELETE", body: { id: row.id } }));
+    });
+
+    it("cannot touch another company's records by id from its branch (404)", async () => {
+      const { PUT } = await import("@/app/api/drivers/route");
+      useSession(companyAdminSession(ca, f.a.tenantId));
+      const res = await PUT(
+        req("/api/drivers", { method: "PUT", body: { id: f.b.driver.id, name: "Hijacked" } })
+      );
+      expect(res.status).toBe(404);
+      expect((await db().driver.findUniqueOrThrow({ where: { id: f.b.driver.id } })).name).not.toBe("Hijacked");
+    });
+
+    it("a session pointed at an unallocated branch reads nothing from it", async () => {
+      const { GET } = await import("@/app/api/drivers/route");
+      // A cookie that says B — as if forged, or left over from before.
+      useSession(companyAdminSession(ca, f.b.tenantId));
+      const res = await GET(req("/api/drivers"));
+      expect(res.status).toBe(403);
+      expect(JSON.stringify(await res.json())).not.toContain(f.b.driver.id);
+    });
+
+    it("in its own scope it gets no data at all — even from routes with no role check", async () => {
+      useSession(companyAdminSession(ca, null));
+      const drivers = await import("@/app/api/drivers/route");
+      const sync = await import("@/app/api/sync/route");
+      const dashboard = await import("@/app/api/dashboard/route");
+      expect((await drivers.GET(req("/api/drivers"))).status).toBe(403);
+      expect((await sync.GET(req("/api/sync"))).status).toBe(403);
+      expect((await dashboard.GET(req("/api/dashboard"))).status).toBe(403);
+    });
+
+    it("lists only its allocated branches, and never shows the root scope or the SUPER_ADMIN", async () => {
+      const { GET } = await import("@/app/api/admin/scopes/route");
+      useSession(companyAdminSession(ca, f.a.tenantId));
+      const res = await GET(req("/api/admin/scopes"));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.scopes.map((s: { tenantId: string }) => s.tenantId)).toEqual([f.a.tenantId]);
+      expect(body.scopes[0].isActive).toBe(true);
+
+      const raw = JSON.stringify(body);
+      for (const hidden of [f.superAdmin.id, f.superAdmin.email, f.superAdmin.tenantId, f.b.tenantId, f.b.admin.email]) {
+        expect(raw).not.toContain(hidden);
+      }
+    });
+
+    it("can switch only to an allocated branch: anything else is 404", async () => {
+      const { POST } = await import("@/app/api/admin/scopes/route");
+      useSession(companyAdminSession(ca, null));
+      const to = (tenantId: string | null) =>
+        POST(req("/api/admin/scopes", { method: "POST", body: { tenantId } }));
+
+      expect((await to(f.b.tenantId)).status).toBe(404);
+      expect((await to(f.superAdmin.tenantId)).status).toBe(404);
+      expect((await to("no-such-tenant")).status).toBe(404);
+      expect((await to(f.a.tenantId)).status).toBe(200);
+    });
+
+    it("loses a branch on the very next request once the allocation is removed", async () => {
+      const { GET } = await import("@/app/api/drivers/route");
+      useSession(companyAdminSession(ca, f.a.tenantId));
+      expect((await GET(req("/api/drivers"))).status).toBe(200);
+
+      const allocation = await db().companyAdminAllocation.findFirstOrThrow({
+        where: { companyAdminId: ca.id, adminId: f.a.admin.id },
+      });
+      await db().companyAdminAllocation.delete({ where: { id: allocation.id } });
+      try {
+        expect((await GET(req("/api/drivers"))).status).toBe(403);
+      } finally {
+        await db().companyAdminAllocation.create({
+          data: {
+            companyId: companyX,
+            companyAdminId: ca.id,
+            adminId: f.a.admin.id,
+            branchTenantId: f.a.tenantId,
+          },
+        });
+      }
+      expect((await GET(req("/api/drivers"))).status).toBe(200);
+    });
+
+    it("loses every branch while its company is deactivated", async () => {
+      const { GET } = await import("@/app/api/drivers/route");
+      useSession(companyAdminSession(ca, f.a.tenantId));
+      await db().company.update({ where: { id: companyX }, data: { isActive: false } });
+      try {
+        expect((await GET(req("/api/drivers"))).status).toBe(403);
+      } finally {
+        await db().company.update({ where: { id: companyX }, data: { isActive: true } });
+      }
+    });
+
+    it("cannot reach the SUPER_ADMIN's console", async () => {
+      useSession(companyAdminSession(ca, f.a.tenantId));
+      const users = await import("@/app/api/admin/users/route");
+      const tenants = await import("@/app/api/admin/tenants/route");
+      expect((await users.GET(req("/api/admin/users"))).status).toBe(403);
+      expect(
+        (await tenants.POST(req("/api/admin/tenants", { method: "POST", body: { tenantName: "x" } }))).status
+      ).toBe(403);
+    });
+
+    it("an ADMIN is still locked to its own branch, company or not", async () => {
+      const { GET } = await import("@/app/api/drivers/route");
+      useSession(tamperedAdminSession(f.a, f.b.tenantId));
+      const ids = await driverIds(await GET(req("/api/drivers")));
+      expect(ids).toContain(f.a.driver.id);
+      expect(ids).not.toContain(f.b.driver.id);
     });
   });
 });

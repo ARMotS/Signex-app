@@ -28,10 +28,42 @@ datasource db {
 // ([tenantId, id] targets), which make a row pointing into another scope
 // unrepresentable rather than merely discouraged.
 
+// A customer company: the branches (tenants) it owns, and the COMPANY_ADMIN
+// accounts that oversee some of them. Managed only by the SUPER_ADMIN. A
+// registry like Tenant — read through UNSAFE_unscopedPrisma, never scoped.
+model Company {
+  id          String    @id @default(cuid())
+  name        String
+  // An inactive company's COMPANY_ADMINs can view none of its branches.
+  // Its branches themselves (their ADMINs, drivers) are unaffected.
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  tenants     Tenant[]
+  companyAdmins Admin[]
+  allocations CompanyAdminAllocation[]
+}
+
+// What a scope is. ROOT: the SUPER_ADMIN's own. BRANCH: one ADMIN's workspace
+// (every scope before companies existed). COMPANY: where a company's
+// COMPANY_ADMIN accounts live — it holds no data of its own, and getScope()
+// refuses to hand a COMPANY_ADMIN a database client for it.
+enum TenantKind {
+  ROOT
+  BRANCH
+  COMPANY
+}
+
 model Tenant {
   id            String         @id @default(cuid())
   name          String
   slug          String         @unique
+  kind          TenantKind     @default(BRANCH)
+  // The company a BRANCH belongs to (null until assigned), or the company a
+  // COMPANY scope is the home of. Always null for ROOT (CHECK in migration).
+  companyId     String?
+  company       Company?       @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  allocations   CompanyAdminAllocation[]
   // Shown in the public driver-login company picker. The only field of a scope
   // that is ever exposed pre-authentication, and only for scopes whose owning
   // ADMIN is active.
@@ -65,6 +97,12 @@ model Tenant {
   courierTripSheets CourierTripSheet[]
   courierTripSheetInvoices CourierTripSheetInvoice[]
   courierImportFailures CourierImportFailure[]
+
+  // Composite-FK target: an allocation names a branch together with its
+  // company and kind, so allocating across companies, or allocating anything
+  // but a BRANCH, cannot be stored.
+  @@unique([id, companyId, kind])
+  @@index([companyId])
 }
 
 model User {
@@ -85,6 +123,9 @@ enum UserRole {
   SUPER_ADMIN
   ADMIN
   DRIVER
+  // Oversees the branch ADMINs a SUPER_ADMIN allocated to it, within one
+  // Company (Admin.companyId). See CompanyAdminAllocation.
+  COMPANY_ADMIN
 }
 
 // ─── Accounts ─────────────────────────────────────────────────────────────
@@ -112,11 +153,58 @@ model Admin {
   updatedAt    DateTime    @updatedAt
   tripSheets   TripSheet[]
   login        LoginName?
+  // Set only on a COMPANY_ADMIN account (User.role): the company it oversees.
+  // Null for every ADMIN and SUPER_ADMIN.
+  companyId    String?
+  company      Company?    @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  // As a COMPANY_ADMIN: the branch admins allocated to it.
+  overseesAllocations CompanyAdminAllocation[] @relation("AllocationCompanyAdmin")
+  // As a branch ADMIN: the COMPANY_ADMINs it is allocated to.
+  allocatedTo  CompanyAdminAllocation[] @relation("AllocationAdmin")
 
   // Composite-FK target so TripSheet.adminId cannot cross a scope boundary.
   @@unique([tenantId, id])
+  // Composite-FK target: an allocation's COMPANY_ADMIN must be of its company.
+  @@unique([id, companyId])
   @@index([tenantId])
   @@index([active])
+}
+
+// The SUPER_ADMIN's explicit grant: this COMPANY_ADMIN oversees this branch
+// ADMIN (and through it the branch). Checked on every request a COMPANY_ADMIN
+// makes, so removing a row takes effect on the next one.
+//
+// Its composite foreign keys make a wrong allocation unrepresentable rather
+// than merely refused by a route:
+//   [companyAdminId, companyId]             -> Admin[id, companyId]: the
+//       COMPANY_ADMIN belongs to this company;
+//   [branchTenantId, companyId, branchKind] -> Tenant[id, companyId, kind]: the
+//       branch belongs to the SAME company, and is a BRANCH (CHECK pins
+//       branchKind) — never the root scope or a company-home scope;
+//   [branchTenantId, adminId]               -> Admin[tenantId, id]: the
+//       allocated admin lives in that branch.
+// Moving a branch to another company is refused (ON UPDATE RESTRICT) until
+// its allocations are removed.
+//
+// `branchTenantId`, not `tenantId`, so a scoped client can never read it.
+model CompanyAdminAllocation {
+  id             String     @id @default(cuid())
+  companyId      String
+  company        Company    @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  companyAdminId String
+  companyAdmin   Admin      @relation("AllocationCompanyAdmin", fields: [companyAdminId, companyId], references: [id, companyId], onDelete: Cascade, onUpdate: Restrict)
+  adminId        String
+  admin          Admin      @relation("AllocationAdmin", fields: [branchTenantId, adminId], references: [tenantId, id], onDelete: Cascade, onUpdate: Restrict)
+  branchTenantId String
+  branchKind     TenantKind @default(BRANCH)
+  branch         Tenant     @relation(fields: [branchTenantId, companyId, branchKind], references: [id, companyId, kind], onDelete: Cascade, onUpdate: Restrict)
+  // The SUPER_ADMIN who made it. No foreign key: the record outlives them.
+  allocatedBy    String?
+  allocatedAt    DateTime   @default(now())
+
+  @@unique([companyAdminId, adminId])
+  @@index([companyAdminId, branchTenantId])
+  @@index([adminId])
 }
 
 model Driver {

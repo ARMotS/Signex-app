@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { CourierError, getCourierSheet } from "@/lib/courier-import";
 import { collectCourierSheet, readCollectInput } from "@/lib/courier-collect";
@@ -16,7 +16,7 @@ export const maxDuration = 60;
  */
 export const POST = withAuth(async (request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
 
   const read = readCollectInput(await request.json().catch(() => null));

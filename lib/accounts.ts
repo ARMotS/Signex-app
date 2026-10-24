@@ -469,7 +469,12 @@ export async function login(rawUsername: string, password: string): Promise<Logi
       success: true,
       account: {
         id: admin.id,
-        role: user?.role === "SUPER_ADMIN" ? "super_admin" : "admin",
+        role:
+          user?.role === "SUPER_ADMIN"
+            ? "super_admin"
+            : user?.role === "COMPANY_ADMIN"
+              ? "company_admin"
+              : "admin",
         name: admin.name,
         email: admin.email,
         tenantId: admin.tenantId,

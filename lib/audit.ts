@@ -48,6 +48,7 @@ const ACTOR_ROLE: Record<string, UserRole> = {
   admin: "ADMIN",
   driver: "DRIVER",
   super_admin: "SUPER_ADMIN",
+  company_admin: "COMPANY_ADMIN",
 };
 
 /**

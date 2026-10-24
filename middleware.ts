@@ -80,7 +80,7 @@ function resolveApiLimit(
 ): { identifier: string; config: typeof RATE_LIMITS.apiAnon; group: string } {
   if (session?.id) {
     const role = session.role;
-    if (role === "admin" || role === "super_admin") {
+    if (role === "admin" || role === "super_admin" || role === "company_admin") {
       return { identifier: session.id, group: "api:admin", config: RATE_LIMITS.apiAdmin };
     }
     if (role === "driver") {
@@ -186,7 +186,7 @@ export async function middleware(request: NextRequest) {
   const home = new URL(homePathForRole(role), request.url);
 
   // A driver never sees an admin page, whatever URL they type.
-  if (isAdminRoute && role !== "admin" && role !== "super_admin") {
+  if (isAdminRoute && role !== "admin" && role !== "super_admin" && role !== "company_admin") {
     return NextResponse.redirect(home);
   }
 

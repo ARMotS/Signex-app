@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { queryAuditLogs } from "@/lib/audit";
 import { readDispatchCompany } from "@/lib/config";
@@ -30,7 +30,7 @@ const asResponse = (err: unknown) => {
 // an id that exists nowhere.
 export const GET = withAuth(async (_request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
 
   const sheet = await getCourierSheet(ctx.tenantId, id);
@@ -58,7 +58,7 @@ export const GET = withAuth(async (_request: NextRequest, { params }: Ctx) => {
  */
 export const PUT = withAuth(async (request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
   const body = await request.json().catch(() => ({}));
   const who = ctx.name ?? null;
@@ -95,7 +95,7 @@ export const PUT = withAuth(async (request: NextRequest, { params }: Ctx) => {
 
 export const DELETE = withAuth(async (_request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
   try {
     await deleteCourierSheet(ctx.tenantId, id, ctx.name ?? null);

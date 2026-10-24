@@ -3,6 +3,7 @@ import { login, LOGIN_FAILED } from "@/lib/accounts";
 import { createSession } from "@/lib/session";
 import { normalizeUsername, homePathForRole } from "@/lib/credentials";
 import { logAudit } from "@/lib/audit";
+import { firstAllocatedBranch } from "@/lib/company";
 import {
   checkRateLimit,
   recordFailedAttempt,
@@ -10,7 +11,12 @@ import {
   RATE_LIMITS,
 } from "@/lib/rate-limit";
 
-const ROLE = { admin: "ADMIN", driver: "DRIVER", super_admin: "SUPER_ADMIN" } as const;
+const ROLE = {
+  admin: "ADMIN",
+  driver: "DRIVER",
+  super_admin: "SUPER_ADMIN",
+  company_admin: "COMPANY_ADMIN",
+} as const;
 
 function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get("x-forwarded-for");
@@ -89,7 +95,13 @@ export async function POST(request: NextRequest) {
         email: account.email,
         tenantId: account.tenantId,
       },
-      { evictOldest: body?.confirmEvict === true }
+      {
+        evictOldest: body?.confirmEvict === true,
+        // A COMPANY_ADMIN's own scope holds no data: start it in a branch it
+        // oversees. getSessionContext() re-checks the allocation every request.
+        viewTenantId:
+          account.role === "company_admin" ? await firstAllocatedBranch(account.id) : null,
+      }
     );
 
     // An office account already on its device limit (SESSION_LIMITS). Nothing

@@ -11,7 +11,7 @@ import {
 } from "@/lib/trip-data";
 import { matchStopsToContacts, applyContactMatches } from "@/lib/contact-matcher";
 import { saveUploadedFile } from "@/lib/trip-sheet-folder";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { scheduleCollectionSheets } from "@/lib/collection-sheet-sync";
 import { chooseTemplate, readPrompts, templateRef, templateSnapshot } from "@/lib/sheet-templates";
@@ -26,7 +26,7 @@ export const maxDuration = 60;
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const formData = await request.formData();
   const file = formData.get("file") as File | null;
@@ -224,7 +224,7 @@ export const POST = withAuth(async (request: NextRequest) => {
 
 export const GET = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const tripSheets = await getAllTripSheets(ctx.tenantId);
   const stats = await getTripStats(ctx.tenantId);
@@ -241,7 +241,7 @@ export const GET = withAuth(async () => {
 
 export const DELETE = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json();
   const { id, ids } = body;
@@ -285,7 +285,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
 
 export const PATCH = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json();
   const { id, ids } = body;

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
 import {
@@ -70,7 +70,7 @@ export const POST = withAuth(async (
   { params }: { params: Promise<{ id: string }> }
 ) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
 
   const open = await loadOpen(ctx, id);
@@ -122,7 +122,7 @@ export const PUT = withAuth(async (
   { params }: { params: Promise<{ id: string }> }
 ) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
 
   const open = await loadOpen(ctx, id);

@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 
 /**
- * SUPER_ADMIN scope switcher.
+ * Scope switcher: every scope for a SUPER_ADMIN, the allocated branches for a
+ * COMPANY_ADMIN (the server lists nothing else for it, and has no "own
+ * scope" entry — a company admin's home holds no data).
  *
  * Renders nothing for ADMIN and DRIVER sessions. The active scope is stored in
  * the signed session cookie server-side; this component only calls
@@ -31,17 +33,17 @@ export default function ScopeSwitcher({ role }: { role: string | null }) {
   const [open, setOpen] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
 
-  const isSuper = role === "super_admin";
+  const canSwitch = role === "super_admin" || role === "company_admin";
 
   useEffect(() => {
-    if (!isSuper) return;
+    if (!canSwitch) return;
     fetch("/api/admin/scopes")
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => data && setScopes(data.scopes))
       .catch(() => {});
-  }, [isSuper]);
+  }, [canSwitch]);
 
-  if (!isSuper || !scopes) return null;
+  if (!canSwitch || !scopes) return null;
 
   const active = scopes.find((s) => s.isActive);
   const viewingOther = active && !active.isHome;
@@ -89,7 +91,9 @@ export default function ScopeSwitcher({ role }: { role: string | null }) {
               viewingOther ? "text-ink-amber" : "text-sidebar-text-active"
             }`}
           >
-            {active?.isHome ? "My own scope" : active?.name ?? "Unknown"}
+            {active?.isHome
+              ? "My own scope"
+              : active?.name ?? (role === "company_admin" ? "Choose a branch" : "Unknown")}
           </span>
         </span>
         <span className="text-sidebar-text">
