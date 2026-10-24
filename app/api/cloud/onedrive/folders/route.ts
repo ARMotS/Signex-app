@@ -12,6 +12,7 @@ import {
 import { assertCollectionsFolderIsSibling, foldersOverlap } from "@/lib/collections";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { logAudit } from "@/lib/audit";
 
 /**
  * GET /api/cloud/onedrive/folders?parentId=<id>
@@ -152,6 +153,14 @@ export const POST = withAuth(async (request: NextRequest) => {
   } else {
     await setOneDriveFolder(ctx.tenantId, folderPath, folderItemId);
   }
+
+  await logAudit({
+    action: "CONFIG_UPDATE",
+    entity: "cloud_account",
+    details: `OneDrive ${target || "tripsheets"} folder set to ${folderPath}`,
+    metadata: { target: target || "tripsheets", folderPath },
+    tenantId: ctx.tenantId,
+  });
 
   return NextResponse.json({ success: true, folderPath, folderItemId, target: target || "tripsheets" });
 });

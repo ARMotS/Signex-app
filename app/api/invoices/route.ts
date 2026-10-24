@@ -3,6 +3,7 @@ import { listInvoiceFiles, getInvoiceFolderPath, deleteInvoiceFiles, deleteInvoi
 import { getCloudAccountStatus } from "@/lib/microsoft-graph";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { logAudit } from "@/lib/audit";
 import { readInvoiceNoPattern } from "@/lib/config";
 import { normalizeInvoiceNo } from "@/lib/invoice-number";
 import {
@@ -145,6 +146,16 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     reason: normalizeRemovalReason(body.reason) ?? DEFAULT_INVOICE_DELETED_REASON,
     removedBy: ctx.name,
   });
+
+  if (gone.length > 0) {
+    await logAudit({
+      action: "FILE_DELETE",
+      entity: "invoice",
+      details: `Deleted ${gone.length} invoice PDF${gone.length === 1 ? "" : "s"} (${mode === "original_only" ? "original only" : "original and signed"})`,
+      metadata: { mode, filenames: gone.slice(0, 100), count: gone.length },
+      tenantId: ctx.tenantId,
+    });
+  }
 
   return NextResponse.json({
     success: true,

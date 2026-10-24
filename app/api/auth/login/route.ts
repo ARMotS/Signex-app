@@ -2,12 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { login, LOGIN_FAILED } from "@/lib/accounts";
 import { createSession } from "@/lib/session";
 import { normalizeUsername, homePathForRole } from "@/lib/credentials";
+import { logAudit } from "@/lib/audit";
 import {
   checkRateLimit,
   recordFailedAttempt,
   clearAttempts,
   RATE_LIMITS,
 } from "@/lib/rate-limit";
+
+const ROLE = { admin: "ADMIN", driver: "DRIVER", super_admin: "SUPER_ADMIN" } as const;
 
 function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get("x-forwarded-for");
@@ -104,6 +107,23 @@ export async function POST(request: NextRequest) {
         { status: 409 }
       );
     }
+
+    // Logged here, not in login(): only now has a session actually started.
+    // The device id is passed because its cookie was only just set.
+    await logAudit({
+      action: "LOGIN",
+      entity: account.role === "driver" ? "driver" : "admin",
+      entityId: account.id,
+      userName: account.name,
+      details:
+        started.evicted > 0
+          ? `Signed in — signed out ${started.evicted} older device${started.evicted === 1 ? "" : "s"}`
+          : "Signed in",
+      tenantId: account.tenantId,
+      actor: { id: account.id, role: ROLE[account.role] },
+      deviceId: started.deviceId,
+      ...(started.evicted > 0 && { metadata: { evictedDevices: started.evicted } }),
+    });
 
     return NextResponse.json({
       success: true,

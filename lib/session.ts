@@ -139,7 +139,8 @@ export async function startSession(
   account: { id: string; role: SessionRole },
   options: SessionDevice & { evictOldest?: boolean; now?: number } = {}
 ): Promise<
-  { ok: true; token: string; expiresAt: number } | { ok: false; activeSessions: number }
+  | { ok: true; token: string; expiresAt: number; evicted: number }
+  | { ok: false; activeSessions: number }
 > {
   const now = options.now ?? Date.now();
   const token = generateSessionToken(now);
@@ -210,7 +211,7 @@ export async function startSession(
         WHERE "id" = ${account.id}`;
     }
 
-    return { ok: true as const, token, expiresAt };
+    return { ok: true as const, token, expiresAt, evicted: plan.evict.length };
   });
 }
 
@@ -267,7 +268,10 @@ async function writeSessionCookie(session: SessionData): Promise<void> {
 export async function createSession(
   user: SessionAccount,
   options: { evictOldest?: boolean } = {}
-): Promise<{ ok: true } | { ok: false; activeSessions: number }> {
+): Promise<
+  | { ok: true; deviceId: string; evicted: number }
+  | { ok: false; activeSessions: number }
+> {
   const cookieStore = await cookies();
   const existingDevice = cookieStore.get(DEVICE_COOKIE)?.value;
   const deviceId =
@@ -300,7 +304,7 @@ export async function createSession(
     sessionToken: started.token,
     exp: started.expiresAt,
   });
-  return { ok: true };
+  return { ok: true, deviceId, evicted: started.evicted };
 }
 
 /**
@@ -345,6 +349,24 @@ export async function getSession(): Promise<SessionData | null> {
     return null;
   }
   return data;
+}
+
+/**
+ * The signed session cookie, verified but with no side effects — no cookie is
+ * cleared, nothing is revoked-checked. For the audit log to name who made a
+ * request; never an authorisation check (getScope() is).
+ */
+export async function peekSession(): Promise<SessionData | null> {
+  const cookieStore = await cookies();
+  const data = readSessionCookie(cookieStore.get(SESSION_COOKIE)?.value);
+  return data && data.exp >= Date.now() ? data : null;
+}
+
+/** This browser's signex-device id, if it has one. */
+export async function peekDeviceId(): Promise<string | null> {
+  const cookieStore = await cookies();
+  const id = cookieStore.get(DEVICE_COOKIE)?.value;
+  return id && DEVICE_ID.test(id) ? id : null;
 }
 
 /**

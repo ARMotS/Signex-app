@@ -3,7 +3,6 @@ import { UNSAFE_unscopedPrisma } from "@/lib/db-scoped";
 import { getSessionContext, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { createAdminAccount } from "@/lib/accounts";
-import { logAudit } from "@/lib/audit";
 import { validatePassword, validateUsername } from "@/lib/credentials";
 
 /**
@@ -99,14 +98,8 @@ export const POST = withAuth(async (request: NextRequest) => {
     data: { ownerAdminId: result.account!.id },
   });
 
-  await logAudit({
-    action: "CONFIG_UPDATE",
-    entity: "admin",
-    entityId: result.account!.id,
-    userName: ctx.name,
-    details: `SUPER_ADMIN created scope "${tenantName}" (${tenant.id}) with ADMIN ${normalizedEmail}`,
-    tenantId: ctx.homeTenantId,
-  });
+  // createAdminAccount logged ACCOUNT_CREATE in the new scope, with the
+  // SUPER_ADMIN as its actor.
 
   return NextResponse.json({ tenant, user, admin: result.account });
 });

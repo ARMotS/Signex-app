@@ -4,6 +4,7 @@ import { listCollections, type CollectionRecord } from "@/lib/trip-data";
 import { dayWindow, parseTzOffset } from "@/lib/day-window";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { logAudit } from "@/lib/audit";
 import { readInvoiceNoPattern } from "@/lib/config";
 import { awaitingCreditReview } from "@/lib/collection-confirm";
 import { normalizeInvoiceNo, type InvoiceNoPattern } from "@/lib/invoice-number";
@@ -117,6 +118,13 @@ export const GET = withAuth(async (request: NextRequest) => {
     const rows = applyFilter(all, state, acc, new Date(), parseTzOffset(searchParams.get("tzOffset")));
 
     if (searchParams.get("format") === "csv") {
+      await logAudit({
+        action: "EXPORT",
+        entity: "collections",
+        details: `Collections CSV exported (${rows.length} rows)`,
+        metadata: { format: "csv", rows: rows.length },
+        tenantId: ctx.tenantId,
+      });
       return new NextResponse(toCsv(CSV_HEADERS, rows.map(csvRow)), {
         headers: {
           "Content-Type": "text/csv; charset=utf-8",

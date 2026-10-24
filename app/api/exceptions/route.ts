@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { logAudit } from "@/lib/audit";
 import { exceptionsCsv, loadExceptions } from "@/lib/exceptions";
 
 /**
@@ -30,6 +31,17 @@ export const GET = withAuth(async (request: NextRequest) => {
   });
 
   if (searchParams.get("format") === "csv") {
+    await logAudit({
+      action: "EXPORT",
+      entity: "exceptions",
+      details: "Exceptions CSV exported",
+      metadata: {
+        format: "csv",
+        from: searchParams.get("from") || null,
+        to: searchParams.get("to") || null,
+      },
+      tenantId: ctx.tenantId,
+    });
     return new Response(exceptionsCsv(result.lists), {
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
