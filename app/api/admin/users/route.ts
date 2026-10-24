@@ -277,10 +277,22 @@ export const PATCH = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireRole(ctx, "SUPER_ADMIN");
 
-  const { id, name, email, username, password, role } = await request.json();
+  const { id, name, email, username, password, role, companyName } = await request.json();
 
   if (!id) {
     return NextResponse.json({ error: "Admin ID is required" }, { status: 400 });
+  }
+
+  // Optional. Printed on courier handover stamps, so it is bounded and never blank.
+  const newCompanyName =
+    typeof companyName === "string" && companyName.trim() !== ""
+      ? companyName.trim()
+      : undefined;
+  if (newCompanyName !== undefined && newCompanyName.length > 100) {
+    return NextResponse.json(
+      { error: "Company name must be 100 characters or fewer" },
+      { status: 400 }
+    );
   }
 
   // SCOPE-EXEMPT: SUPER_ADMIN account management. Addressed by primary key.
@@ -394,10 +406,15 @@ export const PATCH = withAuth(async (request: NextRequest) => {
   }
 
   // Keep the scope's label in step with the admin's name.
-  if (name !== undefined) {
+  // The company name is the label the console and the courier stamp read. The
+  // root scope has no owner, so it can never be renamed this way.
+  if (name !== undefined || newCompanyName !== undefined) {
     await UNSAFE_unscopedPrisma.tenant.updateMany({
       where: { ownerAdminId: target.id },
-      data: { name },
+      data: {
+        ...(name !== undefined && { name }),
+        ...(newCompanyName !== undefined && { companyName: newCompanyName }),
+      },
     });
   }
 

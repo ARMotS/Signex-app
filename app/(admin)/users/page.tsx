@@ -59,6 +59,7 @@ export default function UsersPage() {
   const [editUsernameStatus, setEditUsernameStatus] = useState<UsernameStatus>("empty");
   const [editPassword, setEditPassword] = useState("");
   const [editRole, setEditRole] = useState("ADMIN");
+  const [editCompanyName, setEditCompanyName] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
 
   // Delete confirmation state
@@ -140,6 +141,7 @@ export default function UsersPage() {
     setEditUsername(user.username ?? "");
     setEditPassword("");
     setEditRole(user.role);
+    setEditCompanyName(user.scope.companyName ?? "");
   };
 
   const handleEdit = async (e: React.FormEvent) => {
@@ -161,6 +163,12 @@ export default function UsersPage() {
             editUsername && editUsername !== editUser.username ? editUsername : undefined,
           password: editPassword || undefined,
           role: editRole,
+          companyName:
+            !editUser.scope.isRoot &&
+            editCompanyName.trim() &&
+            editCompanyName.trim() !== editUser.scope.companyName
+              ? editCompanyName.trim()
+              : undefined,
         }),
       });
       const data = await res.json();
@@ -508,6 +516,22 @@ export default function UsersPage() {
                   className="w-full px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
                 />
               </div>
+              {!editUser.scope.isRoot && (
+                <div>
+                  <label htmlFor="edit-admin-company" className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">Company name</label>
+                  <input
+                    id="edit-admin-company"
+                    type="text"
+                    value={editCompanyName}
+                    onChange={(e) => setEditCompanyName(e.target.value)}
+                    maxLength={100}
+                    className="w-full px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors"
+                  />
+                  <p className="text-[11px] text-ink-muted mt-1.5">
+                    Also printed on this workspace&apos;s courier handover stamp.
+                  </p>
+                </div>
+              )}
               <div>
                 <label htmlFor="edit-admin-username" className="block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5">Username</label>
                 <UsernameField
