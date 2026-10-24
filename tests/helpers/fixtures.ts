@@ -59,6 +59,7 @@ export const CREDENTIALS = {
 export async function resetDatabase() {
   const p = db();
   // Order matters: children before parents.
+  await p.userSession.deleteMany();
   await p.loginName.deleteMany();
   await p.creditNote.deleteMany();
   await p.courierTripSheet.deleteMany();
@@ -372,7 +373,7 @@ export function sessionMockFactory() {
       if (currentSession) currentSession.viewTenantId = tenantId;
       return true;
     }),
-    validateSessionToken: vi.fn(async () => true),
+    validateSession: vi.fn(async () => true),
     destroySession: vi.fn(async () => {}),
   };
 }

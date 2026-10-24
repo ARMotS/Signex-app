@@ -89,15 +89,17 @@ export async function POST(request: NextRequest) {
       { evictOldest: body?.confirmEvict === true }
     );
 
-    // An admin already on MAX_ADMIN_SESSIONS devices. Nothing was signed in or
-    // out; the form asks, and resubmits with confirmEvict if they go ahead.
-    // Only reachable with the right password, so it reveals nothing to a guesser.
+    // An office account already on its device limit (SESSION_LIMITS). Nothing
+    // was signed in or out; the form asks, and resubmits with confirmEvict if
+    // they go ahead. Only reachable with the right password, so it reveals
+    // nothing to a guesser.
     if (!started.ok) {
+      const n = started.activeSessions;
       return NextResponse.json(
         {
           code: "SESSION_LIMIT",
-          activeSessions: started.activeSessions,
-          error: `This account is already signed in on ${started.activeSessions} devices.`,
+          activeSessions: n,
+          error: `This account is already signed in on ${n === 1 ? "another device" : `${n} devices`}.`,
         },
         { status: 409 }
       );

@@ -1,64 +1,57 @@
 /**
- * How many devices an ADMIN may be signed in on, and what a 4th login does.
+ * How many devices each account may be signed in on, and what a login past
+ * that does.
  *
- * The rule is to ASK, never to silently sign someone else out: past the limit
- * a login is refused until the person confirms. Expired sessions must not
- * count, or a browser that was simply closed would hold a slot for good.
- * The locked read-decide-write around this is covered against a real database
- * in tests/isolation.test.ts.
+ * For an office account the rule is to ASK, never to silently sign someone
+ * else out: past the limit a login is refused until the person confirms. A
+ * driver has one phone, so their login always takes the slot. The locked
+ * read-decide-write around this, and the per-request revocation check, are
+ * covered against a real database in tests/isolation.test.ts.
  */
 
 import { describe, it, expect } from "vitest";
-import { planAdminSession, isSessionTokenLive, MAX_ADMIN_SESSIONS } from "@/lib/session";
+import { planSessionStart, SESSION_LIMITS, hashSessionToken } from "@/lib/session";
 
-const NOW = Date.UTC(2026, 9, 13, 12);
-const HOUR = 3_600_000;
-const tokenAt = (ms: number, tag = "x") => `${ms.toString(36)}.${tag}`;
-
-describe("isSessionTokenLive", () => {
-  it("is live within the 24h cookie lifetime", () => {
-    expect(isSessionTokenLive(tokenAt(NOW - 23 * HOUR), NOW)).toBe(true);
-  });
-
-  it("is dead once the cookie it was issued with has expired", () => {
-    expect(isSessionTokenLive(tokenAt(NOW - 25 * HOUR), NOW)).toBe(false);
-  });
-
-  it("treats a pre-timestamp token as live — its age is unknown", () => {
-    expect(isSessionTokenLive("a".repeat(64), NOW)).toBe(true);
-  });
-
-  it("treats an unparseable issue time as dead", () => {
-    expect(isSessionTokenLive("!!.abc", NOW)).toBe(false);
+describe("SESSION_LIMITS", () => {
+  it("is one device for the super admin and a driver, five for an admin", () => {
+    expect(SESSION_LIMITS).toEqual({ super_admin: 1, admin: 5, driver: 1 });
   });
 });
 
-describe("planAdminSession", () => {
-  const live = (n: number) => Array.from({ length: n }, (_, i) => tokenAt(NOW - (n - i) * HOUR, `d${i + 1}`));
+describe("planSessionStart", () => {
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `s${i + 1}`);
 
-  it("allows three devices", () => {
-    expect(MAX_ADMIN_SESSIONS).toBe(3);
-    const plan = planAdminSession(live(2), "new", false, NOW);
-    expect(plan).toEqual({ ok: true, tokens: [...live(2), "new"] });
+  it("allows a login below the limit and signs nobody out", () => {
+    expect(planSessionStart(ids(4), 5, false)).toEqual({ ok: true, evict: [] });
   });
 
-  it("holds a 4th login back instead of signing anyone out", () => {
-    expect(planAdminSession(live(3), "new", false, NOW)).toEqual({ ok: false, activeSessions: 3 });
+  it("holds a login at the limit back instead of signing anyone out", () => {
+    expect(planSessionStart(ids(5), 5, false)).toEqual({ ok: false, activeSessions: 5 });
   });
 
   it("signs out only the oldest device once the person confirms", () => {
-    const current = live(3);
-    expect(planAdminSession(current, "new", true, NOW)).toEqual({
-      ok: true,
-      tokens: [current[1], current[2], "new"],
-    });
+    expect(planSessionStart(ids(5), 5, true)).toEqual({ ok: true, evict: ["s1"] });
   });
 
-  it("does not count expired sessions, so no prompt is needed", () => {
-    const current = [tokenAt(NOW - 30 * HOUR, "stale"), ...live(2)];
-    expect(planAdminSession(current, "new", false, NOW)).toEqual({
-      ok: true,
-      tokens: [...live(2), "new"],
-    });
+  it("asks a single-device account before taking the slot", () => {
+    expect(planSessionStart(ids(1), 1, false)).toEqual({ ok: false, activeSessions: 1 });
+    expect(planSessionStart(ids(1), 1, true)).toEqual({ ok: true, evict: ["s1"] });
+  });
+
+  it("brings an account that is over a lowered limit back down to it", () => {
+    // A super admin signed in on three devices from before the limit was one.
+    expect(planSessionStart(ids(3), 1, true)).toEqual({ ok: true, evict: ["s1", "s2", "s3"] });
+  });
+
+  it("confirming with a free slot still signs nobody out", () => {
+    expect(planSessionStart(ids(2), 5, true)).toEqual({ ok: true, evict: [] });
+  });
+});
+
+describe("hashSessionToken", () => {
+  it("is the hex SHA-256 the migration's backfill also computes", () => {
+    expect(hashSessionToken("tok1")).toBe(
+      "80b3ad2d438bfafa1ea690c5a59f54548dcc76ad6a839c6704ac1d9d565d9c80"
+    );
   });
 });

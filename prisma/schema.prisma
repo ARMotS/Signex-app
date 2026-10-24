@@ -102,9 +102,11 @@ model Admin {
   // previous deploy keeps validating through the rollout; drop it in a later
   // migration once nothing reads it.
   sessionToken String?
-  // Live sessions, oldest first, at most MAX_ADMIN_SESSIONS (lib/session.ts).
-  // A new login past the cap evicts the oldest device.
+  // Retired by UserSession, which is what sessions are checked against now.
+  // Still written (live tokens, oldest first) so a rollback keeps validating;
+  // drop it in a later migration.
   sessionTokens String[]   @default([])
+  sessions     UserSession[]
   tenantId     String      @default("")
   tenant       Tenant      @relation(fields: [tenantId], references: [id])
   createdAt    DateTime    @default(now())
@@ -130,7 +132,9 @@ model Driver {
   // sign in until an ADMIN sets a username and password on the Drivers page.
   passwordHash String?
   active       Boolean     @default(true)
+  // Retired by UserSession; still written so a rollback keeps validating.
   sessionToken String?
+  sessions     UserSession[]
   userId       String?     @unique
   user         User?       @relation(fields: [userId], references: [id])
   tenantId     String      @default("")
@@ -173,6 +177,48 @@ model LoginName {
   driver    Driver?  @relation(fields: [driverId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// One signed-in device. Every authenticated request looks its row up by the
+// SHA-256 of the cookie's session token (the token itself is never stored),
+// so revoking a row signs that device out on its very next request — not
+// when the 24h cookie runs out. See lib/session.ts.
+//
+// Belongs to exactly one Admin or Driver (CHECK in the migration) and goes
+// with it. A registry like LoginName: no tenantId, read only through
+// lib/session.ts, so a scoped `db.userSession` call fails rather than
+// returning every tenant's devices.
+//
+// Admin.sessionTokens / sessionToken and Driver.sessionToken are still
+// written alongside, for the previous deploy during the rollout.
+model UserSession {
+  id            String    @id @default(cuid())
+  tokenHash     String    @unique
+  adminId       String?
+  admin         Admin?    @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  driverId      String?
+  driver        Driver?   @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  // Random id from the long-lived signex-device cookie: which browser this is,
+  // across sign-ins. An identifier, not a credential — it is client-held.
+  deviceId      String?
+  userAgent     String?
+  browser       String?
+  os            String?
+  // phone | tablet | desktop; null when the user agent says nothing usable.
+  deviceType    String?
+  ipAddress     String?
+  createdAt     DateTime  @default(now())
+  // Moved at most once a minute, from getScope().
+  lastSeenAt    DateTime  @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  // logout | evicted | replaced | password_reset | deactivated
+  revokedReason String?
+
+  @@index([adminId, revokedAt])
+  @@index([driverId, revokedAt])
+  @@index([deviceId])
+  @@index([lastSeenAt])
 }
 
 // ─── Trip Sheets & Stops ──────────────────────────────────────────────────

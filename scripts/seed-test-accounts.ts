@@ -66,7 +66,7 @@ async function upsertAdmin(opts: {
 }) {
   const admin = await prisma.admin.upsert({
     where: { email: opts.email },
-    update: { passwordHash: hashPassword(opts.password), active: true, sessionToken: null },
+    update: { passwordHash: hashPassword(opts.password), active: true, sessionToken: null, sessions: { deleteMany: {} } },
     create: {
       name: opts.name,
       email: opts.email,
@@ -94,7 +94,7 @@ async function upsertDriverWithStop(opts: {
 }) {
   const driver = await prisma.driver.upsert({
     where: { tenantId_name: { tenantId: opts.tenantId, name: opts.name } },
-    update: { passwordHash: hashPassword(opts.password), active: true, sessionToken: null },
+    update: { passwordHash: hashPassword(opts.password), active: true, sessionToken: null, sessions: { deleteMany: {} } },
     create: { name: opts.name, passwordHash: hashPassword(opts.password), tenantId: opts.tenantId },
   });
   await claimUsername(opts.username, { driverId: driver.id });
