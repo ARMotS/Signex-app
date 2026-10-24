@@ -27,10 +27,12 @@ import {
   assessCourierSheet,
   blocksHandover,
   companyKey,
+  confirmationState,
   originalFileName,
   originalFolder,
   readCourierSheet,
   todayInJohannesburg,
+  type ConfirmationState,
   type CourierIssue,
   type CourierSheetRead,
   type LineFacts,
@@ -536,19 +538,36 @@ async function openSheet(tenantId: string, id: string) {
   return row;
 }
 
-/** Link a contact by hand — the sheet's customer name did not match one. */
+/**
+ * Link a contact by hand — the sheet's customer name did not match one. Also
+ * allowed once COLLECTED, while the customer has not confirmed: the contact
+ * is then only where the confirmation email goes (the caller sends it).
+ */
 export async function linkCourierContact(tenantId: string, id: string, contactId: string, userName: string | null) {
-  await openSheet(tenantId, id);
+  const sheet = await scopedPrisma(tenantId).courierTripSheet.findFirst({ where: { id }, select: { status: true } });
+  const collected = sheet?.status === "COLLECTED";
+  if (!collected) await openSheet(tenantId, id);
   const contact = await scopedPrisma(tenantId).contact.findFirst({
     where: { id: contactId, deletedAt: null },
-    select: { id: true, companyName: true },
+    select: { id: true, companyName: true, email: true },
   });
   // Another scope's contact is simply not found.
   if (!contact) throw new CourierError("NOT_FOUND", "Contact not found", 404);
   await scopedPrisma(tenantId).courierTripSheet.updateMany({
-    where: { id, status: { in: OPEN } },
-    data: { contactId: contact.id },
+    where: { id, status: { in: collected ? ["COLLECTED"] : OPEN } },
+    data: { contactId: contact.id, ...(collected ? { customerEmail: contact.email?.trim() || null } : {}) },
   });
+  if (collected) {
+    await logAudit({
+      action: "CONFIG_UPDATE",
+      entity: "courier_sheet",
+      entityId: id,
+      userName: userName ?? undefined,
+      details: `Linked contact ${contact.companyName} for the confirmation email`,
+      tenantId,
+    });
+    return { status: "COLLECTED" as CourierStatus, changed: true };
+  }
   await logAudit({
     action: "CONFIG_UPDATE",
     entity: "courier_sheet",
@@ -644,6 +663,8 @@ export interface CourierSheetSummary {
   blockCount: number;
   warningCount: number;
   hasEmail: boolean;
+  /** After the handover: where it stands with the customer. */
+  confirmation: ConfirmationState | null;
   createdAt: string;
 }
 
@@ -663,6 +684,10 @@ export async function listCourierSheets(tenantId: string, limit = 500): Promise<
       status: true,
       issues: true,
       customerEmail: true,
+      filingCompletedAt: true,
+      emailStatus: true,
+      reminderSentAt: true,
+      confirmedAt: true,
       createdAt: true,
       invoices: { orderBy: { lineNo: "asc" }, select: { invoiceNo: true } },
     },
@@ -683,6 +708,7 @@ export async function listCourierSheets(tenantId: string, limit = 500): Promise<
       blockCount: issues.filter((i) => i.level === "block").length,
       warningCount: issues.filter((i) => i.level === "warning").length,
       hasEmail: !!r.customerEmail,
+      confirmation: confirmationState(r),
       createdAt: r.createdAt.toISOString(),
     };
   });
@@ -720,6 +746,14 @@ export async function getCourierSheet(tenantId: string, id: string) {
       filingCompletedAt: true,
       filingError: true,
       driverSignature: true,
+      // The customer's email and confirmation — never the link's token.
+      emailStatus: true,
+      emailSentAt: true,
+      emailRecipient: true,
+      emailError: true,
+      reminderSentAt: true,
+      confirmedAt: true,
+      confirmTokenExpiresAt: true,
       createdAt: true,
       updatedAt: true,
       contact: { select: { id: true, companyName: true, email: true, contactPerson: true, phone: true } },

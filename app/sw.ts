@@ -9,7 +9,7 @@
 
 import { defaultCache } from "@serwist/next/worker";
 import type { PrecacheEntry, SerwistGlobalConfig } from "serwist";
-import { Serwist, CacheFirst, NetworkFirst, StaleWhileRevalidate, ExpirationPlugin } from "serwist";
+import { Serwist, CacheFirst, NetworkFirst, NetworkOnly, StaleWhileRevalidate, ExpirationPlugin } from "serwist";
 
 declare global {
   interface WorkerGlobalScope extends SerwistGlobalConfig {
@@ -25,6 +25,13 @@ const serwist = new Serwist({
   clientsClaim: true,
   navigationPreload: true,
   runtimeCaching: [
+    // A customer's delivery link (and its confirm call) — never from a cache.
+    // The page carries a secret token, and a cached copy would offer Confirm
+    // received for a delivery already confirmed.
+    {
+      matcher: ({ url }) => /^\/(api\/public\/)?delivery\//.test(url.pathname),
+      handler: new NetworkOnly(),
+    },
     // API calls — network first with 10s timeout, cache fallback
     {
       matcher: ({ url }) => url.pathname.startsWith("/api/"),

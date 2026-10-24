@@ -187,6 +187,28 @@ export default function AdminLayout({
     return () => clearInterval(interval);
   }, [router]);
 
+  // The Courier badge: sheets that need the office. Polled gently, and not
+  // at all while the tab is hidden; the dashboard carries the detail.
+  const [courierAttention, setCourierAttention] = useState(0);
+  useEffect(() => {
+    if (!role) return;
+    const look = () => {
+      if (document.visibilityState !== "visible") return;
+      fetch("/api/courier/attention")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => typeof d?.attention === "number" && setCourierAttention(d.attention))
+        .catch(() => {});
+    };
+    look();
+    const interval = setInterval(look, 60_000);
+    document.addEventListener("visibilitychange", look);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", look);
+    };
+  }, [role, pathname]);
+  const badgeFor = (href: string) => (href === "/courier" ? courierAttention : 0);
+
   const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     router.replace("/login");
@@ -233,8 +255,15 @@ export default function AdminLayout({
                   {item.icon}
                 </span>
                 {item.label}
-                {isActive && (
-                  <span className="ml-auto w-1.5 h-1.5 rounded-full bg-ink-green" />
+                {badgeFor(item.href) > 0 ? (
+                  <span
+                    className="ml-auto min-w-5 h-5 px-1.5 rounded-full bg-ink-amber text-[11px] leading-5 text-center text-ink-black"
+                    aria-label={`${badgeFor(item.href)} need attention`}
+                  >
+                    {badgeFor(item.href)}
+                  </span>
+                ) : (
+                  isActive && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-ink-green" />
                 )}
               </Link>
             );
@@ -318,7 +347,14 @@ export default function AdminLayout({
                     isActive ? "text-ink-green" : "text-ink-muted"
                   }`}
                 >
-                  {item.icon}
+                  <span className="relative">
+                    {item.icon}
+                    {badgeFor(item.href) > 0 && (
+                      <span className="absolute -top-1.5 -right-2.5 min-w-4 h-4 px-1 rounded-full bg-ink-amber text-[10px] leading-4 text-center text-ink-black">
+                        {badgeFor(item.href)}
+                      </span>
+                    )}
+                  </span>
                   <span className="text-[10px] font-mono whitespace-nowrap">{item.label}</span>
                 </Link>
               );

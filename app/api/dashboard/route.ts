@@ -4,6 +4,7 @@ import { getAllTripSheets, getCompletedTripSheets } from "@/lib/trip-data";
 import { dayWindow, parseTzOffset } from "@/lib/day-window";
 import { getScope, requireRole } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { courierOverview } from "@/lib/courier-confirm";
 
 /**
  * Everything the dispatcher's wallboard shows, in one round trip.
@@ -233,6 +234,9 @@ export const GET = withAuth(async (request: NextRequest) => {
     sendable: !!s.contact?.email,
   }));
 
+  // Courier sheets: what is waiting on the courier, the customer, or the office.
+  const courier = await courierOverview(ctx.tenantId, day.start);
+
   // ─── Headline figures ───────────────────────────────────────────────────
   const remaining = pending + inProgress;
   const stopsDeliveredToday =
@@ -277,6 +281,7 @@ export const GET = withAuth(async (request: NextRequest) => {
       /** So the UI can say what "not sent" is counted over. */
       untriedWindowDays: UNTRIED_QUEUE_DAYS,
     },
+    courier,
     drivers,
     tripSheets,
     completedToday,

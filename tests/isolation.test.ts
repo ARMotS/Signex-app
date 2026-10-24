@@ -54,11 +54,27 @@ vi.mock("@/lib/session", () => sessionMockFactory());
  * confirmation would have gone to is the leak that matters most here.
  */
 const sentEmails: { to: string; invoiceNumber: string }[] = [];
+/** Courier emails: who they went to, which link they carried, what was attached. */
+const courierEmails: { to: string; reminder: boolean; confirmUrl: string; invoiceNos: string[]; attachments: Buffer[] }[] = [];
+const courierMail = { fail: false };
 vi.mock("@/lib/email", () => ({
   sendDeliveryConfirmation: vi.fn(
     async (p: { customerEmail: string; invoiceNumber: string }) => {
       sentEmails.push({ to: p.customerEmail, invoiceNumber: p.invoiceNumber });
       return { success: true, emailId: `test-${sentEmails.length}` };
+    }
+  ),
+  sendCourierDispatch: vi.fn(
+    async (p: { customerEmail: string; reminder?: boolean; confirmUrl: string; invoiceNos: string[]; attachments: { content: Buffer }[] }) => {
+      if (courierMail.fail) return { success: false, error: "550 mailbox unavailable" };
+      courierEmails.push({
+        to: p.customerEmail,
+        reminder: !!p.reminder,
+        confirmUrl: p.confirmUrl,
+        invoiceNos: p.invoiceNos,
+        attachments: p.attachments.map((a) => a.content),
+      });
+      return { success: true, emailId: `courier-${courierEmails.length}` };
     }
   ),
 }));
@@ -1252,6 +1268,11 @@ suite("cross-ADMIN isolation", () => {
           if (method === "GET" && files.some((name) => u.includes(`/items/invoice-folder-A:/${name}:/content`))) {
             return new Response(new Uint8Array(pdf));
           }
+          // The signed copy, read back to attach to the customer's email.
+          if (method === "GET" && u.includes("/items/invoice-folder-A:/signed/")) {
+            const hit = [...uploads].reverse().find((x) => u.includes(x.url.split("/items/signed-A:/")[1].replace(":/content", "")));
+            return hit ? new Response(new Uint8Array(hit.body)) : json({ error: { code: "itemNotFound" } }, 404);
+          }
           if (method === "PUT" && u.includes("/items/signed-A:/")) {
             if (failUpload) return json({ error: { code: "serviceNotAvailable" } }, 500);
             uploads.push({ url: u, token, body: Buffer.from(init.body) });
@@ -1270,6 +1291,7 @@ suite("cross-ADMIN isolation", () => {
 
       beforeEach(() => {
         uploads.length = 0;
+        courierEmails.length = 0;
       });
 
       it("another scope's sheet is 404 to sign or file, and is left as it was", async () => {
@@ -1358,6 +1380,16 @@ suite("cross-ADMIN isolation", () => {
 
         // B's sheet with the same invoice number is untouched.
         expect(await db().courierTripSheet.count({ where: { tenantId: f.b.tenantId, status: "COLLECTED" } })).toBe(0);
+
+        // Once filed, the customer's email went to A's own contact, carrying
+        // the stamped copy and a link to this sheet.
+        expect(courierEmails).toHaveLength(1);
+        expect(courierEmails[0]).toMatchObject({ to: "acme-a@example.test", reminder: false, invoiceNos: ["7105"] });
+        expect(courierEmails[0].attachments.map((b) => b.equals(uploads[0].body))).toEqual([true]);
+        const token = courierEmails[0].confirmUrl.split("/delivery/")[1];
+        const { hashConfirmToken } = await import("@/lib/courier-confirm");
+        expect(after.confirmTokenHash).toBe(hashConfirmToken(token));
+        expect(after).toMatchObject({ emailStatus: "SENT", emailRecipient: "acme-a@example.test" });
       });
 
       it("keeps the handover when filing fails, and Retry filing finishes it", async () => {
@@ -1375,6 +1407,9 @@ suite("cross-ADMIN isolation", () => {
           expect(failed.filingError).toContain("Invoice 7106");
           expect(failed.driverSignature).toBe(SIGNATURE);
           expect(failed.filingCompletedAt).toBeNull();
+          // The email waits for every copy to be filed.
+          expect(courierEmails).toHaveLength(0);
+          expect(failed.emailStatus).toBe("NOT_SENT");
 
           // Another scope cannot retry it.
           const { POST: file } = await import("@/app/api/courier/[id]/file/route");
@@ -1392,6 +1427,262 @@ suite("cross-ADMIN isolation", () => {
         expect(done).toMatchObject({ filingError: null, driverSignature: null });
         expect(done.filingCompletedAt).not.toBeNull();
         expect(uploads).toHaveLength(1);
+        expect(courierEmails.map((e) => e.to)).toEqual(["acme-a@example.test"]);
+      });
+    });
+
+    // ── The customer's confirmation ──
+    //
+    // The customer's link carries no scope and no session — the token is the
+    // credential. It must find only its own sheet; the daily job reads every
+    // scope and must mail each customer from their own scope's contact; and
+    // the office's counts read only their own sheets.
+    describe("customer confirmation", () => {
+      /** A sheet the courier has signed for and whose copies are all filed. */
+      async function collectedSheet(fx: typeof f.a, no: string, customerName = "Acme Trading") {
+        return db().courierTripSheet.create({
+          data: {
+            tenantId: fx.tenantId,
+            courierSheetNo: no,
+            sheetDate: new Date("2026-10-22"),
+            customerName,
+            courierCompany: "The Courier Guy",
+            sourceFileName: `cts-${no}-p5.xlsx`,
+            importedById: fx.admin.id,
+            status: "COLLECTED",
+            collectedAt: new Date(),
+            filingCompletedAt: new Date(),
+            dispatchCompany: `Branch ${fx.tenantId.slice(-4)}`,
+            waybills: ["W72"],
+            invoices: {
+              create: [{ lineNo: 1, invoiceNo: no, invoiceNoNormalized: no, waybillNo: "W72", signedAt: new Date(), signedFileName: `IV-${no}.pdf` }],
+            },
+          },
+        });
+      }
+
+      async function notify(fx: typeof f.a | null, id: string, body: unknown = {}) {
+        const { POST } = await import("@/app/api/courier/[id]/notify/route");
+        useSession(fx ? adminSession(fx) : driverSession(f.a));
+        const res = await POST(req(`/api/courier/${id}/notify`, { method: "POST", body }), params({ id }));
+        return { status: res.status, body: await res.json() };
+      }
+
+      async function confirm(token: string) {
+        const { POST } = await import("@/app/api/public/delivery/[token]/confirm/route");
+        useSession(null);
+        const res = await POST(req(`/api/public/delivery/${token}/confirm`, { method: "POST" }), params({ token }));
+        return { status: res.status, body: await res.json() };
+      }
+
+      const tokenOf = (url: string) => url.split("/delivery/")[1];
+
+      beforeEach(() => {
+        courierEmails.length = 0;
+        courierMail.fail = false;
+      });
+
+      it("the email goes to the caller's own customer with a link to the caller's own sheet; another scope's sheet is 404", async () => {
+        const a = await collectedSheet(f.a, "720001");
+        const b = await collectedSheet(f.b, "720001");
+
+        const sent = await notify(f.a, a.id);
+        expect(sent.status).toBe(200);
+        expect(sent.body).toMatchObject({ outcome: "sent", recipient: "acme-a@example.test" });
+        expect(courierEmails.map((e) => e.to)).toEqual(["acme-a@example.test"]);
+
+        // Never the token or its hash back to the browser.
+        const row = await db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } });
+        const token = tokenOf(courierEmails[0].confirmUrl);
+        expect(JSON.stringify(sent.body)).not.toContain(token);
+        expect(JSON.stringify(sent.body)).not.toContain(row.confirmTokenHash!);
+        expect(row.confirmTokenEnc).not.toContain(token);
+
+        expect((await notify(f.a, b.id)).status).toBe(404);
+        expect((await notify(null, a.id)).status).toBe(403);
+        expect(courierEmails).toHaveLength(1);
+        expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: b.id } })).emailStatus).toBe("NOT_SENT");
+
+        // A second Send does not mail again; Resend (force) does, with the same link.
+        expect((await notify(f.a, a.id)).body.outcome).toBe("already_sent");
+        expect((await notify(f.a, a.id, { force: true })).body.outcome).toBe("sent");
+        expect(courierEmails.map((e) => tokenOf(e.confirmUrl))).toEqual([token, token]);
+      });
+
+      it("the link confirms only its own delivery, once; opening it confirms nothing", async () => {
+        const a = await collectedSheet(f.a, "720002");
+        const b = await collectedSheet(f.b, "720002");
+        await notify(f.a, a.id);
+        await notify(f.b, b.id);
+        const [tokenA, tokenB] = courierEmails.map((e) => tokenOf(e.confirmUrl));
+        expect(courierEmails.map((e) => e.to)).toEqual(["acme-a@example.test", "acme-b@example.test"]);
+        expect(tokenA).not.toBe(tokenB);
+
+        const { readDelivery } = await import("@/lib/courier-confirm");
+        const seen = await readDelivery(tokenA);
+        expect(seen.state).toBe("open");
+        expect(seen.state === "open" && seen.view).toMatchObject({ courierSheetNo: "720002", invoiceNos: ["720002"] });
+        expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } })).status).toBe("COLLECTED");
+
+        const done = await confirm(tokenA);
+        expect(done.status).toBe(200);
+        expect(done.body.outcome).toBe("confirmed");
+        const [afterA, afterB] = await Promise.all([
+          db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } }),
+          db().courierTripSheet.findUniqueOrThrow({ where: { id: b.id } }),
+        ]);
+        expect(afterA.status).toBe("DELIVERED");
+        expect(afterA.confirmedAt).not.toBeNull();
+        expect(afterB).toMatchObject({ status: "COLLECTED", confirmedAt: null });
+
+        const again = await confirm(tokenA);
+        expect(again.body.outcome).toBe("already_confirmed");
+        expect((await readDelivery(tokenA)).state).toBe("confirmed");
+
+        // Made-up or mangled tokens find nothing.
+        expect((await confirm("A".repeat(43))).status).toBe(404);
+        expect((await confirm("not-a-token")).status).toBe(404);
+        expect((await confirm(tokenB.slice(0, 42) + (tokenB.endsWith("A") ? "B" : "A"))).status).toBe(404);
+
+        // Recorded in A's own history; the office cannot email a confirmed delivery.
+        const log = await db().auditLog.findFirst({ where: { entityId: a.id, details: { contains: "confirmed the delivery" } } });
+        expect(log?.tenantId).toBe(f.a.tenantId);
+        expect((await notify(f.a, a.id, { force: true })).status).toBe(409);
+      });
+
+      it("an expired link confirms nothing", async () => {
+        const a = await collectedSheet(f.a, "720003");
+        await notify(f.a, a.id);
+        const token = tokenOf(courierEmails[0].confirmUrl);
+        await db().courierTripSheet.update({ where: { id: a.id }, data: { confirmTokenExpiresAt: new Date(Date.now() - 1000) } });
+
+        expect((await confirm(token)).status).toBe(410);
+        const { readDelivery } = await import("@/lib/courier-confirm");
+        expect((await readDelivery(token)).state).toBe("expired");
+        expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } })).status).toBe("COLLECTED");
+      });
+
+      it("an email waiting for an address goes when the caller adds one — to the caller's customer only", async () => {
+        const a = await collectedSheet(f.a, "720004", "Zulu Traders");
+        const b = await collectedSheet(f.b, "720004", "Zulu Traders");
+        const waiting = await notify(f.a, a.id);
+        expect(waiting.body.outcome).toBe("no_email");
+        await db().courierTripSheet.update({ where: { id: b.id }, data: { emailStatus: "NO_EMAIL" } });
+
+        const { POST } = await import("@/app/api/contacts/route");
+        useSession(adminSession(f.a));
+        const created = await POST(
+          req("/api/contacts", { method: "POST", body: { companyName: "Zulu Traders", email: "zulu-a@example.test" } })
+        );
+        expect(created.status).toBe(201);
+
+        expect(courierEmails.map((e) => [e.to, e.invoiceNos[0]])).toEqual([["zulu-a@example.test", "720004"]]);
+        const [afterA, afterB] = await Promise.all([
+          db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } }),
+          db().courierTripSheet.findUniqueOrThrow({ where: { id: b.id } }),
+        ]);
+        expect(afterA).toMatchObject({ emailStatus: "SENT", emailRecipient: "zulu-a@example.test" });
+        expect(afterB).toMatchObject({ emailStatus: "NO_EMAIL", contactId: null });
+      });
+
+      it("the daily job answers only Vercel's call, and reminds each customer once from their own scope", async () => {
+        const { GET } = await import("@/app/api/cron/courier-confirmations/route");
+        const call = (auth?: string) => {
+          const r = req("/api/cron/courier-confirmations");
+          if (auth) r.headers.set("Authorization", auth);
+          return GET(r);
+        };
+        const before = process.env.CRON_SECRET;
+        process.env.CRON_SECRET = "test-cron-secret";
+        try {
+          expect((await call()).status).toBe(401);
+          expect((await call("Bearer wrong-secret")).status).toBe(401);
+          expect((await call("Bearer test-cron-secret-and-more")).status).toBe(401);
+
+          const a = await collectedSheet(f.a, "720005");
+          const b = await collectedSheet(f.b, "720005");
+          const fresh = await collectedSheet(f.a, "720006");
+          for (const [fx, s] of [[f.a, a], [f.b, b], [f.a, fresh]] as const) await notify(fx, s.id);
+          const links = new Map(courierEmails.map((e) => [e.invoiceNos[0] + e.to, e.confirmUrl]));
+          const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+          await db().courierTripSheet.updateMany({ where: { id: { in: [a.id, b.id] } }, data: { emailSentAt: threeDaysAgo } });
+          courierEmails.length = 0;
+
+          const res = await call("Bearer test-cron-secret");
+          expect(res.status).toBe(200);
+          const reminders = courierEmails.filter((e) => e.reminder);
+          expect(reminders.map((e) => [e.to, e.invoiceNos[0]]).sort()).toEqual([
+            ["acme-a@example.test", "720005"],
+            ["acme-b@example.test", "720005"],
+          ]);
+          // The same link each customer already has — never another scope's.
+          for (const r of reminders) expect(r.confirmUrl).toBe(links.get(r.invoiceNos[0] + r.to));
+          expect(reminders.every((r) => r.attachments.length === 0)).toBe(true);
+
+          const rows = await db().courierTripSheet.findMany({ where: { id: { in: [a.id, b.id, fresh.id] } } });
+          const reminded = Object.fromEntries(rows.map((r) => [r.id, !!r.reminderSentAt]));
+          expect(reminded).toEqual({ [a.id]: true, [b.id]: true, [fresh.id]: false });
+
+          // One reminder only.
+          courierEmails.length = 0;
+          await call("Bearer test-cron-secret");
+          expect(courierEmails.filter((e) => e.reminder && e.invoiceNos[0] === "720005")).toHaveLength(0);
+        } finally {
+          if (before === undefined) delete process.env.CRON_SECRET;
+          else process.env.CRON_SECRET = before;
+        }
+      });
+
+      it("a failed reminder is tried again the next day", async () => {
+        const { sendCourierReminder } = await import("@/lib/courier-confirm");
+        const a = await collectedSheet(f.a, "720007");
+        await notify(f.a, a.id);
+        await db().courierTripSheet.update({ where: { id: a.id }, data: { emailSentAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) } });
+        courierMail.fail = true;
+        expect((await sendCourierReminder(f.a.tenantId, a.id)).outcome).toBe("failed");
+        expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } })).reminderSentAt).toBeNull();
+        courierMail.fail = false;
+        expect((await sendCourierReminder(f.a.tenantId, a.id)).outcome).toBe("sent");
+        // Another scope's id is simply not found.
+        expect((await sendCourierReminder(f.b.tenantId, a.id)).outcome).toBe("not_found");
+      });
+
+      it("the badge and the dashboard count only the caller's own courier sheets", async () => {
+        const attention = await import("@/app/api/courier/attention/route");
+        const count = async (fx: typeof f.a) => {
+          useSession(adminSession(fx));
+          return (await (await attention.GET(req("/api/courier/attention"))).json()).attention as number;
+        };
+        const [beforeA, beforeB] = [await count(f.a), await count(f.b)];
+        const b = await collectedSheet(f.b, "720008");
+        await db().courierTripSheet.update({ where: { id: b.id }, data: { emailStatus: "FAILED", emailError: "550" } });
+        expect(await count(f.a)).toBe(beforeA);
+        expect(await count(f.b)).toBe(beforeB + 1);
+
+        const { GET } = await import("@/app/api/dashboard/route");
+        useSession(adminSession(f.a));
+        const dash = await (await GET(req("/api/dashboard"))).json();
+        expect(dash.courier.attention).toBe(beforeA);
+        expect(JSON.stringify(dash.courier)).not.toContain(b.id);
+        useSession(driverSession(f.a));
+        expect((await attention.GET(req("/api/courier/attention"))).status).toBe(403);
+      });
+
+      it("a customer confirming moves the office's cursor, never a driver's", async () => {
+        const { buildSyncCursor } = await import("@/lib/sync-cursor");
+        const a = await collectedSheet(f.a, "720009");
+        await notify(f.a, a.id);
+        const token = tokenOf(courierEmails[0].confirmUrl);
+        const [officeA, officeB, driverA] = await Promise.all([
+          buildSyncCursor(f.a.tenantId),
+          buildSyncCursor(f.b.tenantId),
+          buildSyncCursor(f.a.tenantId, { driverId: f.a.driver.id }),
+        ]);
+        await new Promise((r) => setTimeout(r, 5));
+        expect((await confirm(token)).body.outcome).toBe("confirmed");
+        expect((await buildSyncCursor(f.a.tenantId)).cursor).not.toBe(officeA.cursor);
+        expect((await buildSyncCursor(f.b.tenantId)).cursor).toBe(officeB.cursor);
+        expect((await buildSyncCursor(f.a.tenantId, { driverId: f.a.driver.id })).cursor).toBe(driverA.cursor);
       });
     });
 

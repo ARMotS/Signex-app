@@ -21,6 +21,7 @@ import { readInvoiceFile, saveSignedInvoiceDetailed } from "./invoices";
 import { CourierError, recheckCourierSheet } from "./courier-import";
 import { courierStampLines } from "./courier-stamp-text";
 import { pngFromDataUrl, stampCourierHandover } from "./courier-stamp";
+import { scheduleCourierConfirmation } from "./courier-confirm";
 
 const MAX_SIGNATURE_BYTES = 600_000;
 const FILING_ATTEMPTS = 3;
@@ -242,6 +243,7 @@ export async function fileCourierSheet(tenantId: string, id: string, userName: s
     tenantId,
   });
 
-  // Phase 4: the customer's confirmation email is sent from here, once complete.
+  // Every copy is filed: the customer's email (which carries them) can go.
+  if (complete) await scheduleCourierConfirmation(tenantId, id);
   return { filed, failed, complete };
 }
