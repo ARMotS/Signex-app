@@ -1037,7 +1037,7 @@ suite("cross-ADMIN isolation", () => {
       const p = params({ id: theirs.id });
 
       expect((await route.GET(req(`/api/courier/${theirs.id}`), p)).status).toBe(404);
-      for (const body of [{ action: "recheck" }, { action: "update", courierCompany: "X" }, { action: "linkContact", contactId: f.a.contact.id }]) {
+      for (const body of [{ action: "recheck" }, { action: "linkContact", contactId: f.a.contact.id }]) {
         expect((await route.PUT(req(`/api/courier/${theirs.id}`, { method: "PUT", body }), p)).status).toBe(404);
       }
       expect((await route.DELETE(req(`/api/courier/${theirs.id}`, { method: "DELETE" }), p)).status).toBe(404);
@@ -1338,6 +1338,29 @@ suite("cross-ADMIN isolation", () => {
         expect(res.status).toBe(400);
         expect(res.body.errors).toContain("The courier driver needs to sign.");
         expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: mine.id } })).status).toBe("AWAITING_COLLECTION");
+      });
+
+      it("records the sheet's own courier, not one typed over it; a sheet without one takes the typed", async () => {
+        const named = await sheetFor(f.a, "710011", "7111");
+        await db().courierTripSheet.update({ where: { id: named.id }, data: { courierCompany: "Swift Couriers" } });
+        const unnamed = await sheetFor(f.a, "710012", "7112");
+        const pdf = await invoicePdf();
+        const fetchMock = vi.mocked(fetch);
+        const original = fetchMock.getMockImplementation()!;
+        fetchMock.mockImplementation(fakeInvoiceFolderA(original, pdf, ["IV-7111.pdf", "IV-7112.pdf"]));
+        try {
+          // The form says "The Courier Guy"; the sheet says Swift Couriers.
+          expect((await collect(f.a, named.id)).status).toBe(200);
+          expect((await collect(f.a, unnamed.id)).status).toBe(200);
+        } finally {
+          fetchMock.mockImplementation(original);
+        }
+        expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: named.id } })).courierCompany).toBe(
+          "Swift Couriers"
+        );
+        expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: unnamed.id } })).courierCompany).toBe(
+          "The Courier Guy"
+        );
       });
 
       it("records the handover and files a stamped copy through the caller's own connection, once", async () => {

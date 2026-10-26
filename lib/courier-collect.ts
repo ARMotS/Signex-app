@@ -78,7 +78,7 @@ export async function collectCourierSheet(
   by: { userId: string; name: string | null }
 ) {
   const db = scopedPrisma(tenantId);
-  const before = await db.courierTripSheet.findFirst({ where: { id }, select: { status: true } });
+  const before = await db.courierTripSheet.findFirst({ where: { id }, select: { status: true, courierCompany: true } });
   if (!before) throw new CourierError("NOT_FOUND", "Courier trip sheet not found", 404);
   if (before.status === "COLLECTED" || before.status === "DELIVERED") {
     throw new CourierError("ALREADY_COLLECTED", "The courier has already signed for this sheet.", 409);
@@ -93,6 +93,9 @@ export async function collectCourierSheet(
   }
 
   const dispatchCompany = await readDispatchCompany(tenantId);
+  // The sheet's own Courier column is the record; what the form sent counts
+  // only for a sheet in the older layout, which names no courier.
+  const courierCompany = before.courierCompany?.trim() || input.courierCompany;
   const now = new Date();
   const claim = await db.courierTripSheet.updateMany({
     where: { id, status: "AWAITING_COLLECTION" },
@@ -103,7 +106,7 @@ export async function collectCourierSheet(
       dispatcherUserId: by.userId,
       dispatchCompany,
       courierDriverName: input.courierDriverName,
-      courierCompany: input.courierCompany,
+      courierCompany,
       driverSignature: input.signature,
       filingError: null,
     },
@@ -117,7 +120,7 @@ export async function collectCourierSheet(
     entity: "courier_sheet",
     entityId: id,
     userName: by.name ?? undefined,
-    details: `Collected by ${input.courierDriverName} (${input.courierCompany}), dispatched by ${input.dispatcherName} from ${dispatchCompany}`,
+    details: `Collected by ${input.courierDriverName} (${courierCompany}), dispatched by ${input.dispatcherName} from ${dispatchCompany}`,
     tenantId,
   });
 

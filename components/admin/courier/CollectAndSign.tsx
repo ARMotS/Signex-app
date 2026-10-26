@@ -46,6 +46,7 @@ export default function CollectAndSign({
   const pad = useRef<SignaturePadHandle>(null);
   const [dispatcherName, setDispatcherName] = useState(signer.dispatcherName);
   const [courierDriverName, setCourierDriverName] = useState("");
+  const fromSheet = !!sheet.courierCompany?.trim();
   const [courierCompany, setCourierCompany] = useState(sheet.courierCompany ?? "");
   const [checked, setChecked] = useState(false);
   const [signed, setSigned] = useState(false);
@@ -231,8 +232,18 @@ export default function CollectAndSign({
               />
             </label>
             <label className="block">
-              <span className="block text-[11px] font-mono text-ink-muted uppercase tracking-wide mb-1">Courier company *</span>
-              <input value={courierCompany} onChange={(e) => setCourierCompany(e.target.value)} maxLength={80} className={field} />
+              {/* From the sheet's Courier column; typed only for a sheet in
+                  the older layout, which has none. */}
+              <span className="block text-[11px] font-mono text-ink-muted uppercase tracking-wide mb-1">
+                Courier company{fromSheet ? "" : " *"}
+              </span>
+              <input
+                value={courierCompany}
+                onChange={(e) => setCourierCompany(e.target.value)}
+                disabled={fromSheet}
+                maxLength={80}
+                className={field}
+              />
             </label>
             <label className="block sm:col-span-2">
               <span className="block text-[11px] font-mono text-ink-muted uppercase tracking-wide mb-1">Date &amp; time</span>

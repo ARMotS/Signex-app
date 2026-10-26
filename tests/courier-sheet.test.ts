@@ -35,13 +35,15 @@ describe("the client's export", () => {
     const file = path.join(__dirname, "fixtures", "sheets", "cts-200189-p5.xlsx");
     const grid = readGrid(fs.readFileSync(file), "cts-200189-p5.xlsx");
     if (!grid.ok) throw new Error(grid.error);
-    const result = read(grid.grid, "cts-200189-p5.xlsx", { courierCompany: "MJV" });
+    // The layout from before the Courier column: it still reads, and names no
+    // courier — the company is typed when the courier driver signs.
+    const result = read(grid.grid, "cts-200189-p5.xlsx");
     expect(result).toMatchObject({
       ok: true,
       sheet: {
         courierSheetNo: "200189",
         sheetDate: TODAY,
-        courierCompany: "MJV",
+        courierCompany: null,
         customerName: "Sample customer",
         waybills: ["700209"],
         parcels: 1,
@@ -139,6 +141,58 @@ describe("readCourierSheet", () => {
 
   it("refuses a sheet with no invoices", () => {
     expect(read([HEAD, ["W1", "Kilo", "", "", ""]])).toMatchObject({ ok: false, code: "NO_INVOICES" });
+  });
+});
+
+describe("the Courier column", () => {
+  // The client's current export: a Courier column between Waybillno and
+  // Customer, the same courier on every row.
+  const WITH_COURIER = ["Waybillno", "Courier", "Customer", "INVOICENO", "Date", "NOP"];
+
+  it("takes the courier company from the sheet, with nothing asked at import", () => {
+    const result = read(
+      [
+        WITH_COURIER,
+        ["700301", "Swift Couriers", "Lima Logistics", "2001", "23/10/2026", "2"],
+        ["700301", "Swift Couriers", "Lima Logistics", "2002", "23/10/2026", ""],
+      ],
+      "CTS1001_LIMA-LOGISTICS.xlsx"
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      sheet: { courierSheetNo: "1001", courierCompany: "Swift Couriers", customerName: "Lima Logistics", warnings: [] },
+    });
+    expect(Object.values(BUILT_IN_COURIER_TRIP_SHEET.mappings).some((m) => m.source === "promptAtImport")).toBe(false);
+  });
+
+  it("reads a header spelled Courier Company or Courier Name too", () => {
+    for (const header of ["Courier Company", "courier name"]) {
+      const head = ["Waybillno", header, "Customer", "INVOICENO", "Date", "NOP"];
+      expect(read([head, ["W1", "Swift Couriers", "Kilo", "1001", "", "1"]])).toMatchObject({
+        ok: true,
+        sheet: { courierCompany: "Swift Couriers" },
+      });
+    }
+  });
+
+  it("does not mistake spelling variants of one courier for two", () => {
+    const result = read([
+      WITH_COURIER,
+      ["W1", "Swift Couriers", "Kilo", "1001", "", "1"],
+      ["W1", "swift couriers.", "Kilo", "1002", "", ""],
+      ["W1", "", "Kilo", "1003", "", ""],
+    ]);
+    expect(result).toMatchObject({ ok: true, sheet: { courierCompany: "Swift Couriers", warnings: [] } });
+  });
+
+  it("warns when rows name different couriers, and uses the first", () => {
+    const result = read([
+      WITH_COURIER,
+      ["W1", "Swift Couriers", "Kilo", "1001", "", "1"],
+      ["W1", "Dawn Express", "Kilo", "1002", "", ""],
+    ]);
+    expect(result.ok && result.sheet.courierCompany).toBe("Swift Couriers");
+    expect(result.ok && result.sheet.warnings.map((w) => [w.code, w.level])).toEqual([["COURIER_CONFLICT", "warning"]]);
   });
 });
 

@@ -42,7 +42,7 @@ import {
 const OPEN: CourierStatus[] = ["NEEDS_ATTENTION", "AWAITING_COLLECTION"];
 
 /** Codes found while reading the file — kept across re-checks, which cannot see the file. */
-const READ_CODES = new Set<CourierIssue["code"]>(["DUPLICATE_INVOICE"]);
+const READ_CODES = new Set<CourierIssue["code"]>(["DUPLICATE_INVOICE", "COURIER_CONFLICT"]);
 
 const MAX_BYTES = 10 * 1024 * 1024;
 
@@ -577,32 +577,6 @@ export async function linkCourierContact(tenantId: string, id: string, contactId
     tenantId,
   });
   return recheckCourierSheet(tenantId, id, userName);
-}
-
-export interface CourierFields {
-  courierCompany?: string | null;
-  courierService?: string | null;
-  courierContact?: string | null;
-}
-
-/** The courier's details, which the client's export does not carry. */
-export async function updateCourierFields(tenantId: string, id: string, fields: CourierFields, userName: string | null) {
-  await openSheet(tenantId, id);
-  const clean = (v: unknown) => (typeof v === "string" ? v.trim().slice(0, 120) || null : null);
-  const data: Record<string, string | null> = {};
-  for (const key of ["courierCompany", "courierService", "courierContact"] as const) {
-    if (key in fields) data[key] = clean(fields[key]);
-  }
-  if (Object.keys(data).length === 0) throw new CourierError("NOTHING_TO_CHANGE", "No changes sent.", 400);
-  await scopedPrisma(tenantId).courierTripSheet.updateMany({ where: { id, status: { in: OPEN } }, data });
-  await logAudit({
-    action: "CONFIG_UPDATE",
-    entity: "courier_sheet",
-    entityId: id,
-    userName: userName ?? undefined,
-    details: `Courier details: ${Object.entries(data).map(([k, v]) => `${k} = ${v ?? "—"}`).join(", ")}`,
-    tenantId,
-  });
 }
 
 /** Take one invoice off the sheet — the fix for a block that is a sheet mistake. */

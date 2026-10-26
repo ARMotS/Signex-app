@@ -103,9 +103,10 @@ export const BUILT_IN_TRIP_SHEET: SheetTemplate = {
 
 /**
  * The courier trip sheet the client's Trip application exports: a flat table
- * (Waybillno | Customer | INVOICENO | Date | NOP) with the sheet number in the
- * filename only (cts-200189-p5.xlsx) and no courier named anywhere — so the
- * courier company is asked for at import. Columns by alias, as above.
+ * (Waybillno | Courier | Customer | INVOICENO | Date | NOP) with the sheet
+ * number in the filename only (cts-200189-p5.xlsx). Columns by alias, as
+ * above — Courier included, so nothing is asked for at import. An export from
+ * before the Courier column still reads; its company is typed at signing.
  */
 export const BUILT_IN_COURIER_TRIP_SHEET: SheetTemplate = {
   sheetType: "COURIER_TRIP_SHEET",
@@ -115,7 +116,6 @@ export const BUILT_IN_COURIER_TRIP_SHEET: SheetTemplate = {
   stopAtBlankRows: 2,
   mappings: {
     courierSheetNo: { source: "filename" },
-    courierCompany: { source: "promptAtImport" },
   },
   matchAliases: true,
 };

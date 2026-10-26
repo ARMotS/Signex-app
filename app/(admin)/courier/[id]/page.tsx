@@ -25,8 +25,6 @@ interface Sheet {
   courierSheetNo: string;
   sheetDate: string;
   courierCompany: string | null;
-  courierService: string | null;
-  courierContact: string | null;
   customerName: string;
   customerEmail: string | null;
   parcels: number | null;
@@ -369,7 +367,7 @@ export default function CourierSheetPage() {
           <h2 className="px-5 py-3 border-b border-ink-border font-mono text-sm font-medium text-ink-black uppercase tracking-wide">
             Courier
           </h2>
-          <CourierFields sheet={sheet} open={open} busy={busy !== null} act={act} />
+          <CourierFields sheet={sheet} />
         </section>
       </div>
 
@@ -799,58 +797,33 @@ function ContactFixer({
   );
 }
 
-function CourierFields({ sheet, open, busy, act }: { sheet: Sheet; open: boolean; busy: boolean; act: Act }) {
-  const [values, setValues] = useState({
-    courierCompany: sheet.courierCompany ?? "",
-    courierService: sheet.courierService ?? "",
-    courierContact: sheet.courierContact ?? "",
-  });
-  const changed =
-    values.courierCompany !== (sheet.courierCompany ?? "") ||
-    values.courierService !== (sheet.courierService ?? "") ||
-    values.courierContact !== (sheet.courierContact ?? "");
-
-  const fields: { key: keyof typeof values; label: string; placeholder: string }[] = [
-    { key: "courierCompany", label: "Company", placeholder: "e.g. MJV" },
-    { key: "courierService", label: "Service", placeholder: "e.g. MJV LOG JHB TO CUST 0 TO 99KG" },
-    { key: "courierContact", label: "Contact", placeholder: "Phone" },
-  ];
-
+/**
+ * The courier's details, read-only: waybill and parcels from the sheet, and
+ * the company from its Courier column. A sheet in the older layout has none
+ * until the courier driver signs, when it is typed on Collect & Sign.
+ */
+function CourierFields({ sheet }: { sheet: Sheet }) {
+  const label = "text-[11px] font-mono text-ink-muted uppercase tracking-wide";
   return (
-    <div className="px-5 py-4 space-y-3 text-sm">
+    <div className="px-5 py-4 text-sm">
       <dl className="grid grid-cols-2 gap-3">
         <div>
-          <dt className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">
-            {sheet.waybills.length === 1 ? "Waybill" : "Waybills"}
-          </dt>
+          <dt className={label}>{sheet.waybills.length === 1 ? "Waybill" : "Waybills"}</dt>
           <dd className="font-mono text-ink-black break-words">{sheet.waybills.join(", ")}</dd>
         </div>
         <div>
-          <dt className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">Parcels</dt>
+          <dt className={label}>Parcels</dt>
           <dd className="text-ink-black">{sheet.parcels ?? "—"}</dd>
         </div>
+        <div className="col-span-2">
+          <dt className={label}>Company</dt>
+          <dd className="text-ink-black">
+            {sheet.courierCompany || (
+              <span className="text-ink-muted">Not on the sheet — entered when the courier signs</span>
+            )}
+          </dd>
+        </div>
       </dl>
-      {fields.map((f) => (
-        <label key={f.key} className="block">
-          <span className="block text-[11px] font-mono text-ink-muted uppercase tracking-wide mb-1">{f.label}</span>
-          {open ? (
-            <input
-              type="text"
-              value={values[f.key]}
-              onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-              placeholder={f.placeholder}
-              className={`${inputClass} w-full`}
-            />
-          ) : (
-            <span className="text-ink-black">{sheet[f.key] || "—"}</span>
-          )}
-        </label>
-      ))}
-      {open && changed && (
-        <button type="button" className="act act-green" disabled={busy} onClick={() => act("fields", { action: "update", ...values }, "Courier details saved")}>
-          Save courier details
-        </button>
-      )}
     </div>
   );
 }
