@@ -15,6 +15,7 @@
 import crypto from "crypto";
 import { UNSAFE_unscopedPrisma, scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
+import { revokeSessionsWrite } from "./session";
 import {
   normalizeUsername,
   validateUsername,
@@ -148,11 +149,12 @@ export async function createAdminAccount(
     });
 
     await logAudit({
-      action: "LOGIN",
+      action: "ACCOUNT_CREATE",
       entity: "admin",
       entityId: admin.id,
       userName: admin.name,
       details: `Admin account created: ${normalizedUsername}`,
+      metadata: { username: normalizedUsername },
       tenantId,
     });
 
@@ -223,7 +225,9 @@ export async function updateAdminAccount(
     }
 
     // Only a token that is still live is kept — a device already signed out
-    // must not be revived by the password change it made on its way out.
+    // must not be revived by the password change it made on its way out. (The
+    // nested revoke below only ever touches live sessions, so it cannot revive
+    // one either.)
     const keep =
       options.keepSessionToken && admin.sessionTokens.includes(options.keepSessionToken)
         ? options.keepSessionToken
@@ -238,6 +242,7 @@ export async function updateAdminAccount(
           passwordHash: hashPassword(updates.password!),
           // A reset password must lock out whoever held the old one, now —
           // on every device but the caller's own when they changed it themselves.
+          sessions: revokeSessionsWrite("password_reset", options.keepSessionToken),
           sessionToken: keep,
           sessionTokens: keep ? [keep] : [],
         }),
@@ -252,16 +257,51 @@ export async function updateAdminAccount(
       },
     });
 
-    await logAudit({
-      action: "CONFIG_UPDATE",
+    // One entry per kind of change, so a password reset or a rename can be
+    // found on its own. The password itself is never logged.
+    const subject = {
       entity: "admin",
       entityId: admin.id,
       userName: updates.name || admin.name,
-      details: `Admin account updated: ${(updates.email || admin.email).toLowerCase()}${
-        renaming ? ` (username → ${newUsername})` : ""
-      }${changingPassword ? " (password reset)" : ""}`,
       tenantId,
-    });
+    };
+    if (changingPassword) {
+      const self = options.keepSessionToken !== undefined;
+      await logAudit({
+        ...subject,
+        action: "PASSWORD_CHANGE",
+        details: self
+          ? "Changed their own password — other devices signed out"
+          : "Password reset — signed out of every device",
+        metadata: { self },
+      });
+    }
+    if (renaming) {
+      const from = admin.login?.username ?? null;
+      await logAudit({
+        ...subject,
+        action: "USERNAME_CHANGE",
+        details: `Username ${from ?? "(none)"} → ${newUsername}`,
+        metadata: { from, to: newUsername },
+      });
+    }
+    const newEmail = updates.email?.toLowerCase();
+    const fields = [
+      ...(updates.name !== undefined && updates.name !== admin.name ? ["name"] : []),
+      ...(newEmail !== undefined && newEmail !== admin.email ? ["email"] : []),
+    ];
+    if (fields.length > 0) {
+      await logAudit({
+        ...subject,
+        action: "ACCOUNT_UPDATE",
+        details: `Updated ${fields.join(" and ")}`,
+        metadata: {
+          fields,
+          ...(fields.includes("name") && { name: { from: admin.name, to: updates.name } }),
+          ...(fields.includes("email") && { email: { from: admin.email, to: newEmail } }),
+        },
+      });
+    }
 
     return { success: true };
   } catch (err) {
@@ -292,7 +332,7 @@ export async function deleteAdminAccount(
     }
 
     await logAudit({
-      action: "CONFIG_UPDATE",
+      action: "ACCOUNT_DELETE",
       entity: "admin",
       details: `Admin account deleted: ${email.toLowerCase()}`,
       tenantId,
@@ -374,12 +414,42 @@ export async function login(rawUsername: string, password: string): Promise<Logi
     stored !== null;
 
   if (!passwordOk || !entry) {
+    // Logged for known and unknown names alike, so the write adds no timing
+    // difference between them. The name is recorded only when it is a real
+    // account: an unknown one may be a password typed into the wrong box.
+    const known = entry?.admin ?? entry?.driver ?? null;
+    await logAudit({
+      action: "LOGIN_FAILED",
+      entity: entry?.admin ? "admin" : entry?.driver ? "driver" : "auth",
+      entityId: known?.id,
+      userName: known ? username : undefined,
+      details: !known
+        ? "Unknown username"
+        : stored === null
+          ? "No password set yet"
+          : "Wrong password",
+      tenantId: known?.tenantId ?? null,
+      actor: null,
+    });
     return { success: false, error: LOGIN_FAILED };
   }
+
+  // The right password for a deactivated account: refused, and recorded.
+  const refuseDeactivated = (kind: "admin" | "driver", id: string, tenantId: string) =>
+    logAudit({
+      action: "LOGIN_FAILED",
+      entity: kind,
+      entityId: id,
+      userName: username,
+      details: "Account deactivated",
+      tenantId,
+      actor: null,
+    });
 
   if (entry.admin) {
     const admin = entry.admin;
     if (!admin.active) {
+      await refuseDeactivated("admin", admin.id, admin.tenantId);
       return {
         success: false,
         error: "This account has been deactivated. Contact your administrator.",
@@ -393,20 +463,18 @@ export async function login(rawUsername: string, password: string): Promise<Logi
       select: { role: true },
     });
 
-    await logAudit({
-      action: "LOGIN",
-      entity: "admin",
-      entityId: admin.id,
-      userName: admin.name,
-      details: "Admin login",
-      tenantId: admin.tenantId,
-    });
-
+    // The sign-in itself is logged by the login route once a session has
+    // actually started — a login held at the device limit is not one.
     return {
       success: true,
       account: {
         id: admin.id,
-        role: user?.role === "SUPER_ADMIN" ? "super_admin" : "admin",
+        role:
+          user?.role === "SUPER_ADMIN"
+            ? "super_admin"
+            : user?.role === "COMPANY_ADMIN"
+              ? "company_admin"
+              : "admin",
         name: admin.name,
         email: admin.email,
         tenantId: admin.tenantId,
@@ -416,20 +484,12 @@ export async function login(rawUsername: string, password: string): Promise<Logi
 
   const driver = entry.driver!;
   if (!driver.active) {
+    await refuseDeactivated("driver", driver.id, driver.tenantId);
     return {
       success: false,
       error: "This account has been deactivated. Contact your administrator.",
     };
   }
-
-  await logAudit({
-    action: "LOGIN",
-    entity: "driver",
-    entityId: driver.id,
-    userName: driver.name,
-    details: "Driver login",
-    tenantId: driver.tenantId,
-  });
 
   return {
     success: true,
@@ -599,10 +659,13 @@ export async function updateDriver(
       data: {
         ...(updates.name !== undefined && { name: updates.name }),
         ...(updates.active !== undefined && { active: updates.active }),
-        ...(changingPassword && {
-          passwordHash: hashPassword(updates.password!),
-          // A reset password must lock out whoever held the old one, now.
+        ...(changingPassword && { passwordHash: hashPassword(updates.password!) }),
+        // A reset password must lock out whoever held the old one, now; a
+        // deactivated driver is signed out rather than left working until
+        // their cookie expires.
+        ...((changingPassword || updates.active === false) && {
           sessionToken: null,
+          sessions: revokeSessionsWrite(changingPassword ? "password_reset" : "deactivated"),
         }),
         ...(renaming && {
           login: {
@@ -615,15 +678,44 @@ export async function updateDriver(
       },
     });
 
-    // Never log the password itself — only which fields changed.
-    await logAudit({
-      action: "DRIVER_UPDATE",
+    // One entry per kind of change. Never the password itself.
+    const subject = {
       entity: "driver",
       entityId: id,
-      userName: driver.name,
-      details: JSON.stringify(Object.keys(updates)),
+      userName: updates.name ?? driver.name,
       tenantId,
-    });
+    };
+    if (changingPassword) {
+      await logAudit({
+        ...subject,
+        action: "PASSWORD_CHANGE",
+        details: "Password reset — signed out",
+      });
+    }
+    if (renaming) {
+      const from = driver.login?.username ?? null;
+      await logAudit({
+        ...subject,
+        action: "USERNAME_CHANGE",
+        details: `Username ${from ?? "(none)"} → ${newUsername}`,
+        metadata: { from, to: newUsername },
+      });
+    }
+    if (updates.active !== undefined && updates.active !== driver.active) {
+      await logAudit({
+        ...subject,
+        action: updates.active ? "ACCOUNT_REACTIVATE" : "ACCOUNT_DEACTIVATE",
+        details: updates.active ? "Driver reactivated" : "Driver deactivated — signed out",
+      });
+    }
+    if (updates.name !== undefined && updates.name !== driver.name) {
+      await logAudit({
+        ...subject,
+        action: "DRIVER_UPDATE",
+        details: `Renamed ${driver.name} → ${updates.name}`,
+        metadata: { name: { from: driver.name, to: updates.name } },
+      });
+    }
 
     return { success: true };
   } catch (err) {
@@ -674,8 +766,7 @@ export async function deleteDriver(
  */
 export async function setAdminActive(
   adminId: string,
-  active: boolean,
-  actorName: string
+  active: boolean
 ): Promise<{ success: boolean; error?: string }> {
   try {
     // SCOPE-EXEMPT: SUPER_ADMIN admin-management across scopes. Role-gated by
@@ -691,18 +782,24 @@ export async function setAdminActive(
       where: { id: adminId },
       data: {
         active,
-        // Revoking every session token logs a deactivated admin out of all
-        // their devices immediately rather than letting cookies run to expiry.
-        ...(active ? {} : { sessionToken: null, sessionTokens: [] }),
+        // Revoking every session logs a deactivated admin out of all their
+        // devices immediately rather than letting cookies run to expiry.
+        ...(active
+          ? {}
+          : {
+              sessions: revokeSessionsWrite("deactivated"),
+              sessionToken: null,
+              sessionTokens: [],
+            }),
       },
     });
 
     await logAudit({
-      action: "CONFIG_UPDATE",
+      action: active ? "ACCOUNT_REACTIVATE" : "ACCOUNT_DEACTIVATE",
       entity: "admin",
       entityId: admin.id,
-      userName: actorName,
-      details: `Admin ${active ? "reactivated" : "deactivated"}: ${admin.email}`,
+      userName: admin.name,
+      details: `Admin ${active ? "reactivated" : "deactivated — signed out of every device"}: ${admin.email}`,
       tenantId: admin.tenantId,
     });
 

@@ -11,7 +11,7 @@ import {
   saveTripSheet,
 } from "@/lib/trip-data";
 import { describeCloudProvider } from "@/lib/cloud-detect";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { matchStopsToContacts, applyContactMatches } from "@/lib/contact-matcher";
 import { chooseTemplate, readPrompts, templateRef, templateSnapshot } from "@/lib/sheet-templates";
@@ -22,7 +22,7 @@ export const maxDuration = 60;
 
 export const GET = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const [folderInfo, duplicates] = await Promise.all([
     listTripSheetFiles(ctx.tenantId),
@@ -45,7 +45,7 @@ export const GET = withAuth(async () => {
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json();
   const { filename, action, assignTo, skipInvoices: skipInvoicesRaw } = body;
@@ -222,7 +222,7 @@ export const POST = withAuth(async (request: NextRequest) => {
 
 export const DELETE = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { filenames } = await request.json();
   if (!filenames || !Array.isArray(filenames) || filenames.length === 0) {

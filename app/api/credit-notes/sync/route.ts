@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { syncCreditsFolder } from "@/lib/credit-intake";
 import { retryPendingFilings } from "@/lib/credit-signoff";
@@ -11,7 +11,7 @@ import { retryPendingFilings } from "@/lib/credit-signoff";
  */
 export const POST = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const result = await syncCreditsFolder(ctx.tenantId, { minIntervalMs: 5_000, by: ctx.name });
   switch (result.outcome) {

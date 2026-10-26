@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import type { CollectionStatus, CollectionType } from "@prisma/client";
 import { listCollections, type CollectionRecord } from "@/lib/trip-data";
 import { dayWindow, parseTzOffset } from "@/lib/day-window";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { logAudit } from "@/lib/audit";
 import { readInvoiceNoPattern } from "@/lib/config";
 import { awaitingCreditReview } from "@/lib/collection-confirm";
 import { normalizeInvoiceNo, type InvoiceNoPattern } from "@/lib/invoice-number";
@@ -103,7 +104,7 @@ function parseDate(raw: string | null): Date | undefined {
 
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { searchParams } = new URL(request.url);
 
@@ -117,6 +118,13 @@ export const GET = withAuth(async (request: NextRequest) => {
     const rows = applyFilter(all, state, acc, new Date(), parseTzOffset(searchParams.get("tzOffset")));
 
     if (searchParams.get("format") === "csv") {
+      await logAudit({
+        action: "EXPORT",
+        entity: "collections",
+        details: `Collections CSV exported (${rows.length} rows)`,
+        metadata: { format: "csv", rows: rows.length },
+        tenantId: ctx.tenantId,
+      });
       return new NextResponse(toCsv(CSV_HEADERS, rows.map(csvRow)), {
         headers: {
           "Content-Type": "text/csv; charset=utf-8",

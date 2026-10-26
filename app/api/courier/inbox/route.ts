@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { checkCourierInbox, courierInboxState } from "@/lib/courier-inbox";
 import { resolveCourierFolder } from "@/lib/courier-folder";
@@ -15,7 +15,7 @@ export const maxDuration = 60;
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const body = await request.json().catch(() => ({}));
 
   if (body?.action === "createFolder") {

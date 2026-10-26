@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { readPrompts } from "@/lib/sheet-templates";
 import { courierInboxState, scheduleCourierInbox } from "@/lib/courier-inbox";
@@ -21,7 +21,7 @@ export const maxDuration = 60;
 
 export const GET = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   // This tab polls, so it carries the look at the courier folder (throttled
   // per scope, after the response — see lib/courier-inbox.ts).
   scheduleCourierInbox(ctx.tenantId);
@@ -36,7 +36,7 @@ export const GET = withAuth(async () => {
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const form = await request.formData();
   const file = form.get("file") as File | null;

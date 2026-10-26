@@ -10,8 +10,9 @@ import {
   getCloudAccountStatus,
 } from "@/lib/microsoft-graph";
 import { assertCollectionsFolderIsSibling, foldersOverlap } from "@/lib/collections";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { logAudit } from "@/lib/audit";
 
 /**
  * GET /api/cloud/onedrive/folders?parentId=<id>
@@ -19,7 +20,7 @@ import { withAuth } from "@/lib/api-handler";
  */
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { searchParams } = new URL(request.url);
   const parentId = searchParams.get("parentId");
@@ -45,7 +46,7 @@ export const GET = withAuth(async (request: NextRequest) => {
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { folderPath, folderItemId, target } = await request.json();
 
@@ -152,6 +153,14 @@ export const POST = withAuth(async (request: NextRequest) => {
   } else {
     await setOneDriveFolder(ctx.tenantId, folderPath, folderItemId);
   }
+
+  await logAudit({
+    action: "CONFIG_UPDATE",
+    entity: "cloud_account",
+    details: `OneDrive ${target || "tripsheets"} folder set to ${folderPath}`,
+    metadata: { target: target || "tripsheets", folderPath },
+    tenantId: ctx.tenantId,
+  });
 
   return NextResponse.json({ success: true, folderPath, folderItemId, target: target || "tripsheets" });
 });

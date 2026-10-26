@@ -174,7 +174,11 @@ export default function AdminLayout({
             router.replace(data.kicked ? "/login?signedOut=1" : "/login");
             return;
           }
-          if (data.session.role === "admin" || data.session.role === "super_admin") {
+          if (
+            data.session.role === "admin" ||
+            data.session.role === "super_admin" ||
+            data.session.role === "company_admin"
+          ) {
             setSession({ name: data.session.name, email: data.session.email });
             setRole(data.session.role);
           }

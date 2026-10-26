@@ -147,7 +147,7 @@ export const PUT = withAuth(async (request: NextRequest) => {
     }
   }
 
-  const result = await setAdminActive(id, active, ctx.name);
+  const result = await setAdminActive(id, active);
   if (!result.success) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }
@@ -246,14 +246,8 @@ export const POST = withAuth(async (request: NextRequest) => {
     data: { ownerAdminId: result.account!.id },
   });
 
-  await logAudit({
-    action: "CONFIG_UPDATE",
-    entity: "admin",
-    entityId: result.account!.id,
-    userName: ctx.name,
-    details: `SUPER_ADMIN created ADMIN ${normalizedEmail} in new isolated scope ${tenant.id}`,
-    tenantId: ctx.homeTenantId,
-  });
+  // createAdminAccount logged ACCOUNT_CREATE in the new scope, with the
+  // SUPER_ADMIN as its actor.
 
   return NextResponse.json({
     user,
@@ -277,10 +271,22 @@ export const PATCH = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireRole(ctx, "SUPER_ADMIN");
 
-  const { id, name, email, username, password, role } = await request.json();
+  const { id, name, email, username, password, role, companyName } = await request.json();
 
   if (!id) {
     return NextResponse.json({ error: "Admin ID is required" }, { status: 400 });
+  }
+
+  // Optional. Printed on courier handover stamps, so it is bounded and never blank.
+  const newCompanyName =
+    typeof companyName === "string" && companyName.trim() !== ""
+      ? companyName.trim()
+      : undefined;
+  if (newCompanyName !== undefined && newCompanyName.length > 100) {
+    return NextResponse.json(
+      { error: "Company name must be 100 characters or fewer" },
+      { status: 400 }
+    );
   }
 
   // SCOPE-EXEMPT: SUPER_ADMIN account management. Addressed by primary key.
@@ -394,21 +400,43 @@ export const PATCH = withAuth(async (request: NextRequest) => {
   }
 
   // Keep the scope's label in step with the admin's name.
-  if (name !== undefined) {
+  // The company name is the label the console and the courier stamp read. The
+  // root scope has no owner, so it can never be renamed this way.
+  if (name !== undefined || newCompanyName !== undefined) {
     await UNSAFE_unscopedPrisma.tenant.updateMany({
       where: { ownerAdminId: target.id },
-      data: { name },
+      data: {
+        ...(name !== undefined && { name }),
+        ...(newCompanyName !== undefined && { companyName: newCompanyName }),
+      },
     });
   }
 
-  await logAudit({
-    action: "CONFIG_UPDATE",
-    entity: "admin",
-    entityId: target.id,
-    userName: ctx.name,
-    details: `Admin updated: ${newEmail}`,
-    tenantId: target.tenantId,
-  });
+  // Credential changes were logged by updateAdminAccount; the role and the
+  // workspace label are this route's own.
+  const previousRole = targetUser?.role ?? "ADMIN";
+  if (targetUser && newRole !== previousRole) {
+    await logAudit({
+      action: "ROLE_CHANGE",
+      entity: "admin",
+      entityId: target.id,
+      userName: name ?? target.name,
+      details: `Role ${previousRole} → ${newRole}`,
+      metadata: { from: previousRole, to: newRole },
+      tenantId: target.tenantId,
+    });
+  }
+  if (newCompanyName !== undefined) {
+    await logAudit({
+      action: "ACCOUNT_UPDATE",
+      entity: "admin",
+      entityId: target.id,
+      userName: name ?? target.name,
+      details: `Company name set to "${newCompanyName}"`,
+      metadata: { fields: ["companyName"], companyName: { to: newCompanyName } },
+      tenantId: target.tenantId,
+    });
+  }
 
   return NextResponse.json({
     user: {
@@ -454,6 +482,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     where: { id },
     select: {
       id: true,
+      name: true,
       email: true,
       tenantId: true,
       tenant: {
@@ -580,12 +609,9 @@ export const DELETE = withAuth(async (request: NextRequest) => {
       const remainingAdmins = await tx.admin.count({ where: { tenantId } });
       const remainingUsers = await tx.user.count({ where: { tenantId } });
       if (remainingAdmins === 0 && remainingUsers === 0) {
-        // AuditLog.tenantId is nullable by design; detach rather than delete so
-        // the trail of what happened in that scope survives.
-        await tx.auditLog.updateMany({
-          where: { tenantId },
-          data: { tenantId: null },
-        });
+        // AuditLog keeps its rows: tenantId has no foreign key, so the trail
+        // of what happened in that scope outlives it (and the table is
+        // append-only — a trigger refuses any rewrite).
         // Templates are configuration, not counted as workspace data, so a
         // scope holding only those skips the purge above — and they would
         // block the Tenant delete on its foreign key.
@@ -598,10 +624,10 @@ export const DELETE = withAuth(async (request: NextRequest) => {
   });
 
   await logAudit({
-    action: "CONFIG_UPDATE",
+    action: "ACCOUNT_DELETE",
     entity: "admin",
     entityId: target.id,
-    userName: ctx.name,
+    userName: target.name,
     details: `Admin deleted: ${target.email}${
       hasData && deleteScopeData
         ? ` (workspace purged: ${counts.drivers} drivers, ${counts.contacts} contacts, ${counts.tripSheets} trip sheets)`

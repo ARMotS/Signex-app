@@ -28,10 +28,42 @@ datasource db {
 // ([tenantId, id] targets), which make a row pointing into another scope
 // unrepresentable rather than merely discouraged.
 
+// A customer company: the branches (tenants) it owns, and the COMPANY_ADMIN
+// accounts that oversee some of them. Managed only by the SUPER_ADMIN. A
+// registry like Tenant — read through UNSAFE_unscopedPrisma, never scoped.
+model Company {
+  id          String    @id @default(cuid())
+  name        String
+  // An inactive company's COMPANY_ADMINs can view none of its branches.
+  // Its branches themselves (their ADMINs, drivers) are unaffected.
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  tenants     Tenant[]
+  companyAdmins Admin[]
+  allocations CompanyAdminAllocation[]
+}
+
+// What a scope is. ROOT: the SUPER_ADMIN's own. BRANCH: one ADMIN's workspace
+// (every scope before companies existed). COMPANY: where a company's
+// COMPANY_ADMIN accounts live — it holds no data of its own, and getScope()
+// refuses to hand a COMPANY_ADMIN a database client for it.
+enum TenantKind {
+  ROOT
+  BRANCH
+  COMPANY
+}
+
 model Tenant {
   id            String         @id @default(cuid())
   name          String
   slug          String         @unique
+  kind          TenantKind     @default(BRANCH)
+  // The company a BRANCH belongs to (null until assigned), or the company a
+  // COMPANY scope is the home of. Always null for ROOT (CHECK in migration).
+  companyId     String?
+  company       Company?       @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  allocations   CompanyAdminAllocation[]
   // Shown in the public driver-login company picker. The only field of a scope
   // that is ever exposed pre-authentication, and only for scopes whose owning
   // ADMIN is active.
@@ -50,7 +82,6 @@ model Tenant {
   appConfigs    AppConfig[]
   cloudAccounts CloudAccount[]
   importedFiles ImportedFile[]
-  auditLogs     AuditLog[]
   collections   Collection[]
   collectionLines CollectionLine[]
   removedStops  RemovedStop[]
@@ -66,6 +97,12 @@ model Tenant {
   courierTripSheets CourierTripSheet[]
   courierTripSheetInvoices CourierTripSheetInvoice[]
   courierImportFailures CourierImportFailure[]
+
+  // Composite-FK target: an allocation names a branch together with its
+  // company and kind, so allocating across companies, or allocating anything
+  // but a BRANCH, cannot be stored.
+  @@unique([id, companyId, kind])
+  @@index([companyId])
 }
 
 model User {
@@ -86,6 +123,9 @@ enum UserRole {
   SUPER_ADMIN
   ADMIN
   DRIVER
+  // Oversees the branch ADMINs a SUPER_ADMIN allocated to it, within one
+  // Company (Admin.companyId). See CompanyAdminAllocation.
+  COMPANY_ADMIN
 }
 
 // ─── Accounts ─────────────────────────────────────────────────────────────
@@ -102,20 +142,69 @@ model Admin {
   // previous deploy keeps validating through the rollout; drop it in a later
   // migration once nothing reads it.
   sessionToken String?
-  // Live sessions, oldest first, at most MAX_ADMIN_SESSIONS (lib/session.ts).
-  // A new login past the cap evicts the oldest device.
+  // Retired by UserSession, which is what sessions are checked against now.
+  // Still written (live tokens, oldest first) so a rollback keeps validating;
+  // drop it in a later migration.
   sessionTokens String[]   @default([])
+  sessions     UserSession[]
   tenantId     String      @default("")
   tenant       Tenant      @relation(fields: [tenantId], references: [id])
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   tripSheets   TripSheet[]
   login        LoginName?
+  // Set only on a COMPANY_ADMIN account (User.role): the company it oversees.
+  // Null for every ADMIN and SUPER_ADMIN.
+  companyId    String?
+  company      Company?    @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  // As a COMPANY_ADMIN: the branch admins allocated to it.
+  overseesAllocations CompanyAdminAllocation[] @relation("AllocationCompanyAdmin")
+  // As a branch ADMIN: the COMPANY_ADMINs it is allocated to.
+  allocatedTo  CompanyAdminAllocation[] @relation("AllocationAdmin")
 
   // Composite-FK target so TripSheet.adminId cannot cross a scope boundary.
   @@unique([tenantId, id])
+  // Composite-FK target: an allocation's COMPANY_ADMIN must be of its company.
+  @@unique([id, companyId])
   @@index([tenantId])
   @@index([active])
+}
+
+// The SUPER_ADMIN's explicit grant: this COMPANY_ADMIN oversees this branch
+// ADMIN (and through it the branch). Checked on every request a COMPANY_ADMIN
+// makes, so removing a row takes effect on the next one.
+//
+// Its composite foreign keys make a wrong allocation unrepresentable rather
+// than merely refused by a route:
+//   [companyAdminId, companyId]             -> Admin[id, companyId]: the
+//       COMPANY_ADMIN belongs to this company;
+//   [branchTenantId, companyId, branchKind] -> Tenant[id, companyId, kind]: the
+//       branch belongs to the SAME company, and is a BRANCH (CHECK pins
+//       branchKind) — never the root scope or a company-home scope;
+//   [branchTenantId, adminId]               -> Admin[tenantId, id]: the
+//       allocated admin lives in that branch.
+// Moving a branch to another company is refused (ON UPDATE RESTRICT) until
+// its allocations are removed.
+//
+// `branchTenantId`, not `tenantId`, so a scoped client can never read it.
+model CompanyAdminAllocation {
+  id             String     @id @default(cuid())
+  companyId      String
+  company        Company    @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  companyAdminId String
+  companyAdmin   Admin      @relation("AllocationCompanyAdmin", fields: [companyAdminId, companyId], references: [id, companyId], onDelete: Cascade, onUpdate: Restrict)
+  adminId        String
+  admin          Admin      @relation("AllocationAdmin", fields: [branchTenantId, adminId], references: [tenantId, id], onDelete: Cascade, onUpdate: Restrict)
+  branchTenantId String
+  branchKind     TenantKind @default(BRANCH)
+  branch         Tenant     @relation(fields: [branchTenantId, companyId, branchKind], references: [id, companyId, kind], onDelete: Cascade, onUpdate: Restrict)
+  // The SUPER_ADMIN who made it. No foreign key: the record outlives them.
+  allocatedBy    String?
+  allocatedAt    DateTime   @default(now())
+
+  @@unique([companyAdminId, adminId])
+  @@index([companyAdminId, branchTenantId])
+  @@index([adminId])
 }
 
 model Driver {
@@ -130,7 +219,9 @@ model Driver {
   // sign in until an ADMIN sets a username and password on the Drivers page.
   passwordHash String?
   active       Boolean     @default(true)
+  // Retired by UserSession; still written so a rollback keeps validating.
   sessionToken String?
+  sessions     UserSession[]
   userId       String?     @unique
   user         User?       @relation(fields: [userId], references: [id])
   tenantId     String      @default("")
@@ -173,6 +264,48 @@ model LoginName {
   driver    Driver?  @relation(fields: [driverId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// One signed-in device. Every authenticated request looks its row up by the
+// SHA-256 of the cookie's session token (the token itself is never stored),
+// so revoking a row signs that device out on its very next request — not
+// when the 24h cookie runs out. See lib/session.ts.
+//
+// Belongs to exactly one Admin or Driver (CHECK in the migration) and goes
+// with it. A registry like LoginName: no tenantId, read only through
+// lib/session.ts, so a scoped `db.userSession` call fails rather than
+// returning every tenant's devices.
+//
+// Admin.sessionTokens / sessionToken and Driver.sessionToken are still
+// written alongside, for the previous deploy during the rollout.
+model UserSession {
+  id            String    @id @default(cuid())
+  tokenHash     String    @unique
+  adminId       String?
+  admin         Admin?    @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  driverId      String?
+  driver        Driver?   @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  // Random id from the long-lived signex-device cookie: which browser this is,
+  // across sign-ins. An identifier, not a credential — it is client-held.
+  deviceId      String?
+  userAgent     String?
+  browser       String?
+  os            String?
+  // phone | tablet | desktop; null when the user agent says nothing usable.
+  deviceType    String?
+  ipAddress     String?
+  createdAt     DateTime  @default(now())
+  // Moved at most once a minute, from getScope().
+  lastSeenAt    DateTime  @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  // logout | evicted | replaced | password_reset | deactivated
+  revokedReason String?
+
+  @@index([adminId, revokedAt])
+  @@index([driverId, revokedAt])
+  @@index([deviceId])
+  @@index([lastSeenAt])
 }
 
 // ─── Trip Sheets & Stops ──────────────────────────────────────────────────
@@ -998,25 +1131,56 @@ enum AuditAction {
   DRIVER_DELETE
   CONFIG_UPDATE
   SCOPE_SWITCH
+  LOGIN_FAILED
+  PASSWORD_CHANGE
+  USERNAME_CHANGE
+  ROLE_CHANGE
+  ACCOUNT_CREATE
+  ACCOUNT_UPDATE
+  ACCOUNT_DEACTIVATE
+  ACCOUNT_REACTIVATE
+  ACCOUNT_DELETE
+  EXPORT
+  FILE_DELETE
 }
 
+// Append-only: a trigger in the migration (20261025090000_audit_log_actor)
+// refuses every UPDATE and DELETE, so no route — and no bug — can rewrite or
+// erase what happened. Tests clear it with TRUNCATE, which the trigger does
+// not cover; retention, if it is ever wanted, is a deliberate migration.
+//
+// tenantId deliberately has NO foreign key: the trail of what happened in a
+// workspace must outlive the workspace, and a key would force deleting a
+// tenant to rewrite (or delete) its history.
 model AuditLog {
   id        String      @id @default(cuid())
   action    AuditAction
-  entity    String // trip_sheet | stop | driver | admin | config | scope
+  entity    String // trip_sheet | stop | driver | admin | config | scope | auth | ...
   entityId  String?
   userName  String?
   details   String?     @db.Text
   // Nullable by design: failed logins and other pre-session events have no
   // scope yet. Everything post-authentication MUST set it.
   tenantId  String?
-  tenant    Tenant?     @relation(fields: [tenantId], references: [id])
+  // Who did it, filled in by logAudit from the request's session. Null for
+  // the system (cron, after() work with no session) and for anonymous
+  // callers (a failed sign-in, a customer's confirmation link).
+  actorId   String?
+  actorRole UserRole?
+  ip        String?
+  userAgent String?
+  // The signex-device cookie: which browser, across sign-ins.
+  deviceId  String?
+  // Structured detail (from/to of a rename, export row counts). Never a
+  // password, token or anything priced.
+  metadata  Json?
   createdAt DateTime    @default(now())
 
   @@index([action])
   @@index([createdAt])
   @@index([entity, entityId])
   @@index([tenantId, createdAt])
+  @@index([actorId, createdAt])
 }
 
 // ─── Contacts ─────────────────────────────────────────────────────────────

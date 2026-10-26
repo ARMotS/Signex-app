@@ -33,6 +33,7 @@ import {
   adminSession,
   driverSession,
   superAdminSession,
+  companyAdminSession,
   tamperedAdminSession,
   useSession,
   sessionMockFactory,
@@ -46,7 +47,13 @@ import {
   type Fixtures,
 } from "./helpers/fixtures";
 
-vi.mock("@/lib/session", () => sessionMockFactory());
+// The cookie-facing functions are stubbed; the database ones (startSession,
+// revokeSession, revokeSessionsWrite) stay real so account changes exercise
+// the real session revocation.
+vi.mock("@/lib/session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/session")>()),
+  ...sessionMockFactory(),
+}));
 
 /**
  * The SMTP relay is stubbed. Beyond keeping the suite off the network, the
@@ -2360,12 +2367,11 @@ suite("cross-ADMIN isolation", () => {
     it("resetting a driver's password signs them out and replaces the old one", async () => {
       const { PUT } = await import("@/app/api/drivers/route");
       const { login } = await import("@/lib/accounts");
+      const { startSession } = await import("@/lib/session");
       useSession(adminSession(f.a));
 
-      await db().driver.update({
-        where: { id: f.a.driver.id },
-        data: { sessionToken: "live-token" },
-      });
+      const phone = await startSession({ id: f.a.driver.id, role: "driver" });
+      expect(phone.ok).toBe(true);
 
       const res = await PUT(
         req("/api/drivers", {
@@ -2377,6 +2383,9 @@ suite("cross-ADMIN isolation", () => {
 
       const row = await db().driver.findUnique({ where: { id: f.a.driver.id } });
       expect(row?.sessionToken).toBeNull();
+      const sessions = await db().userSession.findMany({ where: { driverId: f.a.driver.id } });
+      expect(sessions.length).toBeGreaterThan(0);
+      expect(sessions.every((s) => s.revokedReason === "password_reset" && s.revokedAt)).toBe(true);
       expect((await login(CREDENTIALS.driver("A").username, CREDENTIALS.driver("A").password)).success).toBe(false);
       expect((await login(CREDENTIALS.driver("A").username, "rotated-pass-1")).success).toBe(true);
 
@@ -2653,14 +2662,12 @@ suite("cross-ADMIN isolation", () => {
       ).toBe(true);
     });
 
-    it("deactivating revokes the session token so the admin is logged out at once", async () => {
+    it("deactivating revokes every session so the admin is logged out at once", async () => {
       const { PUT } = await import("@/app/api/admin/users/route");
+      const { startSession } = await import("@/lib/session");
       useSession(superAdminSession(f));
 
-      await db().admin.update({
-        where: { id: f.b.admin.id },
-        data: { sessionToken: "live-token", sessionTokens: ["t1", "t2", "live-token"] },
-      });
+      for (let i = 0; i < 3; i++) await startSession({ id: f.b.admin.id, role: "admin" });
 
       await PUT(
         req("/api/admin/users", {
@@ -2673,6 +2680,9 @@ suite("cross-ADMIN isolation", () => {
       expect(row?.sessionToken).toBeNull();
       // Every device, not just the most recent one.
       expect(row?.sessionTokens).toEqual([]);
+      expect(
+        await db().userSession.count({ where: { adminId: f.b.admin.id, revokedAt: null } })
+      ).toBe(0);
 
       await db().admin.update({
         where: { id: f.b.admin.id },
@@ -2680,103 +2690,219 @@ suite("cross-ADMIN isolation", () => {
       });
     });
 
-    // lib/session is mocked for the route handlers; these exercise the real
-    // SQL that records and revokes admin sessions.
-    describe("an admin signed in on several devices", () => {
+    // lib/session's cookie functions are mocked for the route handlers; these
+    // exercise the real session store.
+    describe("sessions and devices", () => {
       const realSession = () =>
         vi.importActual<typeof import("@/lib/session")>("@/lib/session");
-      const tokens = async () =>
-        (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionTokens;
+      const HOUR = 3_600_000;
+      const liveOf = (where: { adminId?: string; driverId?: string }) =>
+        db().userSession.findMany({
+          where: { ...where, revokedAt: null, expiresAt: { gt: new Date() } },
+          orderBy: { createdAt: "asc" },
+        });
+      /** The cookie payload a token from startSession would sit in. */
+      const cookieFor = (
+        account: { id: string; role: "admin" | "driver" | "super_admin" },
+        token: string
+      ) => ({
+        id: account.id,
+        role: account.role,
+        name: "x",
+        sessionToken: token,
+        exp: Date.now() + HOUR,
+      });
+      const admin = () => ({ id: f.b.admin.id, role: "admin" as const });
+      const start = async (
+        account: { id: string; role: "admin" | "driver" | "super_admin" },
+        options: { evictOldest?: boolean; now?: number } = {}
+      ) => {
+        const { startSession } = await realSession();
+        const r = await startSession(account, options);
+        if (!r.ok) throw new Error(`refused: ${r.activeSessions} active`);
+        return r.token;
+      };
 
       beforeEach(async () => {
-        await db().admin.update({
-          where: { id: f.b.admin.id },
-          data: { sessionToken: null, sessionTokens: [] },
+        await db().userSession.deleteMany({
+          where: {
+            OR: [
+              { adminId: { in: [f.a.admin.id, f.b.admin.id, f.superAdmin.id] } },
+              { driverId: { in: [f.a.driver.id, f.b.driver.id] } },
+            ],
+          },
         });
+        await db().admin.updateMany({ data: { sessionToken: null, sessionTokens: [] } });
+        await db().driver.updateMany({ data: { sessionToken: null } });
       });
 
-      it("holds a fourth login back, and signs out the oldest only once confirmed", async () => {
-        const { addAdminSession, MAX_ADMIN_SESSIONS } = await realSession();
-        expect(MAX_ADMIN_SESSIONS).toBe(3);
+      it("holds a sixth admin login back, and signs out the oldest only once confirmed", async () => {
+        const { startSession, SESSION_LIMITS } = await realSession();
+        expect(SESSION_LIMITS.admin).toBe(5);
 
-        for (const t of ["d1", "d2", "d3"]) await addAdminSession(f.b.admin.id, t, false);
-        expect(await tokens()).toEqual(["d1", "d2", "d3"]);
+        const tokens: string[] = [];
+        for (let i = 0; i < 5; i++) tokens.push(await start(admin()));
+        expect(await liveOf({ adminId: f.b.admin.id })).toHaveLength(5);
 
         // Unconfirmed: nobody is signed out and the new device is not added.
-        expect(await addAdminSession(f.b.admin.id, "d4", false)).toEqual({
-          ok: false,
-          activeSessions: 3,
-        });
-        expect(await tokens()).toEqual(["d1", "d2", "d3"]);
+        expect(await startSession(admin())).toEqual({ ok: false, activeSessions: 5 });
+        expect(await liveOf({ adminId: f.b.admin.id })).toHaveLength(5);
 
-        // Confirmed: the oldest goes.
-        expect((await addAdminSession(f.b.admin.id, "d4", true)).ok).toBe(true);
-        expect(await tokens()).toEqual(["d2", "d3", "d4"]);
-        // Still written for the previous deploy during the rollout.
+        // Confirmed: the oldest goes, and only the oldest.
+        const newest = await start(admin(), { evictOldest: true });
+        const live = await liveOf({ adminId: f.b.admin.id });
+        expect(live).toHaveLength(5);
+        const { hashSessionToken } = await realSession();
+        expect(live.map((s) => s.tokenHash)).not.toContain(hashSessionToken(tokens[0]));
         expect(
-          (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionToken
-        ).toBe("d4");
+          (await db().userSession.findUnique({ where: { tokenHash: hashSessionToken(tokens[0]) } }))
+            ?.revokedReason
+        ).toBe("evicted");
+
+        // The legacy columns, for the previous deploy: the evicted token is gone.
+        const row = await db().admin.findUnique({ where: { id: f.b.admin.id } });
+        expect(row?.sessionTokens).toEqual([...tokens.slice(1), newest]);
+        expect(row?.sessionToken).toBe(newest);
       });
 
-      it("drops expired sessions instead of prompting over them", async () => {
-        const { addAdminSession } = await realSession();
-        const stale = `${(Date.now() - 25 * 3_600_000).toString(36)}.stale`;
-        await db().admin.update({
-          where: { id: f.b.admin.id },
-          data: { sessionTokens: [stale, "d2", "d3"] },
-        });
+      it("gives the super admin one device, and asks before taking it", async () => {
+        const { startSession } = await realSession();
+        const sa = { id: f.superAdmin.id, role: "super_admin" as const };
+        await start(sa);
+        expect(await startSession(sa)).toEqual({ ok: false, activeSessions: 1 });
+        await start(sa, { evictOldest: true });
+        expect(await liveOf({ adminId: f.superAdmin.id })).toHaveLength(1);
+      });
 
-        expect((await addAdminSession(f.b.admin.id, "d4", false)).ok).toBe(true);
-        expect(await tokens()).toEqual(["d2", "d3", "d4"]);
+      it("a driver's new phone signs the old one out without asking", async () => {
+        const { validateSession } = await realSession();
+        const driver = { id: f.a.driver.id, role: "driver" as const };
+        const oldPhone = await start(driver);
+        const newPhone = await start(driver);
+
+        expect(await validateSession(cookieFor(driver, oldPhone))).toBe(false);
+        expect(await validateSession(cookieFor(driver, newPhone))).toBe(true);
+        expect((await db().driver.findUnique({ where: { id: driver.id } }))?.sessionToken).toBe(
+          newPhone
+        );
+      });
+
+      it("does not count expired sessions, so no prompt is needed", async () => {
+        for (let i = 0; i < 5; i++) await start(admin(), { now: Date.now() - 25 * HOUR });
+        await expect((await realSession()).startSession(admin())).resolves.toMatchObject({ ok: true });
       });
 
       it("racing logins cannot both take the last free slot", async () => {
-        const { addAdminSession } = await realSession();
-        await addAdminSession(f.b.admin.id, "d1", false);
-        await addAdminSession(f.b.admin.id, "d2", false);
+        const { startSession } = await realSession();
+        for (let i = 0; i < 4; i++) await start(admin());
 
-        const results = await Promise.all(
-          ["r1", "r2"].map((t) => addAdminSession(f.b.admin.id, t, false))
-        );
+        const results = await Promise.all([startSession(admin()), startSession(admin())]);
         expect(results.filter((r) => r.ok)).toHaveLength(1);
-        expect(await tokens()).toHaveLength(3);
+        expect(await liveOf({ adminId: f.b.admin.id })).toHaveLength(5);
       });
 
       it("logging out of one device leaves the others signed in", async () => {
-        const { addAdminSession, removeAdminSession } = await realSession();
-        for (const t of ["d1", "d2", "d3"]) await addAdminSession(f.b.admin.id, t, false);
+        const { revokeSession, validateSession } = await realSession();
+        const [d1, d2, d3] = [await start(admin()), await start(admin()), await start(admin())];
 
-        await removeAdminSession(f.b.admin.id, "d2");
-        expect(await tokens()).toEqual(["d1", "d3"]);
-        expect(
-          (await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionToken
-        ).toBe("d3");
+        await revokeSession(cookieFor(admin(), d2));
+        expect(await validateSession(cookieFor(admin(), d2))).toBe(false);
+        expect(await validateSession(cookieFor(admin(), d1))).toBe(true);
+        expect(await validateSession(cookieFor(admin(), d3))).toBe(true);
+        expect((await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionTokens).toEqual([
+          d1,
+          d3,
+        ]);
       });
 
       it("an evicted device signing out does not revoke the devices that replaced it", async () => {
-        const { addAdminSession, removeAdminSession } = await realSession();
-        for (const t of ["d1", "d2", "d3", "d4"]) await addAdminSession(f.b.admin.id, t, true);
+        const { revokeSession } = await realSession();
+        const first = await start(admin());
+        for (let i = 0; i < 5; i++) await start(admin(), { evictOldest: true });
 
-        await removeAdminSession(f.b.admin.id, "d1");
-        expect(await tokens()).toEqual(["d2", "d3", "d4"]);
+        await revokeSession(cookieFor(admin(), first));
+        expect(await liveOf({ adminId: f.b.admin.id })).toHaveLength(5);
       });
 
       it("one admin's sessions never touch another admin's", async () => {
-        const { addAdminSession } = await realSession();
-        await db().admin.update({ where: { id: f.a.admin.id }, data: { sessionTokens: ["a-only"] } });
+        const a = await start({ id: f.a.admin.id, role: "admin" });
+        for (let i = 0; i < 6; i++) await start(admin(), { evictOldest: true });
 
-        for (const t of ["d1", "d2", "d3", "d4"]) await addAdminSession(f.b.admin.id, t, true);
+        const { validateSession } = await realSession();
+        expect(await validateSession(cookieFor({ id: f.a.admin.id, role: "admin" }, a))).toBe(true);
+      });
+
+      it("a session is only good for the account it was issued to", async () => {
+        const { validateSession } = await realSession();
+        const token = await start({ id: f.a.admin.id, role: "admin" });
+        // B presenting A's token (a forged id inside a re-signed cookie).
+        expect(await validateSession(cookieFor(admin(), token))).toBe(false);
+        expect(await validateSession(cookieFor({ id: f.a.admin.id, role: "driver" }, token))).toBe(
+          false
+        );
+      });
+
+      it("an expired session is refused even before anyone revokes it", async () => {
+        const { validateSession } = await realSession();
+        const token = await start(admin(), { now: Date.now() - 25 * HOUR });
+        expect(await validateSession(cookieFor(admin(), token))).toBe(false);
+      });
+
+      it("moves lastSeenAt at most once a minute", async () => {
+        const { validateSession, hashSessionToken } = await realSession();
+        const t0 = Date.now() - 10 * 60_000;
+        const token = await start(admin(), { now: t0 });
+        const seen = async () =>
+          (await db().userSession.findUnique({ where: { tokenHash: hashSessionToken(token) } }))!
+            .lastSeenAt.getTime();
+
+        expect(await validateSession(cookieFor(admin(), token), t0 + 30_000)).toBe(true);
+        expect(await seen()).toBe(t0);
+        expect(await validateSession(cookieFor(admin(), token), t0 + 90_000)).toBe(true);
+        expect(await seen()).toBe(t0 + 90_000);
+      });
+
+      it("takes on a session the previous deploy signed in, and only a live one", async () => {
+        const { validateSession, hashSessionToken } = await realSession();
+        await db().admin.update({
+          where: { id: f.b.admin.id },
+          data: { sessionTokens: ["from-old-deploy"] },
+        });
+
+        expect(await validateSession(cookieFor(admin(), "from-old-deploy"))).toBe(true);
         expect(
-          (await db().admin.findUnique({ where: { id: f.a.admin.id } }))?.sessionTokens
-        ).toEqual(["a-only"]);
+          await db().userSession.findUnique({ where: { tokenHash: hashSessionToken("from-old-deploy") } })
+        ).toMatchObject({ adminId: f.b.admin.id, revokedAt: null });
 
-        await db().admin.update({ where: { id: f.a.admin.id }, data: { sessionTokens: [] } });
+        // A token the legacy columns no longer hold was signed out there.
+        expect(await validateSession(cookieFor(admin(), "never-issued"))).toBe(false);
+        expect(
+          await db().userSession.findUnique({ where: { tokenHash: hashSessionToken("never-issued") } })
+        ).toBeNull();
+      });
+
+      it("a revoked session is turned away by the next API request", async () => {
+        const { GET } = await import("@/app/api/drivers/route");
+        const mocked = await import("@/lib/session");
+        const { revokeSession, validateSession } = await realSession();
+        vi.mocked(mocked.validateSession).mockImplementation(validateSession);
+        try {
+          const token = await start({ id: f.a.admin.id, role: "admin" });
+          const session = { ...adminSession(f.a), sessionToken: token };
+          useSession(session);
+          expect((await GET(req("/api/drivers"))).status).toBe(200);
+
+          await revokeSession(session);
+          const res = await GET(req("/api/drivers"));
+          expect(res.status).toBe(401);
+        } finally {
+          vi.mocked(mocked.validateSession).mockImplementation(async () => true);
+        }
       });
 
       it("a password reset by the SUPER_ADMIN signs out every device", async () => {
         const { PATCH } = await import("@/app/api/admin/users/route");
-        const { addAdminSession } = await realSession();
-        for (const t of ["d1", "d2", "d3"]) await addAdminSession(f.b.admin.id, t, false);
+        for (let i = 0; i < 3; i++) await start(admin());
 
         useSession(superAdminSession(f));
         const res = await PATCH(
@@ -2786,7 +2912,44 @@ suite("cross-ADMIN isolation", () => {
           })
         );
         expect(res.status).toBe(200);
-        expect(await tokens()).toEqual([]);
+        expect(await liveOf({ adminId: f.b.admin.id })).toHaveLength(0);
+        expect((await db().admin.findUnique({ where: { id: f.b.admin.id } }))?.sessionTokens).toEqual(
+          []
+        );
+      });
+
+      it("changing your own password keeps the device you did it from", async () => {
+        const { PATCH } = await import("@/app/api/admin/users/route");
+        const { hashSessionToken } = await realSession();
+        const sa = { id: f.superAdmin.id, role: "super_admin" as const };
+        const here = await start(sa);
+
+        useSession({ ...superAdminSession(f), sessionToken: here });
+        const res = await PATCH(
+          req("/api/admin/users", {
+            method: "PATCH",
+            body: { id: f.superAdmin.id, password: CREDENTIALS.superAdmin.password },
+          })
+        );
+        expect(res.status).toBe(200);
+        const live = await liveOf({ adminId: f.superAdmin.id });
+        expect(live.map((s) => s.tokenHash)).toEqual([hashSessionToken(here)]);
+      });
+
+      it("deactivating a driver signs their phone out", async () => {
+        const { PUT } = await import("@/app/api/drivers/route");
+        const { validateSession } = await realSession();
+        const driver = { id: f.a.driver.id, role: "driver" as const };
+        const phone = await start(driver);
+
+        useSession(adminSession(f.a));
+        expect(
+          (await PUT(req("/api/drivers", { method: "PUT", body: { id: driver.id, active: false } })))
+            .status
+        ).toBe(200);
+        expect(await validateSession(cookieFor(driver, phone))).toBe(false);
+
+        await PUT(req("/api/drivers", { method: "PUT", body: { id: driver.id, active: true } }));
       });
     });
 
@@ -5793,6 +5956,431 @@ suite("cross-ADMIN isolation", () => {
 
       useSession(driverSession(f.a));
       expect((await GET(req("/api/exceptions"))).status).toBe(403);
+    });
+  });
+  // ── The audit log ───────────────────────────────────────────────────
+  describe("the audit log", () => {
+    const latest = (where: Record<string, unknown>) =>
+      db().auditLog.findFirst({ where, orderBy: { createdAt: "desc" } });
+
+    it("is append-only: the database refuses to rewrite or erase an entry", async () => {
+      const row = await db().auditLog.create({
+        data: { action: "CONFIG_UPDATE", entity: "config", details: "original", tenantId: f.a.tenantId },
+      });
+      await expect(
+        db().auditLog.update({ where: { id: row.id }, data: { details: "rewritten" } })
+      ).rejects.toThrow(/append-only/);
+      await expect(db().auditLog.delete({ where: { id: row.id } })).rejects.toThrow(/append-only/);
+      expect((await db().auditLog.findUnique({ where: { id: row.id } }))?.details).toBe("original");
+    });
+
+    it("names who did it — the session's account, role and device — without the caller passing it", async () => {
+      const { PUT } = await import("@/app/api/drivers/route");
+      useSession(adminSession(f.a));
+      const before = (await db().driver.findUniqueOrThrow({ where: { id: f.a.driver.id } })).name;
+
+      const res = await PUT(
+        req("/api/drivers", { method: "PUT", body: { id: f.a.driver.id, name: "Audit Rename" } })
+      );
+      expect(res.status).toBe(200);
+
+      const entry = await latest({ action: "DRIVER_UPDATE", entityId: f.a.driver.id });
+      expect(entry).toMatchObject({
+        actorId: f.a.admin.id,
+        actorRole: "ADMIN",
+        deviceId: "test-device",
+        tenantId: f.a.tenantId,
+        metadata: { name: { from: before, to: "Audit Rename" } },
+      });
+
+      await PUT(req("/api/drivers", { method: "PUT", body: { id: f.a.driver.id, name: before } }));
+    });
+
+    it("records a failed sign-in against the account, and an unknown name without recording it", async () => {
+      const { login } = await import("@/lib/accounts");
+
+      expect((await login(CREDENTIALS.admin("A").username, "not-the-password1")).success).toBe(false);
+      expect(await latest({ action: "LOGIN_FAILED", entityId: f.a.admin.id })).toMatchObject({
+        entity: "admin",
+        userName: CREDENTIALS.admin("A").username,
+        details: "Wrong password",
+        tenantId: f.a.tenantId,
+        actorId: null,
+      });
+
+      // Possibly a password typed into the username box: not written down.
+      expect((await login("maybe.a.password1", "whatever-pass1")).success).toBe(false);
+      const unknown = await latest({ action: "LOGIN_FAILED", entity: "auth" });
+      expect(unknown).toMatchObject({ details: "Unknown username", userName: null, tenantId: null });
+    });
+
+    it("records the right password for a deactivated account as a refused sign-in", async () => {
+      const { login } = await import("@/lib/accounts");
+      await db().admin.update({ where: { id: f.b.admin.id }, data: { active: false } });
+      try {
+        expect((await login(CREDENTIALS.admin("B").username, CREDENTIALS.admin("B").password)).success).toBe(false);
+        expect(await latest({ action: "LOGIN_FAILED", entityId: f.b.admin.id })).toMatchObject({
+          details: "Account deactivated",
+        });
+      } finally {
+        await db().admin.update({ where: { id: f.b.admin.id }, data: { active: true } });
+      }
+    });
+
+    it("logs a sign-in once the session has started, as the account signing in", async () => {
+      const { POST } = await import("@/app/api/auth/login/route");
+      useSession(null);
+      const res = await POST(
+        req("/api/auth/login", {
+          method: "POST",
+          body: { username: CREDENTIALS.driver("A").username, password: CREDENTIALS.driver("A").password },
+        })
+      );
+      expect(res.status).toBe(200);
+      expect(await latest({ action: "LOGIN", entityId: f.a.driver.id })).toMatchObject({
+        actorId: f.a.driver.id,
+        actorRole: "DRIVER",
+        deviceId: "test-device",
+        tenantId: f.a.tenantId,
+      });
+    });
+
+    it("logs a sign-out as the account signing out", async () => {
+      const { POST } = await import("@/app/api/auth/logout/route");
+      useSession(adminSession(f.b));
+      expect((await POST()).status).toBe(200);
+      expect(await latest({ action: "LOGOUT", entityId: f.b.admin.id })).toMatchObject({
+        actorId: f.b.admin.id,
+        actorRole: "ADMIN",
+        tenantId: f.b.tenantId,
+      });
+    });
+
+    it("logs a password reset and a username change separately, and never the password", async () => {
+      const { PATCH } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+      const secret = "Audit-Secret-99";
+
+      const res = await PATCH(
+        req("/api/admin/users", {
+          method: "PATCH",
+          body: { id: f.b.admin.id, password: secret, username: "office.b.renamed" },
+        })
+      );
+      expect(res.status).toBe(200);
+
+      expect(await latest({ action: "PASSWORD_CHANGE", entityId: f.b.admin.id })).toMatchObject({
+        actorId: f.superAdmin.id,
+        actorRole: "SUPER_ADMIN",
+        metadata: { self: false },
+      });
+      expect(await latest({ action: "USERNAME_CHANGE", entityId: f.b.admin.id })).toMatchObject({
+        metadata: { from: CREDENTIALS.admin("B").username, to: "office.b.renamed" },
+      });
+      const leaks = await db().$queryRaw<{ n: bigint }[]>`
+        SELECT count(*) AS n FROM "AuditLog"
+        WHERE "details" LIKE ${"%" + secret + "%"} OR "metadata"::text LIKE ${"%" + secret + "%"}`;
+      expect(Number(leaks[0].n)).toBe(0);
+
+      // Restore for the rest of the suite.
+      await PATCH(
+        req("/api/admin/users", {
+          method: "PATCH",
+          body: {
+            id: f.b.admin.id,
+            password: CREDENTIALS.admin("B").password,
+            username: CREDENTIALS.admin("B").username,
+          },
+        })
+      );
+    });
+
+    it("logs an export in the exporter's own scope", async () => {
+      const { GET } = await import("@/app/api/exceptions/route");
+      useSession(adminSession(f.a));
+      expect((await GET(req("/api/exceptions?format=csv"))).status).toBe(200);
+      expect(await latest({ action: "EXPORT", entity: "exceptions" })).toMatchObject({
+        actorId: f.a.admin.id,
+        tenantId: f.a.tenantId,
+      });
+    });
+
+    it("keeps no IP, user agent or device on what a record's history page sends the browser", async () => {
+      const { queryAuditLogs } = await import("@/lib/audit");
+      const { logs } = await queryAuditLogs(f.a.tenantId, { limit: 5 });
+      expect(logs.length).toBeGreaterThan(0);
+      for (const log of logs) {
+        expect(log).not.toHaveProperty("ip");
+        expect(log).not.toHaveProperty("deviceId");
+        expect(log).not.toHaveProperty("userAgent");
+      }
+    });
+  });
+  // ── Companies and COMPANY_ADMIN oversight ───────────────────────────
+  // Company X owns branch A; company Y owns branch B. The COMPANY_ADMIN of X
+  // ("ca") is allocated admin A. Nothing it does may reach B, the root scope,
+  // or reveal the SUPER_ADMIN.
+  describe("companies and company admins", () => {
+    let companyX: string;
+    let companyY: string;
+    let homeX: string;
+    let ca: { id: string; name: string; homeTenantId: string };
+
+    const driverIds = async (res: Response) =>
+      ((await res.json()).drivers as { id: string }[]).map((d) => d.id);
+
+    beforeAll(async () => {
+      const { backfillCompany } = await import("@/lib/company");
+      const x = await backfillCompany({
+        companyName: "Company X",
+        usernames: [CREDENTIALS.admin("A").username],
+        apply: true,
+      });
+      const y = await backfillCompany({
+        companyName: "Company Y",
+        usernames: [CREDENTIALS.admin("B").username],
+        apply: true,
+      });
+      companyX = x.company.id!;
+      companyY = y.company.id!;
+      homeX = x.homeTenant.id!;
+
+      const admin = await db().admin.create({
+        data: {
+          name: "Company X Lead",
+          email: "lead@company-x.test",
+          passwordHash: "unused",
+          tenantId: homeX,
+          companyId: companyX,
+          login: { create: { username: "company.x.lead" } },
+        },
+      });
+      await db().user.create({
+        data: { email: "lead@company-x.test", name: admin.name, role: "COMPANY_ADMIN", tenantId: homeX },
+      });
+      await db().companyAdminAllocation.create({
+        data: {
+          companyId: companyX,
+          companyAdminId: admin.id,
+          adminId: f.a.admin.id,
+          branchTenantId: f.a.tenantId,
+          allocatedBy: f.superAdmin.id,
+        },
+      });
+      ca = { id: admin.id, name: admin.name, homeTenantId: homeX };
+    });
+
+    // ── The backfill ──
+    it("the backfill attached each branch to its company, and a second run changes nothing", async () => {
+      const { backfillCompany } = await import("@/lib/company");
+      expect((await db().tenant.findUniqueOrThrow({ where: { id: f.a.tenantId } })).companyId).toBe(companyX);
+      expect((await db().tenant.findUniqueOrThrow({ where: { id: f.b.tenantId } })).companyId).toBe(companyY);
+      expect(await db().tenant.findUniqueOrThrow({ where: { id: homeX } })).toMatchObject({
+        kind: "COMPANY",
+        companyId: companyX,
+      });
+
+      const again = await backfillCompany({
+        companyName: "company x",
+        usernames: [CREDENTIALS.admin("A").username],
+        apply: true,
+      });
+      expect(again.company).toEqual({ id: companyX, created: false });
+      expect(again.homeTenant).toEqual({ id: homeX, created: false });
+      expect(again.branches.map((b) => b.action)).toEqual(["already"]);
+    });
+
+    it("the backfill writes nothing if any name is not a branch admin of no other company", async () => {
+      const { backfillCompany } = await import("@/lib/company");
+      const before = await db().company.count();
+      const r = await backfillCompany({
+        companyName: "Company Z",
+        usernames: [
+          CREDENTIALS.admin("A").username, // already Company X's
+          CREDENTIALS.driver("A").username, // a driver
+          CREDENTIALS.superAdmin.username, // the SUPER_ADMIN (root scope)
+          "nobody.here",
+        ],
+        apply: true,
+      });
+      expect(r.applied).toBe(false);
+      expect(r.branches.map((b) => b.action)).toEqual(["refused", "refused", "refused", "refused"]);
+      expect(await db().company.count()).toBe(before);
+    });
+
+    // ── The database refuses a wrong allocation outright ──
+    it("cannot store an allocation to another company's branch", async () => {
+      await expect(
+        db().companyAdminAllocation.create({
+          data: { companyId: companyX, companyAdminId: ca.id, adminId: f.b.admin.id, branchTenantId: f.b.tenantId },
+        })
+      ).rejects.toThrow();
+      // Nor by claiming the other company on the row: the COMPANY_ADMIN is X's.
+      await expect(
+        db().companyAdminAllocation.create({
+          data: { companyId: companyY, companyAdminId: ca.id, adminId: f.b.admin.id, branchTenantId: f.b.tenantId },
+        })
+      ).rejects.toThrow();
+    });
+
+    it("cannot store an allocation of anything but a branch admin", async () => {
+      // The COMPANY_ADMIN itself, in its company-home scope.
+      await expect(
+        db().companyAdminAllocation.create({
+          data: { companyId: companyX, companyAdminId: ca.id, adminId: ca.id, branchTenantId: homeX },
+        })
+      ).rejects.toThrow();
+      // The SUPER_ADMIN, in the root scope (which belongs to no company).
+      await expect(
+        db().companyAdminAllocation.create({
+          data: {
+            companyId: companyX,
+            companyAdminId: ca.id,
+            adminId: f.superAdmin.id,
+            branchTenantId: f.superAdmin.tenantId,
+          },
+        })
+      ).rejects.toThrow();
+    });
+
+    it("refuses to move an allocated branch to another company", async () => {
+      await expect(
+        db().tenant.update({ where: { id: f.a.tenantId }, data: { companyId: companyY } })
+      ).rejects.toThrow();
+      expect((await db().tenant.findUniqueOrThrow({ where: { id: f.a.tenantId } })).companyId).toBe(companyX);
+    });
+
+    // ── Requests ──
+    it("works in an allocated branch as that branch's admin", async () => {
+      const { GET, POST, DELETE } = await import("@/app/api/drivers/route");
+      useSession(companyAdminSession(ca, f.a.tenantId));
+
+      const res = await GET(req("/api/drivers"));
+      expect(res.status).toBe(200);
+      const ids = await driverIds(res);
+      expect(ids).toContain(f.a.driver.id);
+      expect(ids).not.toContain(f.b.driver.id);
+
+      // A change lands in the branch, not in the company's own scope.
+      const created = await POST(
+        req("/api/drivers", {
+          method: "POST",
+          body: { name: "Company Made", username: "company.made", password: "company-made-1" },
+        })
+      );
+      expect(created.status).toBe(200);
+      const row = await db().driver.findFirstOrThrow({ where: { name: "Company Made" } });
+      expect(row.tenantId).toBe(f.a.tenantId);
+      await DELETE(req("/api/drivers", { method: "DELETE", body: { id: row.id } }));
+    });
+
+    it("cannot touch another company's records by id from its branch (404)", async () => {
+      const { PUT } = await import("@/app/api/drivers/route");
+      useSession(companyAdminSession(ca, f.a.tenantId));
+      const res = await PUT(
+        req("/api/drivers", { method: "PUT", body: { id: f.b.driver.id, name: "Hijacked" } })
+      );
+      expect(res.status).toBe(404);
+      expect((await db().driver.findUniqueOrThrow({ where: { id: f.b.driver.id } })).name).not.toBe("Hijacked");
+    });
+
+    it("a session pointed at an unallocated branch reads nothing from it", async () => {
+      const { GET } = await import("@/app/api/drivers/route");
+      // A cookie that says B — as if forged, or left over from before.
+      useSession(companyAdminSession(ca, f.b.tenantId));
+      const res = await GET(req("/api/drivers"));
+      expect(res.status).toBe(403);
+      expect(JSON.stringify(await res.json())).not.toContain(f.b.driver.id);
+    });
+
+    it("in its own scope it gets no data at all — even from routes with no role check", async () => {
+      useSession(companyAdminSession(ca, null));
+      const drivers = await import("@/app/api/drivers/route");
+      const sync = await import("@/app/api/sync/route");
+      const dashboard = await import("@/app/api/dashboard/route");
+      expect((await drivers.GET(req("/api/drivers"))).status).toBe(403);
+      expect((await sync.GET(req("/api/sync"))).status).toBe(403);
+      expect((await dashboard.GET(req("/api/dashboard"))).status).toBe(403);
+    });
+
+    it("lists only its allocated branches, and never shows the root scope or the SUPER_ADMIN", async () => {
+      const { GET } = await import("@/app/api/admin/scopes/route");
+      useSession(companyAdminSession(ca, f.a.tenantId));
+      const res = await GET(req("/api/admin/scopes"));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.scopes.map((s: { tenantId: string }) => s.tenantId)).toEqual([f.a.tenantId]);
+      expect(body.scopes[0].isActive).toBe(true);
+
+      const raw = JSON.stringify(body);
+      for (const hidden of [f.superAdmin.id, f.superAdmin.email, f.superAdmin.tenantId, f.b.tenantId, f.b.admin.email]) {
+        expect(raw).not.toContain(hidden);
+      }
+    });
+
+    it("can switch only to an allocated branch: anything else is 404", async () => {
+      const { POST } = await import("@/app/api/admin/scopes/route");
+      useSession(companyAdminSession(ca, null));
+      const to = (tenantId: string | null) =>
+        POST(req("/api/admin/scopes", { method: "POST", body: { tenantId } }));
+
+      expect((await to(f.b.tenantId)).status).toBe(404);
+      expect((await to(f.superAdmin.tenantId)).status).toBe(404);
+      expect((await to("no-such-tenant")).status).toBe(404);
+      expect((await to(f.a.tenantId)).status).toBe(200);
+    });
+
+    it("loses a branch on the very next request once the allocation is removed", async () => {
+      const { GET } = await import("@/app/api/drivers/route");
+      useSession(companyAdminSession(ca, f.a.tenantId));
+      expect((await GET(req("/api/drivers"))).status).toBe(200);
+
+      const allocation = await db().companyAdminAllocation.findFirstOrThrow({
+        where: { companyAdminId: ca.id, adminId: f.a.admin.id },
+      });
+      await db().companyAdminAllocation.delete({ where: { id: allocation.id } });
+      try {
+        expect((await GET(req("/api/drivers"))).status).toBe(403);
+      } finally {
+        await db().companyAdminAllocation.create({
+          data: {
+            companyId: companyX,
+            companyAdminId: ca.id,
+            adminId: f.a.admin.id,
+            branchTenantId: f.a.tenantId,
+          },
+        });
+      }
+      expect((await GET(req("/api/drivers"))).status).toBe(200);
+    });
+
+    it("loses every branch while its company is deactivated", async () => {
+      const { GET } = await import("@/app/api/drivers/route");
+      useSession(companyAdminSession(ca, f.a.tenantId));
+      await db().company.update({ where: { id: companyX }, data: { isActive: false } });
+      try {
+        expect((await GET(req("/api/drivers"))).status).toBe(403);
+      } finally {
+        await db().company.update({ where: { id: companyX }, data: { isActive: true } });
+      }
+    });
+
+    it("cannot reach the SUPER_ADMIN's console", async () => {
+      useSession(companyAdminSession(ca, f.a.tenantId));
+      const users = await import("@/app/api/admin/users/route");
+      const tenants = await import("@/app/api/admin/tenants/route");
+      expect((await users.GET(req("/api/admin/users"))).status).toBe(403);
+      expect(
+        (await tenants.POST(req("/api/admin/tenants", { method: "POST", body: { tenantName: "x" } }))).status
+      ).toBe(403);
+    });
+
+    it("an ADMIN is still locked to its own branch, company or not", async () => {
+      const { GET } = await import("@/app/api/drivers/route");
+      useSession(tamperedAdminSession(f.a, f.b.tenantId));
+      const ids = await driverIds(await GET(req("/api/drivers")));
+      expect(ids).toContain(f.a.driver.id);
+      expect(ids).not.toContain(f.b.driver.id);
     });
   });
 });

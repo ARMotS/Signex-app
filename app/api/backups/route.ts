@@ -5,12 +5,17 @@ import {
   purgeBackedUpInvoices,
   purgeBackedUpTripSheets,
 } from "@/lib/backup";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { logAudit } from "@/lib/audit";
+
+/** Filenames recorded on an audit entry, so a huge selection stays a sane row. */
+const MAX_LOGGED_NAMES = 100;
+const names = (list: string[]) => list.slice(0, MAX_LOGGED_NAMES);
 
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { searchParams } = new URL(request.url);
   const beforeParam = searchParams.get("before");
@@ -22,7 +27,7 @@ export const GET = withAuth(async (request: NextRequest) => {
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json();
   const {
@@ -55,6 +60,20 @@ export const POST = withAuth(async (request: NextRequest) => {
   const datestamp = new Date().toISOString().slice(0, 10);
   const filename = `signex-backup-${datestamp}.zip`;
 
+  await logAudit({
+    action: "EXPORT",
+    entity: "backup",
+    details: `Backup downloaded: ${invoiceFilenames.length} invoices, ${tripSheetFilenames.length} trip sheets, ${collectionFilenames.length} collection receipts, ${creditNoteFilenames.length} credit notes`,
+    metadata: {
+      format: "zip",
+      invoices: invoiceFilenames.length,
+      tripSheets: tripSheetFilenames.length,
+      collections: collectionFilenames.length,
+      creditNotes: creditNoteFilenames.length,
+    },
+    tenantId: ctx.tenantId,
+  });
+
   return new Response(new Uint8Array(buffer), {
     headers: {
       "Content-Type": "application/zip",
@@ -72,7 +91,7 @@ export const POST = withAuth(async (request: NextRequest) => {
  */
 export const DELETE = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json();
   const { invoiceFilenames = [], tripSheetFilenames = [] } = body;
@@ -99,6 +118,22 @@ export const DELETE = withAuth(async (request: NextRequest) => {
       tripSheetFilenames
     );
   }
+
+  // Purging deletes the files for good, so what went is named on the entry.
+  await logAudit({
+    action: "FILE_DELETE",
+    entity: "backup",
+    details: `Purged after backup: ${results.invoices.deleted} signed invoices, ${results.tripSheets.deleted} trip sheets`,
+    metadata: {
+      invoicesDeleted: results.invoices.deleted,
+      tripSheetsDeleted: results.tripSheets.deleted,
+      invoicesFailed: results.invoices.failed.length,
+      tripSheetsFailed: results.tripSheets.failed.length,
+      invoiceFilenames: names(invoiceFilenames),
+      tripSheetFilenames: names(tripSheetFilenames),
+    },
+    tenantId: ctx.tenantId,
+  });
 
   return NextResponse.json({
     success: true,

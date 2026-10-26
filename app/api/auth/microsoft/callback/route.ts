@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { exchangeCodeForTokens, saveCloudAccount } from "@/lib/microsoft-graph";
 import { verifyOAuthState } from "@/lib/crypto";
 import { getSessionContext } from "@/lib/tenant";
+import { logAudit } from "@/lib/audit";
 import { oauthRelayOrigin } from "@/lib/oauth-relay";
 
 /**
@@ -73,6 +74,12 @@ export async function GET(request: NextRequest) {
     const tokens = await exchangeCodeForTokens(code);
     // Stored encrypted, against this scope only.
     await saveCloudAccount(verified.tenantId, tokens);
+    await logAudit({
+      action: "CONFIG_UPDATE",
+      entity: "cloud_account",
+      details: "OneDrive connected",
+      tenantId: verified.tenantId,
+    });
     settingsUrl.searchParams.set("cloud_connected", "true");
     return NextResponse.redirect(settingsUrl);
   } catch (err) {

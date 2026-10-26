@@ -59,6 +59,7 @@ export const CREDENTIALS = {
 export async function resetDatabase() {
   const p = db();
   // Order matters: children before parents.
+  await p.userSession.deleteMany();
   await p.loginName.deleteMany();
   await p.creditNote.deleteMany();
   await p.courierTripSheet.deleteMany();
@@ -78,7 +79,8 @@ export async function resetDatabase() {
   await p.appConfig.deleteMany();
   await p.importTemplate.deleteMany();
   await p.courierImportFailure.deleteMany();
-  await p.auditLog.deleteMany();
+  // Append-only: a trigger refuses DELETE, and TRUNCATE is what it does not cover.
+  await p.$executeRawUnsafe(`TRUNCATE "AuditLog"`);
   await p.driver.deleteMany();
   await p.user.deleteMany();
   await p.tenant.update({ where: { slug: "root" }, data: {} }).catch(() => {});
@@ -292,7 +294,7 @@ export async function seedFixtures(): Promise<Fixtures> {
 
 export interface FakeSession {
   id: string;
-  role: "admin" | "driver" | "super_admin";
+  role: "admin" | "driver" | "super_admin" | "company_admin";
   name: string;
   email?: string;
   tenantId?: string;
@@ -343,6 +345,26 @@ export function superAdminSession(
 }
 
 /**
+ * A COMPANY_ADMIN session. Its account lives in its company's home scope;
+ * `viewTenantId` is the branch it last chose, which getSessionContext()
+ * honours only while that branch is still allocated to it.
+ */
+export function companyAdminSession(
+  account: { id: string; name: string; homeTenantId: string },
+  viewTenantId: string | null
+): FakeSession {
+  return {
+    id: account.id,
+    role: "company_admin",
+    name: account.name,
+    tenantId: account.homeTenantId,
+    viewTenantId,
+    sessionToken: "test-token",
+    exp: Date.now() + 3_600_000,
+  };
+}
+
+/**
  * An ADMIN session that has been tampered with to carry a viewTenantId, proving
  * the field is ignored for any role other than SUPER_ADMIN.
  */
@@ -367,12 +389,14 @@ let currentSession: FakeSession | null = null;
 export function sessionMockFactory() {
   return {
     getSession: vi.fn(async () => currentSession),
-    createSession: vi.fn(async () => ({ ok: true as const })),
+    createSession: vi.fn(async () => ({ ok: true as const, deviceId: "test-device", evicted: 0 })),
+    peekSession: vi.fn(async () => currentSession),
+    peekDeviceId: vi.fn(async () => "test-device"),
     setViewScope: vi.fn(async (tenantId: string | null) => {
       if (currentSession) currentSession.viewTenantId = tenantId;
       return true;
     }),
-    validateSessionToken: vi.fn(async () => true),
+    validateSession: vi.fn(async () => true),
     destroySession: vi.fn(async () => {}),
   };
 }

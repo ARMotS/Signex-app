@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readConfig, validateFolderPath } from "@/lib/config";
 import { assertCollectionsFolderIsSibling } from "@/lib/collections";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json();
   const folderPath = body.path;

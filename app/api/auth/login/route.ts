@@ -2,12 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { login, LOGIN_FAILED } from "@/lib/accounts";
 import { createSession } from "@/lib/session";
 import { normalizeUsername, homePathForRole } from "@/lib/credentials";
+import { logAudit } from "@/lib/audit";
+import { firstAllocatedBranch } from "@/lib/company";
 import {
   checkRateLimit,
   recordFailedAttempt,
   clearAttempts,
   RATE_LIMITS,
 } from "@/lib/rate-limit";
+
+const ROLE = {
+  admin: "ADMIN",
+  driver: "DRIVER",
+  super_admin: "SUPER_ADMIN",
+  company_admin: "COMPANY_ADMIN",
+} as const;
 
 function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get("x-forwarded-for");
@@ -86,22 +95,47 @@ export async function POST(request: NextRequest) {
         email: account.email,
         tenantId: account.tenantId,
       },
-      { evictOldest: body?.confirmEvict === true }
+      {
+        evictOldest: body?.confirmEvict === true,
+        // A COMPANY_ADMIN's own scope holds no data: start it in a branch it
+        // oversees. getSessionContext() re-checks the allocation every request.
+        viewTenantId:
+          account.role === "company_admin" ? await firstAllocatedBranch(account.id) : null,
+      }
     );
 
-    // An admin already on MAX_ADMIN_SESSIONS devices. Nothing was signed in or
-    // out; the form asks, and resubmits with confirmEvict if they go ahead.
-    // Only reachable with the right password, so it reveals nothing to a guesser.
+    // An office account already on its device limit (SESSION_LIMITS). Nothing
+    // was signed in or out; the form asks, and resubmits with confirmEvict if
+    // they go ahead. Only reachable with the right password, so it reveals
+    // nothing to a guesser.
     if (!started.ok) {
+      const n = started.activeSessions;
       return NextResponse.json(
         {
           code: "SESSION_LIMIT",
-          activeSessions: started.activeSessions,
-          error: `This account is already signed in on ${started.activeSessions} devices.`,
+          activeSessions: n,
+          error: `This account is already signed in on ${n === 1 ? "another device" : `${n} devices`}.`,
         },
         { status: 409 }
       );
     }
+
+    // Logged here, not in login(): only now has a session actually started.
+    // The device id is passed because its cookie was only just set.
+    await logAudit({
+      action: "LOGIN",
+      entity: account.role === "driver" ? "driver" : "admin",
+      entityId: account.id,
+      userName: account.name,
+      details:
+        started.evicted > 0
+          ? `Signed in — signed out ${started.evicted} older device${started.evicted === 1 ? "" : "s"}`
+          : "Signed in",
+      tenantId: account.tenantId,
+      actor: { id: account.id, role: ROLE[account.role] },
+      deviceId: started.deviceId,
+      ...(started.evicted > 0 && { metadata: { evictedDevices: started.evicted } }),
+    });
 
     return NextResponse.json({
       success: true,

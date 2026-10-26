@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { CourierError, readCourierOriginal, storeCourierOriginal } from "@/lib/courier-import";
 
@@ -8,7 +8,7 @@ type Ctx = { params: Promise<{ id: string }> };
 /** The courier trip sheet's original Excel, as uploaded. ADMIN only. */
 export const GET = withAuth(async (_request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
 
   const original = await readCourierOriginal(ctx.tenantId, id);
@@ -27,7 +27,7 @@ export const GET = withAuth(async (_request: NextRequest, { params }: Ctx) => {
 /** Retry filing the original in Courier Trip Sheets/ after it failed. */
 export const POST = withAuth(async (_request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
   try {
     const result = await storeCourierOriginal(ctx.tenantId, id, ctx.name ?? null);

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { CreditNoteStatus, Prisma } from "@prisma/client";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
+import { logAudit } from "@/lib/audit";
 import { looksLikePdf, MAX_INVOICE_UPLOAD_BYTES, sanitizeInvoiceFilename } from "@/lib/invoices";
 import { uploadCreditNote } from "@/lib/credit-intake";
 import { scheduleCreditsWork } from "@/lib/credit-signoff";
@@ -72,7 +73,7 @@ const CSV_HEADERS = ["Credit No", "Credit date", "Invoice No", "Customer", "Acco
 
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { searchParams } = new URL(request.url);
 
@@ -113,6 +114,13 @@ export const GET = withAuth(async (request: NextRequest) => {
     const rows = applyFilter(all, state, acc, new Date(), parseTzOffset(searchParams.get("tzOffset")));
 
     if (searchParams.get("format") === "csv") {
+      await logAudit({
+        action: "EXPORT",
+        entity: "credit_notes",
+        details: `Credit notes CSV exported (${rows.length} rows)`,
+        metadata: { format: "csv", rows: rows.length },
+        tenantId: ctx.tenantId,
+      });
       const csv = toCsv(
         CSV_HEADERS,
         rows.map((r) => [
@@ -199,7 +207,7 @@ export const GET = withAuth(async (request: NextRequest) => {
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const form = await request.formData();
   const file = form.get("file");

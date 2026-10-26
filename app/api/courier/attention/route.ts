@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { courierOverview } from "@/lib/courier-confirm";
 
@@ -10,7 +10,7 @@ import { courierOverview } from "@/lib/courier-confirm";
  */
 export const GET = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { attention } = await courierOverview(ctx.tenantId, new Date());
   return NextResponse.json({ attention });
 });
