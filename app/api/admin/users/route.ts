@@ -8,7 +8,7 @@ import {
   setAdminActive,
 } from "@/lib/accounts";
 import { logAudit } from "@/lib/audit";
-import { getSession } from "@/lib/session";
+import { getSession, revokeSessionsWrite } from "@/lib/session";
 import { validatePassword, validateUsername } from "@/lib/credentials";
 import crypto from "crypto";
 
@@ -308,6 +308,15 @@ export const PATCH = withAuth(async (request: NextRequest) => {
   // Validate role change
   let newRole = targetUser?.role ?? "ADMIN";
   if (role !== undefined && role !== newRole) {
+    // A COMPANY_ADMIN lives in its company's home scope and is defined by its
+    // company; turned into an ADMIN it would own that empty scope. Company
+    // admins are made and removed on the Companies page only.
+    if (newRole === "COMPANY_ADMIN" || role === "COMPANY_ADMIN") {
+      return NextResponse.json(
+        { error: "Company admins are managed on the Companies page" },
+        { status: 400 }
+      );
+    }
     if (role !== "ADMIN" && role !== "SUPER_ADMIN") {
       return NextResponse.json({ error: "Invalid role" }, { status: 400 });
     }
@@ -396,6 +405,16 @@ export const PATCH = withAuth(async (request: NextRequest) => {
         email: newEmail,
         role: newRole,
       },
+    });
+  }
+
+  // The role is carried in every session cookie the account holds, so a
+  // demoted SUPER_ADMIN would keep its powers until the cookie expired. Sign
+  // the account out everywhere; it signs in again under the new role.
+  if (targetUser && newRole !== targetUser.role) {
+    await UNSAFE_unscopedPrisma.admin.update({
+      where: { id: target.id },
+      data: { sessions: revokeSessionsWrite("role_change"), sessionToken: null, sessionTokens: [] },
     });
   }
 
@@ -489,6 +508,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
         select: {
           id: true,
           slug: true,
+          kind: true,
           _count: {
             select: { drivers: true, contacts: true, tripSheets: true, invoices: true, creditNotes: true, courierTripSheets: true },
           },
@@ -605,7 +625,9 @@ export const DELETE = withAuth(async (request: NextRequest) => {
     await tx.admin.delete({ where: { id: target.id } });
 
     // Drop the now-empty scope, unless it is the root scope or still shared.
-    if (!isRootScope) {
+    // A company's home scope belongs to the company, not to the account:
+    // deleting its last COMPANY_ADMIN leaves it for the next one.
+    if (!isRootScope && target.tenant?.kind === "BRANCH") {
       const remainingAdmins = await tx.admin.count({ where: { tenantId } });
       const remainingUsers = await tx.user.count({ where: { tenantId } });
       if (remainingAdmins === 0 && remainingUsers === 0) {

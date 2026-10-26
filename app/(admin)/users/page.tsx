@@ -421,7 +421,9 @@ export default function UsersPage() {
                     <span className={`inline-block px-2 py-0.5 rounded text-xs ${
                       user.role === "SUPER_ADMIN"
                         ? "bg-purple-500/10 text-purple-400 border border-purple-500/20"
-                        : "bg-ink-green-dim text-ink-green border border-ink-green/20"
+                        : user.role === "COMPANY_ADMIN"
+                          ? "bg-ink-amber-dim text-ink-amber border border-ink-amber/20"
+                          : "bg-ink-green-dim text-ink-green border border-ink-green/20"
                     }`}>
                       {user.role}
                     </span>
@@ -567,13 +569,24 @@ export default function UsersPage() {
                 <select
                   value={editRole}
                   onChange={(e) => setEditRole(e.target.value)}
-                  disabled={isSelf(editUser)}
+                  disabled={isSelf(editUser) || editUser.role === "COMPANY_ADMIN"}
                   title={isSelf(editUser) ? "You cannot change your own role" : undefined}
                   className="w-full px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors disabled:opacity-50"
                 >
-                  <option value="ADMIN">ADMIN</option>
-                  <option value="SUPER_ADMIN">SUPER_ADMIN</option>
+                  {editUser.role === "COMPANY_ADMIN" ? (
+                    <option value="COMPANY_ADMIN">COMPANY_ADMIN</option>
+                  ) : (
+                    <>
+                      <option value="ADMIN">ADMIN</option>
+                      <option value="SUPER_ADMIN">SUPER_ADMIN</option>
+                    </>
+                  )}
                 </select>
+                <p className="text-[11px] text-ink-muted mt-1.5">
+                  {editUser.role === "COMPANY_ADMIN"
+                    ? "Company admins and their branches are managed on the Companies page."
+                    : "Changing the role signs them out on every device."}
+                </p>
               </div>
               <div className="flex justify-end gap-3 pt-1">
                 <button type="button" onClick={() => setEditUser(null)}

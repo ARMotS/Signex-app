@@ -56,7 +56,7 @@ async function main() {
       process.exit(1);
     }
     rootTenant = await prisma.tenant.create({
-      data: { name: "Default", slug: "default" },
+      data: { name: "Default", slug: "default", kind: "ROOT" },
     });
     log(`created root tenant ${rootTenant.id}`);
   }

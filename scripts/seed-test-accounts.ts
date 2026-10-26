@@ -126,8 +126,8 @@ async function upsertDriverWithStop(opts: {
 async function main() {
   const root = await prisma.tenant.upsert({
     where: { slug: "default" },
-    update: {},
-    create: { name: "Default", slug: "default" },
+    update: { kind: "ROOT" },
+    create: { name: "Default", slug: "default", kind: "ROOT" },
   });
   const testCo = await prisma.tenant.upsert({
     where: { slug: "signex-test-co" },

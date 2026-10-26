@@ -6406,4 +6406,209 @@ suite("cross-ADMIN isolation", () => {
       expect(ids).not.toContain(f.b.driver.id);
     });
   });
+  // ── The SUPER_ADMIN's company console ───────────────────────────────
+  // Its own company ("Console Co") and a third branch, C, so nothing here
+  // depends on the company tests above (A and B already belong to X and Y).
+  describe("the company console", () => {
+    let branchC: { tenantId: string; adminId: string };
+    let companyId: string;
+
+    const put = async (body: Record<string, unknown>, id = companyId) => {
+      const { PUT } = await import("@/app/api/admin/companies/[id]/route");
+      const res = await PUT(req(`/api/admin/companies/${id}`, { method: "PUT", body }), params({ id }));
+      return { status: res.status, body: await res.json() };
+    };
+    const list = async () => {
+      const { GET } = await import("@/app/api/admin/companies/route");
+      return (await GET(req("/api/admin/companies"))).json();
+    };
+
+    beforeAll(async () => {
+      const tenant = await db().tenant.create({ data: { name: "Scope C", slug: "scope-c-console" } });
+      const admin = await db().admin.create({
+        data: {
+          name: "Admin C",
+          email: "admin-c@console.test",
+          passwordHash: "unused",
+          tenantId: tenant.id,
+          login: { create: { username: "console.branch" } },
+        },
+      });
+      await db().user.create({ data: { email: admin.email, name: admin.name, role: "ADMIN", tenantId: tenant.id } });
+      await db().tenant.update({ where: { id: tenant.id }, data: { ownerAdminId: admin.id } });
+      branchC = { tenantId: tenant.id, adminId: admin.id };
+    });
+
+    it("is the SUPER_ADMIN's alone", async () => {
+      const routes = await import("@/app/api/admin/companies/route");
+      const one = await import("@/app/api/admin/companies/[id]/route");
+      for (const session of [
+        adminSession(f.a),
+        driverSession(f.a),
+        companyAdminSession({ id: f.a.admin.id, name: "x", homeTenantId: f.a.tenantId }, null),
+      ]) {
+        useSession(session);
+        expect((await routes.GET(req("/api/admin/companies"))).status).toBe(403);
+        expect((await routes.POST(req("/api/admin/companies", { method: "POST", body: { name: "Sneaky" } }))).status).toBe(403);
+        expect(
+          (await one.PUT(req("/api/admin/companies/x", { method: "PUT", body: { action: "update", name: "y" } }), params({ id: "x" }))).status
+        ).toBe(403);
+      }
+      expect(await db().company.count({ where: { name: "Sneaky" } })).toBe(0);
+    });
+
+    it("creates a company with its own home scope, once per name", async () => {
+      const { POST } = await import("@/app/api/admin/companies/route");
+      useSession(superAdminSession(f));
+      const res = await POST(req("/api/admin/companies", { method: "POST", body: { name: "  Console   Co " } }));
+      expect(res.status).toBe(201);
+      const { company } = await res.json();
+      companyId = company.id;
+      expect(await db().company.findUniqueOrThrow({ where: { id: companyId } })).toMatchObject({ name: "Console Co" });
+      expect(await db().tenant.findUniqueOrThrow({ where: { id: company.homeTenantId } })).toMatchObject({
+        kind: "COMPANY",
+        companyId,
+      });
+
+      const dup = await POST(req("/api/admin/companies", { method: "POST", body: { name: "console co" } }));
+      expect(dup.status).toBe(409);
+    });
+
+    it("lists only real branches as attachable — never the root scope or a company's own scope", async () => {
+      useSession(superAdminSession(f));
+      const body = await list();
+      const unassigned = body.unassignedBranches.map((b: { tenantId: string }) => b.tenantId);
+      expect(unassigned).toContain(branchC.tenantId);
+      expect(unassigned).not.toContain(f.superAdmin.tenantId);
+      expect(unassigned).not.toContain(f.a.tenantId); // Company X's
+      const mine = body.companies.find((c: { id: string }) => c.id === companyId);
+      expect(mine).toMatchObject({ branches: [], companyAdmins: [] });
+    });
+
+    it("attaches an unassigned branch, and refuses the root scope and another company's branch", async () => {
+      useSession(superAdminSession(f));
+      expect((await put({ action: "attachBranch", tenantId: f.superAdmin.tenantId })).status).toBe(404);
+      expect((await put({ action: "attachBranch", tenantId: f.a.tenantId })).body.code).toBe("OTHER_COMPANY");
+      expect((await put({ action: "attachBranch", tenantId: branchC.tenantId })).status).toBe(200);
+      expect((await db().tenant.findUniqueOrThrow({ where: { id: branchC.tenantId } })).companyId).toBe(companyId);
+      expect((await db().tenant.findUniqueOrThrow({ where: { id: f.a.tenantId } })).companyId).not.toBe(companyId);
+    });
+
+    it("creates a company admin with its role, in the company's scope, signing in as one", async () => {
+      const { login } = await import("@/lib/accounts");
+      useSession(superAdminSession(f));
+
+      const weak = await put({ action: "addCompanyAdmin", name: "Weak", email: "weak@console.test", username: "console.weak", password: "short" });
+      expect(weak.status).toBe(400);
+      expect(await db().loginName.findUnique({ where: { username: "console.weak" } })).toBeNull();
+
+      const res = await put({
+        action: "addCompanyAdmin",
+        name: "Console Lead",
+        email: "lead@console.test",
+        username: "console.lead",
+        password: "console-lead-1",
+      });
+      expect(res.status).toBe(201);
+      const admin = await db().admin.findUniqueOrThrow({ where: { id: res.body.companyAdmin.id }, include: { tenant: true } });
+      expect(admin).toMatchObject({ companyId, tenant: { kind: "COMPANY", companyId } });
+      expect((await db().user.findUniqueOrThrow({ where: { email: "lead@console.test" } })).role).toBe("COMPANY_ADMIN");
+
+      const signedIn = await login("console.lead", "console-lead-1");
+      expect(signedIn.success && signedIn.account.role).toBe("company_admin");
+
+      const taken = await put({ action: "addCompanyAdmin", name: "Again", email: "again@console.test", username: "console.lead", password: "console-lead-1" });
+      expect(taken.status).toBe(400);
+    });
+
+    it("allocates only this company's branch admins; anything else changes nothing", async () => {
+      useSession(superAdminSession(f));
+      const lead = await db().admin.findFirstOrThrow({ where: { email: "lead@console.test" } });
+
+      expect((await put({ action: "setAllocations", companyAdminId: lead.id, adminIds: [branchC.adminId] })).body).toEqual({ added: 1, removed: 0 });
+      expect((await put({ action: "setAllocations", companyAdminId: lead.id, adminIds: [branchC.adminId] })).body).toEqual({ added: 0, removed: 0 });
+
+      for (const foreign of [f.a.admin.id, f.superAdmin.id, lead.id]) {
+        const res = await put({ action: "setAllocations", companyAdminId: lead.id, adminIds: [branchC.adminId, foreign] });
+        expect(res.status).toBe(404);
+      }
+      // Another company's admin is not this company's to manage either.
+      const x = await db().admin.findFirstOrThrow({ where: { email: "lead@company-x.test" } });
+      expect((await put({ action: "setAllocations", companyAdminId: x.id, adminIds: [] })).status).toBe(404);
+
+      const rows = await db().companyAdminAllocation.findMany({ where: { companyAdminId: lead.id } });
+      expect(rows.map((r) => r.adminId)).toEqual([branchC.adminId]);
+      expect(await db().auditLog.findFirst({ where: { action: "ALLOCATE", entityId: branchC.adminId } })).toMatchObject({
+        tenantId: branchC.tenantId,
+        actorRole: "SUPER_ADMIN",
+      });
+
+      const { isBranchAllocated } = await import("@/lib/company");
+      expect(await isBranchAllocated(lead.id, branchC.tenantId)).toBe(true);
+    });
+
+    it("will not detach a branch while it is allocated", async () => {
+      useSession(superAdminSession(f));
+      const lead = await db().admin.findFirstOrThrow({ where: { email: "lead@console.test" } });
+      expect((await put({ action: "detachBranch", tenantId: branchC.tenantId })).body.code).toBe("ALLOCATED");
+
+      expect((await put({ action: "setAllocations", companyAdminId: lead.id, adminIds: [] })).body).toEqual({ added: 0, removed: 1 });
+      expect((await put({ action: "detachBranch", tenantId: branchC.tenantId })).status).toBe(200);
+      expect((await db().tenant.findUniqueOrThrow({ where: { id: branchC.tenantId } })).companyId).toBeNull();
+
+      // Put it back for the tests below.
+      await put({ action: "attachBranch", tenantId: branchC.tenantId });
+      await put({ action: "setAllocations", companyAdminId: lead.id, adminIds: [branchC.adminId] });
+    });
+
+    it("deactivating the company takes every branch from its admins at once; a rename follows to its scope", async () => {
+      const { isBranchAllocated } = await import("@/lib/company");
+      useSession(superAdminSession(f));
+      const lead = await db().admin.findFirstOrThrow({ where: { email: "lead@console.test" } });
+
+      expect((await put({ action: "update", isActive: false })).status).toBe(200);
+      expect(await isBranchAllocated(lead.id, branchC.tenantId)).toBe(false);
+      await put({ action: "update", isActive: true });
+      expect(await isBranchAllocated(lead.id, branchC.tenantId)).toBe(true);
+
+      expect((await put({ action: "update", name: "Console Company" })).status).toBe(200);
+      expect((await db().tenant.findUniqueOrThrow({ where: { id: lead.tenantId } })).name).toBe("Console Company");
+    });
+
+    it("the Users page cannot change a company admin's role", async () => {
+      const { PATCH } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+      const lead = await db().admin.findFirstOrThrow({ where: { email: "lead@console.test" } });
+      const res = await PATCH(req("/api/admin/users", { method: "PATCH", body: { id: lead.id, role: "ADMIN" } }));
+      expect(res.status).toBe(400);
+      expect((await db().user.findUniqueOrThrow({ where: { email: "lead@console.test" } })).role).toBe("COMPANY_ADMIN");
+      const into = await PATCH(req("/api/admin/users", { method: "PATCH", body: { id: branchC.adminId, role: "COMPANY_ADMIN" } }));
+      expect(into.status).toBe(400);
+    });
+
+    it("a role change signs the account out everywhere", async () => {
+      const { PATCH } = await import("@/app/api/admin/users/route");
+      const { startSession } = await import("@/lib/session");
+      useSession(superAdminSession(f));
+      await startSession({ id: branchC.adminId, role: "admin" });
+      await startSession({ id: branchC.adminId, role: "admin" });
+
+      expect((await PATCH(req("/api/admin/users", { method: "PATCH", body: { id: branchC.adminId, role: "SUPER_ADMIN" } }))).status).toBe(200);
+      expect(await db().userSession.count({ where: { adminId: branchC.adminId, revokedAt: null } })).toBe(0);
+      expect(await db().userSession.count({ where: { adminId: branchC.adminId, revokedReason: "role_change" } })).toBe(2);
+
+      await PATCH(req("/api/admin/users", { method: "PATCH", body: { id: branchC.adminId, role: "ADMIN" } }));
+    });
+
+    it("deleting a company's last admin keeps the company's own scope", async () => {
+      const { DELETE } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+      const lead = await db().admin.findFirstOrThrow({ where: { email: "lead@console.test" } });
+      const res = await DELETE(req("/api/admin/users", { method: "DELETE", body: { id: lead.id } }));
+      expect(res.status).toBe(200);
+      expect(await db().admin.findUnique({ where: { id: lead.id } })).toBeNull();
+      expect(await db().companyAdminAllocation.count({ where: { companyAdminId: lead.id } })).toBe(0);
+      expect(await db().tenant.findUnique({ where: { id: lead.tenantId } })).toMatchObject({ kind: "COMPANY", companyId });
+    });
+  });
 });

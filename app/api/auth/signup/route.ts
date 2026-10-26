@@ -48,10 +48,12 @@ export async function POST(request: Request) {
 
     // SCOPE-EXEMPT: first-run bootstrap. The root scope belongs to the
     // SUPER_ADMIN; every ADMIN created later gets its own tenant.
+    // Marked ROOT: a scope left at the BRANCH default could be attached to a
+    // company in the companies console.
     const rootTenant = await UNSAFE_unscopedPrisma.tenant.upsert({
       where: { slug: "default" },
-      update: {},
-      create: { name: "Default", slug: "default" },
+      update: { kind: "ROOT" },
+      create: { name: "Default", slug: "default", kind: "ROOT" },
     });
 
     const result = await createAdminAccount(
