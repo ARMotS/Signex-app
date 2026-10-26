@@ -226,7 +226,7 @@ export async function startSession(
  * cannot come apart.
  */
 export function revokeSessionsWrite(
-  reason: "password_reset" | "deactivated",
+  reason: "password_reset" | "deactivated" | "role_change",
   keepToken?: string | null
 ): {
   updateMany: {

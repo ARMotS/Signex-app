@@ -168,6 +168,81 @@ export async function createAdminAccount(
 }
 
 /**
+ * Create a COMPANY_ADMIN: an Admin in its company's home scope with
+ * `companyId` set, its username, and the User row carrying the role — all in
+ * ONE transaction. Apart, an Admin could exist in a company scope without its
+ * role and sign in as a plain ADMIN there.
+ *
+ * SUPER_ADMIN-only; the caller has checked the role and resolved
+ * `homeTenantId` as that company's COMPANY scope.
+ */
+export async function createCompanyAdminAccount(
+  companyId: string,
+  homeTenantId: string,
+  input: { name: string; email: string; username: string; password: string }
+): Promise<{
+  success: boolean;
+  error?: string;
+  account?: { id: string; name: string; email: string; username: string };
+}> {
+  const name = input.name.trim();
+  const email = input.email.trim().toLowerCase();
+  if (!name) return { success: false, error: "Enter a name" };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { success: false, error: "Enter a valid email" };
+  const usernameError = validateUsername(input.username);
+  if (usernameError) return { success: false, error: usernameError };
+  const passwordError = validatePassword(input.password);
+  if (passwordError) return { success: false, error: passwordError };
+  const username = normalizeUsername(input.username);
+
+  try {
+    // SCOPE-EXEMPT: Admin.email and User.email are globally unique, so the
+    // collision checks span scopes; existence only.
+    const [adminClash, userClash] = await Promise.all([
+      UNSAFE_unscopedPrisma.admin.findUnique({ where: { email }, select: { id: true } }),
+      UNSAFE_unscopedPrisma.user.findUnique({ where: { email }, select: { id: true } }),
+    ]);
+    if (adminClash || userClash) return { success: false, error: "An account with this email already exists" };
+    if (await isUsernameTaken(username)) return { success: false, error: USERNAME_TAKEN };
+
+    // SCOPE-EXEMPT: SUPER_ADMIN account creation in a company's home scope;
+    // the scope is the one the caller resolved, written explicitly.
+    const admin = await UNSAFE_unscopedPrisma.$transaction(async (tx) => {
+      const created = await tx.admin.create({
+        data: {
+          name,
+          email,
+          passwordHash: hashPassword(input.password),
+          tenantId: homeTenantId,
+          companyId,
+          login: { create: { username } },
+        },
+        select: { id: true, name: true, email: true },
+      });
+      await tx.user.create({ data: { email, name, role: "COMPANY_ADMIN", tenantId: homeTenantId } });
+      return created;
+    });
+
+    await logAudit({
+      action: "ACCOUNT_CREATE",
+      entity: "admin",
+      entityId: admin.id,
+      userName: admin.name,
+      details: `Company admin account created: ${username}`,
+      metadata: { username, companyId, role: "COMPANY_ADMIN" },
+      tenantId: homeTenantId,
+    });
+
+    return { success: true, account: { ...admin, username } };
+  } catch (err) {
+    const explained = await explainWriteFailure(err, username);
+    if (explained) return { success: false, error: explained };
+    console.error("Failed to create company admin:", err);
+    return { success: false, error: "Failed to create account" };
+  }
+}
+
+/**
  * Update an admin credential row, matched by its current email.
  * Only touches the Admin table and its LoginName; the companion User row is
  * updated separately by the caller.
@@ -393,6 +468,7 @@ export async function login(rawUsername: string, password: string): Promise<Logi
               passwordHash: true,
               active: true,
               tenantId: true,
+              companyId: true,
             },
           },
           driver: {
@@ -469,10 +545,13 @@ export async function login(rawUsername: string, password: string): Promise<Logi
       success: true,
       account: {
         id: admin.id,
+        // An Admin tied to a company is a company admin even if its User row
+        // says otherwise: an inconsistency must fail towards the restricted
+        // role, never to an ADMIN of the (empty) company scope.
         role:
           user?.role === "SUPER_ADMIN"
             ? "super_admin"
-            : user?.role === "COMPANY_ADMIN"
+            : user?.role === "COMPANY_ADMIN" || admin.companyId
               ? "company_admin"
               : "admin",
         name: admin.name,

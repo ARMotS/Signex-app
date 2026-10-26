@@ -34,9 +34,10 @@ const ADMIN_ROUTES = [
   "/settings",
   "/backups",
   "/users",
+  "/companies",
 ];
 
-const SUPER_ADMIN_ONLY_ROUTES = ["/users"];
+const SUPER_ADMIN_ONLY_ROUTES = ["/users", "/companies"];
 
 const DRIVER_ROUTES = ["/run", "/sign", "/collect"];
 
@@ -222,6 +223,7 @@ export const config = {
     "/settings/:path*",
     "/backups/:path*",
     "/users/:path*",
+    "/companies/:path*",
     "/run/:path*",
     "/sign/:path*",
     "/collect/:path*",

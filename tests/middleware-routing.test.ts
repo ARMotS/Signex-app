@@ -52,6 +52,9 @@ describe("page routing by role", () => {
 
   it("keeps a COMPANY_ADMIN out of the super-admin console", async () => {
     expect(await landing("/users", "company_admin")).toBe("/dashboard");
+    expect(await landing("/companies", "company_admin")).toBe("/dashboard");
+    expect(await landing("/companies", "admin")).toBe("/dashboard");
+    expect(await landing("/companies", "super_admin")).toBeNull();
   });
 
   it("lets each role through to its own pages", async () => {

@@ -87,6 +87,9 @@ export async function resetDatabase() {
   await p.tenant.updateMany({ data: { ownerAdminId: null } });
   await p.admin.deleteMany();
   await p.tenant.deleteMany();
+  // After the admins and tenants that reference them (Restrict); allocations
+  // went with the admins.
+  await p.company.deleteMany();
 }
 
 export interface ScopeFixture {
@@ -115,8 +118,9 @@ export async function seedFixtures(): Promise<Fixtures> {
   const p = db();
   await resetDatabase();
 
+  // ROOT, as first-run signup creates it — never offered as a branch.
   const rootTenant = await p.tenant.create({
-    data: { name: "Root", slug: "root" },
+    data: { name: "Root", slug: "root", kind: "ROOT" },
   });
 
   const superAdminRow = await p.admin.create({

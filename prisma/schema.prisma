@@ -1142,6 +1142,12 @@ enum AuditAction {
   ACCOUNT_DELETE
   EXPORT
   FILE_DELETE
+  COMPANY_CREATE
+  COMPANY_UPDATE
+  BRANCH_ATTACH
+  BRANCH_DETACH
+  ALLOCATE
+  DEALLOCATE
 }
 
 // Append-only: a trigger in the migration (20261025090000_audit_log_actor)

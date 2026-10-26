@@ -12,8 +12,8 @@ const prisma = new PrismaClient({ adapter });
 async function main() {
   const tenant = await prisma.tenant.upsert({
     where: { slug: "default" },
-    update: {},
-    create: { name: "Default", slug: "default" },
+    update: { kind: "ROOT" },
+    create: { name: "Default", slug: "default", kind: "ROOT" },
   });
 
   const email = process.env.SUPER_ADMIN_EMAIL;
