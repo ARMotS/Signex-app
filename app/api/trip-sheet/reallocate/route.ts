@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import {
   normalizeReallocationReason,
@@ -19,7 +19,7 @@ const MAX_STOPS = 500;
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json().catch(() => ({}));
   const { tripSheetId, stopIds, toDriverId } = body ?? {};

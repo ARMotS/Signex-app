@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { UNSAFE_unscopedPrisma } from "@/lib/db-scoped";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const POST = withAuth(async (request: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { id } = await params;
   const { email } = await request.json();

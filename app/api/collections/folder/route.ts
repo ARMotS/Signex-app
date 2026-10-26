@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { listCollectionFolder, listSignedCollectionDocuments } from "@/lib/collections";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 /**
@@ -18,7 +18,7 @@ import { withAuth } from "@/lib/api-handler";
  */
 export const GET = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const [pending, signed] = await Promise.all([
     listCollectionFolder(ctx.tenantId),

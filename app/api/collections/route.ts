@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { CollectionStatus, CollectionType } from "@prisma/client";
 import { listCollections, type CollectionRecord } from "@/lib/trip-data";
 import { dayWindow, parseTzOffset } from "@/lib/day-window";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
 import { readInvoiceNoPattern } from "@/lib/config";
@@ -104,7 +104,7 @@ function parseDate(raw: string | null): Date | undefined {
 
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { searchParams } = new URL(request.url);
 

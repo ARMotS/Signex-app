@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readCollectionDocument, resolveCollectionSource } from "@/lib/collections";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 /**
@@ -21,7 +21,7 @@ export const GET = withAuth(async (
   { params }: { params: Promise<{ id: string }> }
 ) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
 
   const collection = await ctx.db.collection.findFirst({

@@ -7,7 +7,7 @@ import {
   looksLikePdf,
   MAX_INVOICE_UPLOAD_BYTES,
 } from "@/lib/invoices";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { readInvoiceNoPattern } from "@/lib/config";
 import { ensureInvoices, scheduleInvoiceHeaders } from "@/lib/invoice-registry";
@@ -28,7 +28,7 @@ export const maxDuration = 60;
 
 export const GET = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const dest = await getInvoiceUploadDestination(ctx.tenantId);
 
@@ -41,7 +41,7 @@ export const GET = withAuth(async () => {
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const formData = await request.formData();
   const file = formData.get("file") as File | null;

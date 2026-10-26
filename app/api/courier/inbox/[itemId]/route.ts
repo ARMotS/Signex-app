@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { downloadFileById } from "@/lib/microsoft-graph";
 
@@ -13,7 +13,7 @@ type Ctx = { params: Promise<{ itemId: string }> };
  */
 export const GET = withAuth(async (_request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { itemId } = await params;
 
   const failure = await ctx.db.courierImportFailure.findFirst({

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { getAllTripSheets, getCompletedTripSheets } from "@/lib/trip-data";
 import { dayWindow, parseTzOffset } from "@/lib/day-window";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { courierOverview } from "@/lib/courier-confirm";
 
@@ -34,7 +34,7 @@ const UNTRIED_QUEUE_DAYS = 7;
 
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { searchParams } = new URL(request.url);
   const day = dayWindow(new Date(), parseTzOffset(searchParams.get("tzOffset")));

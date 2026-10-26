@@ -4,12 +4,12 @@ import { assertCollectionsFolderIsSibling } from "@/lib/collections";
 import { compileInvoiceNoPattern, type InvoiceNoPattern } from "@/lib/invoice-number";
 import { readStampArea } from "@/lib/courier-stamp-text";
 import { renormalizeInvoiceNumbers } from "@/lib/trip-data";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 export const GET = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   // Per-scope settings: folder paths and signature position belong to this ADMIN.
   const config = await readConfig(ctx.tenantId);
@@ -18,7 +18,7 @@ export const GET = withAuth(async () => {
 
 export const PUT = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json();
 

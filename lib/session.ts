@@ -36,7 +36,7 @@ if (!_secret) {
 }
 const SECRET: string = _secret;
 
-export type SessionRole = "admin" | "driver" | "super_admin";
+export type SessionRole = "admin" | "driver" | "super_admin" | "company_admin";
 
 export interface SessionData {
   id: string;
@@ -46,10 +46,12 @@ export interface SessionData {
   /** The account's OWN isolation scope. Never changes for the life of a session. */
   tenantId?: string;
   /**
-   * SUPER_ADMIN only: the scope currently being viewed via the scope switcher.
-   * Read exclusively by getScope() in lib/tenant.ts, and ignored outright for
-   * any role other than super_admin. Lives inside the HMAC-signed payload, so a
-   * client cannot set it — only POST /api/admin/scopes can.
+   * SUPER_ADMIN / COMPANY_ADMIN only: the scope currently being viewed via the
+   * scope switcher. Read exclusively by getSessionContext() in lib/tenant.ts,
+   * ignored outright for any other role, and for a COMPANY_ADMIN honoured only
+   * while the branch is still allocated to it. Lives inside the HMAC-signed
+   * payload, so a client cannot set it — only POST /api/admin/scopes and
+   * sign-in can.
    */
   viewTenantId?: string | null;
   sessionToken: string;
@@ -82,6 +84,7 @@ export const TOUCH_INTERVAL_MS = 60_000;
 /** Devices an account may be signed in on at once, by role. */
 export const SESSION_LIMITS: Record<SessionRole, number> = {
   super_admin: 1,
+  company_admin: 3,
   admin: 5,
   driver: 1,
 };
@@ -267,7 +270,7 @@ async function writeSessionCookie(session: SessionData): Promise<void> {
  */
 export async function createSession(
   user: SessionAccount,
-  options: { evictOldest?: boolean } = {}
+  options: { evictOldest?: boolean; viewTenantId?: string | null } = {}
 ): Promise<
   | { ok: true; deviceId: string; evicted: number }
   | { ok: false; activeSessions: number }
@@ -299,8 +302,9 @@ export async function createSession(
 
   await writeSessionCookie({
     ...user,
-    // A fresh login always starts in the account's own scope.
-    viewTenantId: null,
+    // A fresh login starts in the account's own scope, except a COMPANY_ADMIN,
+    // which the caller lands in an allocated branch (re-checked per request).
+    viewTenantId: options.viewTenantId ?? null,
     sessionToken: started.token,
     exp: started.expiresAt,
   });

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { SHEET_TYPES, type ImportSheetType } from "@/lib/import-fields";
 import {
@@ -40,7 +40,7 @@ const ISSUES = 500;
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const form = await request.formData();
   const file = form.get("file") as File | null;

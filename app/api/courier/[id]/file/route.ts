@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { CourierError, getCourierSheet } from "@/lib/courier-import";
 import { fileCourierSheet } from "@/lib/courier-collect";
@@ -11,7 +11,7 @@ export const maxDuration = 60;
 /** "Retry filing": stamp and file the signed copies not filed yet. ADMIN only. */
 export const POST = withAuth(async (_request: NextRequest, { params }: Ctx) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
   try {
     const filing = await fileCourierSheet(ctx.tenantId, id, ctx.name ?? null);

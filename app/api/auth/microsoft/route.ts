@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAuthorizationUrl } from "@/lib/microsoft-graph";
 import { signOAuthState } from "@/lib/crypto";
-import { getScope, requireRole, requireHomeScope } from "@/lib/tenant";
+import { getScope, requireHomeScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 
 /**
@@ -15,7 +15,7 @@ import { withAuth } from "@/lib/api-handler";
  */
 export const GET = withAuth(async (req) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   // Connecting a drive is an act of ownership — a SUPER_ADMIN must not attach
   // their own Microsoft account while viewing someone else's scope.
   requireHomeScope(ctx);

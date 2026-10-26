@@ -21,7 +21,7 @@ import { logAudit } from "@/lib/audit";
 import { readCollectionDeclaration, readInvoiceNoPattern } from "@/lib/config";
 import { normalizedInvoiceNoOrNull } from "@/lib/invoice-number";
 import { RECEIPT_STATUSES, sendCollectionReceiptEmail } from "@/lib/collection-notify";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { normalizeRemovalReason, removeCollectionFromTrip } from "@/lib/stop-removal";
 import { withAuth } from "@/lib/api-handler";
 
@@ -405,7 +405,7 @@ export const PATCH = withAuth(async (
   { params }: { params: Promise<{ id: string }> }
 ) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
 
   const collection = await loadCollection(ctx, id);
@@ -496,7 +496,7 @@ export const DELETE = withAuth(async (
   { params }: { params: Promise<{ id: string }> }
 ) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
   const { id } = await params;
 
   const body = await request.json().catch(() => ({}));

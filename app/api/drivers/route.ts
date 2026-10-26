@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import {
   createDriverAccount,
@@ -16,7 +16,7 @@ function errorStatus(error: string | undefined): number {
 
 export const GET = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   // Scoped — this list can only ever contain this ADMIN's own drivers.
   // `canSignIn` is false for drivers created before usernames existed; the
@@ -38,7 +38,7 @@ export const GET = withAuth(async () => {
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { name, username, password } = await request.json();
 
@@ -70,7 +70,7 @@ export const POST = withAuth(async (request: NextRequest) => {
  */
 export const PUT = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { id, name, active, username, password } = await request.json();
 
@@ -104,7 +104,7 @@ export const PUT = withAuth(async (request: NextRequest) => {
 
 export const DELETE = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { id } = await request.json();
 

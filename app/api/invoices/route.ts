@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listInvoiceFiles, getInvoiceFolderPath, deleteInvoiceFiles, deleteInvoiceOriginalOnly, findDuplicateInvoices } from "@/lib/invoices";
 import { getCloudAccountStatus } from "@/lib/microsoft-graph";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
 import { readInvoiceNoPattern } from "@/lib/config";
@@ -21,7 +21,7 @@ import {
 
 export const GET = withAuth(async () => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const cloudStatus = await getCloudAccountStatus(ctx.tenantId);
   const isOneDrive = !!cloudStatus?.invoiceFolderItemId;
@@ -117,7 +117,7 @@ export const GET = withAuth(async () => {
 
 export const DELETE = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json();
   const { filenames, mode = "both" } = body;

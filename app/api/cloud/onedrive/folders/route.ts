@@ -10,7 +10,7 @@ import {
   getCloudAccountStatus,
 } from "@/lib/microsoft-graph";
 import { assertCollectionsFolderIsSibling, foldersOverlap } from "@/lib/collections";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
 
@@ -20,7 +20,7 @@ import { logAudit } from "@/lib/audit";
  */
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { searchParams } = new URL(request.url);
   const parentId = searchParams.get("parentId");
@@ -46,7 +46,7 @@ export const GET = withAuth(async (request: NextRequest) => {
  */
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { folderPath, folderItemId, target } = await request.json();
 

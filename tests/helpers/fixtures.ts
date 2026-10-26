@@ -294,7 +294,7 @@ export async function seedFixtures(): Promise<Fixtures> {
 
 export interface FakeSession {
   id: string;
-  role: "admin" | "driver" | "super_admin";
+  role: "admin" | "driver" | "super_admin" | "company_admin";
   name: string;
   email?: string;
   tenantId?: string;
@@ -338,6 +338,26 @@ export function superAdminSession(
     name: f.superAdmin.name,
     email: f.superAdmin.email,
     tenantId: f.superAdmin.tenantId,
+    viewTenantId,
+    sessionToken: "test-token",
+    exp: Date.now() + 3_600_000,
+  };
+}
+
+/**
+ * A COMPANY_ADMIN session. Its account lives in its company's home scope;
+ * `viewTenantId` is the branch it last chose, which getSessionContext()
+ * honours only while that branch is still allocated to it.
+ */
+export function companyAdminSession(
+  account: { id: string; name: string; homeTenantId: string },
+  viewTenantId: string | null
+): FakeSession {
+  return {
+    id: account.id,
+    role: "company_admin",
+    name: account.name,
+    tenantId: account.homeTenantId,
     viewTenantId,
     sessionToken: "test-token",
     exp: Date.now() + 3_600_000,

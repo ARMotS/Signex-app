@@ -5,7 +5,7 @@ import {
   purgeBackedUpInvoices,
   purgeBackedUpTripSheets,
 } from "@/lib/backup";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
 
@@ -15,7 +15,7 @@ const names = (list: string[]) => list.slice(0, MAX_LOGGED_NAMES);
 
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const { searchParams } = new URL(request.url);
   const beforeParam = searchParams.get("before");
@@ -27,7 +27,7 @@ export const GET = withAuth(async (request: NextRequest) => {
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json();
   const {
@@ -91,7 +91,7 @@ export const POST = withAuth(async (request: NextRequest) => {
  */
 export const DELETE = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const body = await request.json();
   const { invoiceFilenames = [], tripSheetFilenames = [] } = body;

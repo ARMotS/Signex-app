@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
 import { SHEET_TYPES, type ImportSheetType } from "@/lib/import-fields";
@@ -20,7 +20,7 @@ import {
  */
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const raw = new URL(request.url).searchParams.get("sheetType");
   const sheetType = raw && raw in SHEET_TYPES ? (raw as ImportSheetType) : undefined;
@@ -40,7 +40,7 @@ export const GET = withAuth(async (request: NextRequest) => {
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const read = readTemplateInput(await request.json().catch(() => null));
   if (!read.ok) {

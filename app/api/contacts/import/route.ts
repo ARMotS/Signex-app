@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseContactSheet } from "@/lib/contact-parser";
-import { getScope, requireRole } from "@/lib/tenant";
+import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { relinkUnmatchedStops, type RelinkSummary } from "@/lib/contact-matcher";
 import { scheduleWaitingCourierEmails } from "@/lib/courier-confirm";
 
 export const POST = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
-  requireRole(ctx, "ADMIN", "SUPER_ADMIN");
+  requireOffice(ctx);
 
   const formData = await request.formData();
   const file = formData.get("file") as File | null;
