@@ -53,6 +53,7 @@ export interface CourierIssue {
     | "NO_EMAIL"
     /** No longer raised (parcels are summed per row); kept so stored issues still type-check. */
     | "PARCELS_CONFLICT"
+    | "COURIER_CONFLICT"
     | "DUPLICATE_INVOICE";
   /** "block" holds the sheet in NEEDS_ATTENTION; "warning" is shown only. */
   level: "block" | "warning";
@@ -123,6 +124,8 @@ export function readCourierSheet(
   const lines: CourierLine[] = [];
   const seen = new Map<string, string>();
   const customers = new Map<string, string>();
+  // Courier names as written, by companyKey: one consignment has one courier.
+  const couriers = new Map<string, string>();
   let waybill = "";
   let customer = "";
 
@@ -131,6 +134,8 @@ export function readCourierSheet(
     waybill = text(row.values.waybillNo) || waybill;
     customer = text(row.values.customerName) || customer;
     if (!invoiceNo) continue;
+    const courier = text(row.values.courierCompany);
+    if (courier && !couriers.has(companyKey(courier))) couriers.set(companyKey(courier), courier);
 
     const normalized = normalizeInvoiceNo(invoiceNo, opts.pattern) || null;
     const key = normalized ?? invoiceNo.toUpperCase();
@@ -181,12 +186,23 @@ export function readCourierSheet(
   const counted = lines.filter((l) => l.parcels !== null);
   const parcels = counted.length ? counted.reduce((sum, l) => sum + l.parcels!, 0) : null;
 
+  if (couriers.size > 1) {
+    const names = [...couriers.values()];
+    warnings.push({
+      code: "COURIER_CONFLICT",
+      level: "warning",
+      message: `The sheet names ${names.length} couriers (${names.join(", ")}) — ${names[0]} is used. Check which one is collecting.`,
+    });
+  }
+
   return {
     ok: true,
     sheet: {
       courierSheetNo,
       sheetDate: text(mapped.header.sheetDate) || opts.today,
-      courierCompany: text(mapped.header.courierCompany) || null,
+      // The sheet's Courier column; a saved template may still give it once
+      // (a cell, or typed at import), which reaches every row the same way.
+      courierCompany: [...couriers.values()][0] ?? null,
       courierService: text(mapped.header.courierService) || null,
       courierContact: text(mapped.header.courierContact) || null,
       customerName: [...customers.values()][0],

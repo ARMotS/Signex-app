@@ -11,7 +11,6 @@ import {
   linkCourierContact,
   recheckCourierSheet,
   removeCourierInvoice,
-  updateCourierFields,
 } from "@/lib/courier-import";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -53,7 +52,6 @@ export const GET = withAuth(async (_request: NextRequest, { params }: Ctx) => {
  * (linkContact also after, for the confirmation email):
  *   { action: "recheck" }
  *   { action: "linkContact", contactId }
- *   { action: "update", courierCompany?, courierService?, courierContact? }
  *   { action: "removeInvoice", lineId }
  */
 export const PUT = withAuth(async (request: NextRequest, { params }: Ctx) => {
@@ -76,9 +74,6 @@ export const PUT = withAuth(async (request: NextRequest, { params }: Ctx) => {
         if ((await linkCourierContact(ctx.tenantId, id, body.contactId, who)).status === "COLLECTED") {
           await scheduleCourierConfirmation(ctx.tenantId, id);
         }
-        break;
-      case "update":
-        await updateCourierFields(ctx.tenantId, id, body, who);
         break;
       case "removeInvoice":
         if (typeof body.lineId !== "string") throw new CourierError("BAD_REQUEST", "Choose an invoice.", 400);

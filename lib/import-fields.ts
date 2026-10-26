@@ -309,12 +309,15 @@ const COURIER_TRIP_SHEET_FIELDS: ImportField[] = [
   {
     key: "courierCompany",
     label: "Courier company",
-    kind: "header",
+    // A column on the client's export ("Courier"), the same on every row of a
+    // sheet. Was a header field typed at import before the export carried it.
+    kind: "column",
     mustMap: false,
-    // Can also be typed at import or at signing.
+    // A sheet in the older layout has no Courier column; it is typed at signing.
     requiresValue: false,
     valueType: "text",
-    aliases: [],
+    aliases: [/^courier$/i, /^courier\s*(company|name)$/i, /^courier\s*co\.?$/i],
+    help: "Read from the sheet; a sheet without it has the company typed at signing.",
   },
   {
     key: "courierService",
