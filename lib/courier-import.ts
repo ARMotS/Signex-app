@@ -42,7 +42,7 @@ import {
 const OPEN: CourierStatus[] = ["NEEDS_ATTENTION", "AWAITING_COLLECTION"];
 
 /** Codes found while reading the file — kept across re-checks, which cannot see the file. */
-const READ_CODES = new Set<CourierIssue["code"]>(["DUPLICATE_INVOICE", "PARCELS_CONFLICT"]);
+const READ_CODES = new Set<CourierIssue["code"]>(["DUPLICATE_INVOICE"]);
 
 const MAX_BYTES = 10 * 1024 * 1024;
 
