@@ -200,9 +200,18 @@ export default function AdminLayout({
         .catch(() => {});
     };
 
+    // Not while hidden: a background tab learns nothing it needs, and every API
+    // call is refused on a revoked session anyway. Shown again → checked at once.
+    const checkIfVisible = () => {
+      if (document.visibilityState === "visible") checkSession();
+    };
     checkSession();
-    const interval = setInterval(checkSession, 30000);
-    return () => clearInterval(interval);
+    const interval = setInterval(checkIfVisible, 60_000);
+    document.addEventListener("visibilitychange", checkIfVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", checkIfVisible);
+    };
   }, [router]);
 
   // The Courier badge: sheets that need the office. Polled gently, and not

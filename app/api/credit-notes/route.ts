@@ -30,14 +30,38 @@ import { applyFilter, facetsOf, pageOf, parseFilterState, parsePageSize, toCsv, 
 
 const STATUSES: CreditNoteStatus[] = ["RECEIVED", "NEEDS_REVIEW", "SIGNED", "REJECTED"];
 
-const INCLUDE = {
+/**
+ * Exactly what toRow reads. Not the whole row: a list of up to 2000 has no use
+ * for the drawn `signature` (a PNG data URL until the note is filed) or the
+ * other sign-off and read detail, which the note's own page loads.
+ */
+const LIST_SELECT = {
+  id: true,
+  creditNo: true,
+  invoiceNo: true,
+  creditDate: true,
+  deliverToName: true,
+  billToName: true,
+  accountNo: true,
+  total: true,
+  status: true,
+  issues: true,
+  sourceFilename: true,
+  sourceFolder: true,
+  fileError: true,
+  readSource: true,
+  uploadedBy: true,
+  signedByName: true,
+  signedAt: true,
+  filingError: true,
+  createdAt: true,
   collections: {
     where: { source: { in: ["AUTO", "MANUAL"] } },
     select: { collection: { select: { collectionNo: true } } },
   },
-} satisfies Prisma.CreditNoteInclude;
+} satisfies Prisma.CreditNoteSelect;
 
-type NoteWithLinks = Prisma.CreditNoteGetPayload<{ include: typeof INCLUDE }>;
+type NoteWithLinks = Prisma.CreditNoteGetPayload<{ select: typeof LIST_SELECT }>;
 
 function toRow(n: NoteWithLinks) {
   const issues = (n.issues as unknown as CreditIssue[] | null) ?? [];
@@ -83,7 +107,7 @@ export const GET = withAuth(async (request: NextRequest) => {
       ctx.db.creditNote.findMany({
         orderBy: [{ creditDate: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
         take: 2000,
-        include: INCLUDE,
+        select: LIST_SELECT,
       }),
       readInvoiceNoPattern(ctx.tenantId),
       ctx.db.creditNote.groupBy({ by: ["status"], _count: { _all: true } }),
@@ -179,7 +203,7 @@ export const GET = withAuth(async (request: NextRequest) => {
       where,
       orderBy: [{ creditDate: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
       take: 200,
-      include: INCLUDE,
+      select: LIST_SELECT,
     }),
     ctx.db.creditNote.groupBy({ by: ["status"], _count: { _all: true } }),
     ctx.db.cloudAccount.findFirst({

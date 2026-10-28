@@ -17,15 +17,19 @@
  *   - Errors BACK OFF exponentially, so an outage does not become a retry storm
  *     from a hundred devices at once.
  *
- * Waking on focus/visibility matters as much as the interval: the common case
+ * Waking on focus/visibility matters more than the interval: the common case
  * is a driver pulling the phone out at a stop, and that should feel instant
- * rather than "up to twelve seconds stale".
+ * rather than "up to thirty seconds stale".
  */
 
 import { useEffect, useRef } from "react";
 
-/** Chosen so a newly deployed trip sheet reaches a driver quickly. */
-const DEFAULT_INTERVAL_MS = 12_000;
+/**
+ * 30s, not the 12s it was. Every open tab polls this all day (the dashboard
+ * is a wallboard), and the wake-on-focus above is what makes a newly
+ * deployed trip sheet reach a driver quickly — not the interval.
+ */
+const DEFAULT_INTERVAL_MS = 30_000;
 
 /** Ceiling for error backoff — an outage settles to one attempt a minute. */
 const MAX_BACKOFF_MS = 60_000;

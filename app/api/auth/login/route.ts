@@ -5,9 +5,9 @@ import { normalizeUsername, homePathForRole } from "@/lib/credentials";
 import { logAudit } from "@/lib/audit";
 import { firstAllocatedBranch } from "@/lib/company";
 import {
-  checkRateLimit,
-  recordFailedAttempt,
-  clearAttempts,
+  checkRateLimits,
+  recordFailedAttempts,
+  clearAttemptsFor,
   RATE_LIMITS,
 } from "@/lib/rate-limit";
 
@@ -38,9 +38,9 @@ function getClientIp(request: NextRequest): string {
  * come from its own DB row — the client never supplies or influences either —
  * and the response says where that role lands.
  *
- * Two failure counters run side by side: per IP (checked in middleware.ts,
- * sized for a depot behind one address) and per username (checked here — the
- * lockout on guessing at one account).
+ * Two failure counters run side by side: per IP (sized for a depot behind one
+ * address) and per username (the lockout on guessing at one account). Both
+ * are read, recorded and cleared together, one Redis command each time.
  */
 export async function POST(request: NextRequest) {
   const ip = getClientIp(request);
@@ -57,9 +57,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Keyed on the name as submitted, whether or not it exists, so being locked
-    // out says nothing about which usernames are real.
-    const lockout = await checkRateLimit(username, "auth:user", RATE_LIMITS.authUser);
+    // The username counter is keyed on the name as submitted, whether or not it
+    // exists, so being locked out says nothing about which usernames are real.
+    const counters = [
+      { identifier: ip, group: "auth", config: RATE_LIMITS.auth },
+      { identifier: username, group: "auth:user", config: RATE_LIMITS.authUser },
+    ];
+    const [byIp, lockout] = await checkRateLimits(counters);
+
+    if (!byIp.allowed) {
+      return NextResponse.json(
+        { error: "Too many failed login attempts. Please try again later." },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(byIp.retryAfterSeconds),
+            "X-RateLimit-Limit": String(byIp.limit),
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": String(Math.ceil(byIp.resetAt / 1000)),
+          },
+        }
+      );
+    }
+
     if (!lockout.allowed) {
       const minutes = Math.max(1, Math.ceil(lockout.retryAfterSeconds / 60));
       return NextResponse.json(
@@ -76,15 +96,18 @@ export async function POST(request: NextRequest) {
       // Only a wrong credential counts toward a lockout. A deactivated account
       // supplied the right password, so it is not a guess.
       if (result.error === LOGIN_FAILED) {
-        await Promise.all([
-          recordFailedAttempt(ip, "auth", RATE_LIMITS.auth),
-          recordFailedAttempt(username, "auth:user", RATE_LIMITS.authUser),
-        ]);
+        await recordFailedAttempts(counters);
       }
       return NextResponse.json({ error: result.error }, { status: 401 });
     }
 
-    await Promise.all([clearAttempts(ip, "auth"), clearAttempts(username, "auth:user")]);
+    // Only counters that held something when read are cleared — the usual
+    // sign-in has no failures behind it, and a DEL of nothing still costs a
+    // command.
+    const peeked = [byIp, lockout];
+    await clearAttemptsFor(
+      counters.filter((c, i) => peeked[i].remaining < c.config.maxAttempts)
+    );
 
     const { account } = result;
     const started = await createSession(
