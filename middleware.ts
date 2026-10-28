@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { checkRateLimit, checkAndRecordRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import {
+  checkRateLimit,
+  checkAndRecordRateLimit,
+  usesSharedLimit,
+  RATE_LIMITS,
+} from "@/lib/rate-limit";
 import { homePathForRole } from "@/lib/credentials";
 
 function getClientIp(request: NextRequest): string {
@@ -14,11 +19,13 @@ function getClientIp(request: NextRequest): string {
   return "127.0.0.1";
 }
 
-function isAuthRoute(pathname: string): boolean {
-  return (
-    pathname.startsWith("/api/auth/login") ||
-    pathname.startsWith("/api/auth/signup")
-  );
+/**
+ * First-run signup's per-IP check. Sign-in (/api/auth/login) reads the same
+ * counter itself, together with its per-username one, in a single Redis
+ * command — checking it here too would cost a second.
+ */
+function isSignupRoute(pathname: string): boolean {
+  return pathname.startsWith("/api/auth/signup");
 }
 
 const ADMIN_ROUTES = [
@@ -101,13 +108,13 @@ export async function middleware(request: NextRequest) {
 
   // Rate-limit API routes
   if (pathname.startsWith("/api/")) {
-    const ip = getClientIp(request);
-    const isAuth = isAuthRoute(pathname);
+    // Sign-in applies its own limits (both counters, one Redis command).
+    if (pathname.startsWith("/api/auth/login")) return NextResponse.next();
 
-    if (isAuth) {
+    if (isSignupRoute(pathname)) {
       // Auth routes stay keyed on IP — there is no session yet, and this is a
       // credential-stuffing control rather than a fair-use one.
-      const result = await checkRateLimit(ip, "auth", RATE_LIMITS.auth);
+      const result = await checkRateLimit(getClientIp(request), "auth", RATE_LIMITS.auth);
 
       if (!result.allowed) {
         return NextResponse.json(
@@ -128,12 +135,20 @@ export async function middleware(request: NextRequest) {
     }
 
     // General API rate limiting (every request counts), per session where one
-    // exists so that shared office addresses no longer share a budget.
+    // exists so that shared office addresses no longer share a budget. Shared
+    // across instances only where it matters (usesSharedLimit); a separate
+    // group, so the two counts never mix.
     const { identifier, group, config } = resolveApiLimit(
       request,
       readSessionHint(request)
     );
-    const result = await checkAndRecordRateLimit(identifier, group, config);
+    const shared = usesSharedLimit(request.method, pathname);
+    const result = await checkAndRecordRateLimit(
+      identifier,
+      shared ? `${group}:shared` : group,
+      config,
+      { shared }
+    );
 
     if (!result.allowed) {
       return NextResponse.json(
@@ -220,6 +235,10 @@ export const config = {
     "/invoices/:path*",
     "/collections/:path*",
     "/courier/:path*",
+    // In ADMIN_ROUTES since they were built, but missing here, so a driver
+    // typing either URL got the admin shell (every API call still refused).
+    "/credits/:path*",
+    "/exceptions/:path*",
     "/settings/:path*",
     "/backups/:path*",
     "/users/:path*",

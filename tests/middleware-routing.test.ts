@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { NextRequest } from "next/server";
-import { middleware } from "@/middleware";
+import { middleware, config } from "@/middleware";
 
 function pageRequest(path: string, role?: string): NextRequest {
   const request = new NextRequest(`http://localhost${path}`);
@@ -74,5 +74,19 @@ describe("page routing by role", () => {
   it("redirects the retired driver PIN sign-in to the one login", async () => {
     expect(await landing("/select")).toBe("/login");
     expect(await landing("/select/admin-abc123")).toBe("/login");
+  });
+
+  it("is actually run on every protected page", () => {
+    // The cases above call middleware() directly, which skips the matcher. In
+    // production a page missing from it is never routed at all — /credits and
+    // /exceptions were, for a while.
+    const pages = [
+      "/dashboard", "/contacts", "/drivers", "/trip-sheet", "/courier", "/invoices",
+      "/collections", "/credits", "/exceptions", "/settings", "/backups", "/users",
+      "/companies", "/run", "/sign", "/collect", "/select",
+    ];
+    for (const page of pages) {
+      expect(config.matcher, page).toContain(`${page}/:path*`);
+    }
   });
 });

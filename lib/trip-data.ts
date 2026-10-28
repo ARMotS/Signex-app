@@ -462,6 +462,89 @@ export async function saveTripSheet(
 }
 
 /**
+ * Exactly the columns mapStop / mapCollection read, for every trip list: the
+ * dispatcher's trip view, the dashboard and each driver's run sheet.
+ *
+ * Selected, not `include`d: whole rows carry every signed stop's
+ * `signatureData` and every collection's `signature` — full-size PNG data
+ * URLs that the mappers drop. A branch's live runs held ~17 MB of them, read
+ * out of Postgres on each dashboard and trip-sheet refresh to send ~0.5 MB.
+ */
+const TRIP_COLLECTION_SELECT = {
+  id: true,
+  collectionNo: true,
+  type: true,
+  upliftSubtype: true,
+  notes: true,
+  originalInvoiceNo: true,
+  status: true,
+  exceptionReason: true,
+  expectedQty: true,
+  collectedQty: true,
+  sourceFileId: true,
+  sourceFilePath: true,
+  signedFileId: true,
+  signedFilePath: true,
+  signedByName: true,
+  collectedAt: true,
+  driverId: true,
+  sheetStatus: true,
+  sheetIssues: true,
+  hasVariance: true,
+  failReason: true,
+  sheetError: true,
+  creditReview: true,
+  creditReviewReason: true,
+  creditReviewedBy: true,
+  creditReviewedAt: true,
+  // The office sheet's lines: small, never priced, read by the trip view.
+  lines: {
+    orderBy: { lineNo: "asc" },
+    select: {
+      lineNo: true,
+      itemCode: true,
+      shortName: true,
+      description: true,
+      qtyListed: true,
+      reasonCode: true,
+      type: true,
+      qtyCollected: true,
+      diffReason: true,
+      diffNote: true,
+      isExtra: true,
+    },
+  },
+} satisfies Prisma.CollectionSelect;
+
+const TRIP_STOP_SELECT = {
+  id: true,
+  tripSheetId: true,
+  stopNumber: true,
+  invoiceNumber: true,
+  customerName: true,
+  address: true,
+  nop: true,
+  invoiceFile: true,
+  status: true,
+  signedAt: true,
+  emailSentAt: true,
+  emailStatus: true,
+  emailError: true,
+  emailAttempts: true,
+  contact: { select: { email: true } },
+  // A stop's collections travel with it everywhere a stop is read. The
+  // driver's run sheet, the dispatcher's trip view and the completion
+  // guard all need them, and a stop whose collections were silently
+  // absent would look finished when it is not.
+  collections: { orderBy: { collectionNo: "asc" }, select: TRIP_COLLECTION_SELECT },
+  // Lines the customer refused — the driver must not hand them over.
+  rejectedLines: {
+    orderBy: { createdAt: "asc" },
+    select: { id: true, description: true, quantity: true, reason: true, recordedBy: true, createdAt: true },
+  },
+} satisfies Prisma.StopSelect;
+
+/**
  * Get all trip sheets in a scope, with their stops.
  */
 export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
@@ -482,20 +565,7 @@ export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
     db.stop.findMany({
       where: { tripSheetId: { in: trips.map((t) => t.id) } },
       orderBy: { stopNumber: "asc" },
-      include: {
-        contact: { select: { email: true } },
-        // A stop's collections travel with it everywhere a stop is read. The
-        // driver's run sheet, the dispatcher's trip view and the completion
-        // guard all need them, and a stop whose collections were silently
-        // absent would look finished when it is not.
-        collections: {
-          orderBy: { collectionNo: "asc" },
-          // The office sheet's lines: small, never priced, read by the trip view.
-          include: { lines: { orderBy: { lineNo: "asc" } } },
-        },
-        // Lines the customer refused — the driver must not hand them over.
-        rejectedLines: { orderBy: { createdAt: "asc" } },
-      },
+      select: TRIP_STOP_SELECT,
     }),
   ]);
 
@@ -552,20 +622,7 @@ export async function getTripSheet(
     db.stop.findMany({
       where: { tripSheetId: trip.id },
       orderBy: { stopNumber: "asc" },
-      include: {
-        contact: { select: { email: true } },
-        // A stop's collections travel with it everywhere a stop is read. The
-        // driver's run sheet, the dispatcher's trip view and the completion
-        // guard all need them, and a stop whose collections were silently
-        // absent would look finished when it is not.
-        collections: {
-          orderBy: { collectionNo: "asc" },
-          // The office sheet's lines: small, never priced, read by the trip view.
-          include: { lines: { orderBy: { lineNo: "asc" } } },
-        },
-        // Lines the customer refused — the driver must not hand them over.
-        rejectedLines: { orderBy: { createdAt: "asc" } },
-      },
+      select: TRIP_STOP_SELECT,
     }),
   ]);
 
@@ -611,20 +668,7 @@ export async function getTripSheetsForDriver(
     db.stop.findMany({
       where: { tripSheetId: { in: trips.map((t) => t.id) } },
       orderBy: { stopNumber: "asc" },
-      include: {
-        contact: { select: { email: true } },
-        // A stop's collections travel with it everywhere a stop is read. The
-        // driver's run sheet, the dispatcher's trip view and the completion
-        // guard all need them, and a stop whose collections were silently
-        // absent would look finished when it is not.
-        collections: {
-          orderBy: { collectionNo: "asc" },
-          // The office sheet's lines: small, never priced, read by the trip view.
-          include: { lines: { orderBy: { lineNo: "asc" } } },
-        },
-        // Lines the customer refused — the driver must not hand them over.
-        rejectedLines: { orderBy: { createdAt: "asc" } },
-      },
+      select: TRIP_STOP_SELECT,
     }),
   ]);
 
@@ -1636,7 +1680,34 @@ export async function listCollections(
         },
       }),
     },
-    include: {
+    // Selected, not the whole row: `signature` is a full-size PNG data URL on
+    // every collected row, and a list of up to 2000 never shows one.
+    select: {
+      id: true,
+      collectionNo: true,
+      type: true,
+      upliftSubtype: true,
+      originalInvoiceNo: true,
+      status: true,
+      exceptionReason: true,
+      notes: true,
+      expectedQty: true,
+      collectedQty: true,
+      customerName: true,
+      signedByName: true,
+      collectedAt: true,
+      sourceFilePath: true,
+      signedFileId: true,
+      signedFilePath: true,
+      driverId: true,
+      hasVariance: true,
+      emailStatus: true,
+      emailError: true,
+      creditReview: true,
+      creditReviewReason: true,
+      creditReviewedBy: true,
+      invoiceId: true,
+      tripSheetId: true,
       stop: { select: { customerName: true, stopNumber: true } },
       tripSheet: { select: { driverId: true, date: true, sourceFilename: true, driver: { select: { name: true } } } },
       lines: { select: { qtyListed: true, qtyCollected: true, isExtra: true } },
@@ -1698,6 +1769,17 @@ export async function listCollections(
     },
     orderBy: { completedAt: "desc" },
     take: 500,
+    // Not the whole row: `stops` (every run's full stop list, as JSON) is the
+    // bulk of it and nothing here reads it.
+    select: {
+      id: true,
+      tripSheetId: true,
+      driverId: true,
+      driverName: true,
+      uploadedAt: true,
+      sourceFilename: true,
+      collections: true,
+    },
   });
 
   // The rows outlive their trips (detached at completion), so an archived

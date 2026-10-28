@@ -25,9 +25,19 @@ export default function DriverLayout({
         .catch(() => {});
     };
 
+    // Not while hidden — the phone spends most of the shift in a pocket. Taken
+    // out again, it checks at once, so a phone signed out by a newer one finds
+    // out before the driver taps anything.
+    const checkIfVisible = () => {
+      if (document.visibilityState === "visible") checkSession();
+    };
     checkSession();
-    const interval = setInterval(checkSession, 30000);
-    return () => clearInterval(interval);
+    const interval = setInterval(checkIfVisible, 60_000);
+    document.addEventListener("visibilitychange", checkIfVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", checkIfVisible);
+    };
   }, [router]);
 
   const handleLogout = async () => {
