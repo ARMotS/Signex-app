@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getScope } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { buildSyncCursor } from "@/lib/sync-cursor";
+import { courierOverview } from "@/lib/courier-confirm";
 
 /**
  * GET /api/sync — the change feed.
@@ -26,15 +27,24 @@ export const dynamic = "force-dynamic";
 
 export const GET = withAuth(async () => {
   const ctx = await getScope();
+  const isDriver = ctx.role === "DRIVER";
 
-  const cursor = await buildSyncCursor(ctx.tenantId, {
-    // For a driver session the session id IS the driver row id, so this needs
-    // no extra lookup. Scoping to it is what stops one driver's activity from
-    // waking every other device in the fleet.
-    driverId: ctx.role === "DRIVER" ? ctx.userId : undefined,
-  });
+  const [cursor, courier] = await Promise.all([
+    buildSyncCursor(ctx.tenantId, {
+      // For a driver session the session id IS the driver row id, so this needs
+      // no extra lookup. Scoping to it is what stops one driver's activity from
+      // waking every other device in the fleet.
+      driverId: isDriver ? ctx.userId : undefined,
+    }),
+    // The office's Courier nav badge rides on this poll instead of a timer of
+    // its own (it was /api/courier/attention, once a minute per tab). Every
+    // other role here is office: getScope() has already refused a company
+    // admin with no branch chosen. Recomputed every poll, not only when the
+    // cursor moves — "no answer" is reached by the clock, not by a write.
+    isDriver ? null : courierOverview(ctx.tenantId, new Date()),
+  ]);
 
-  return NextResponse.json(cursor, {
+  return NextResponse.json(courier ? { ...cursor, attention: courier.attention } : cursor, {
     headers: {
       "Cache-Control": "no-store, must-revalidate",
     },

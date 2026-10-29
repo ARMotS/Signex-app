@@ -1,11 +1,24 @@
 "use client";
 
 /**
- * Live updates by polling the change feed.
+ * Live updates by polling the change feed — ONE loop per tab.
  *
- * Calls `onChange` whenever /api/sync reports that the caller's data has moved,
- * so a page can refetch only when there is something to refetch. Every guard
- * below exists because the alternative costs somebody something real:
+ * `LiveSyncProvider` sits in the admin and driver layouts and is the only
+ * thing that polls /api/sync. Pages subscribe with `useLiveSync(onChange)` and
+ * are called whenever the cursor moves, so a page refetches only when there is
+ * something to refetch.
+ *
+ * The same response carries everything else a tab used to poll for on its own
+ * timer, because each poll is a function invocation billed on its own:
+ *
+ *   - the SESSION check: a revoked or evicted session answers 401 here (every
+ *     API call validates it), and only then does the layout ask
+ *     /api/auth/session why — which clears the cookie and says "signed out
+ *     elsewhere";
+ *   - the office's COURIER badge (`attention`).
+ *
+ * Every guard below exists because the alternative costs somebody something
+ * real:
  *
  *   - A HIDDEN tab does not poll. A driver's phone spends most of the shift in
  *     a pocket with the screen off; polling there burns battery and mobile data
@@ -22,45 +35,82 @@
  * rather than "up to thirty seconds stale".
  */
 
-import { useEffect, useRef } from "react";
+import {
+  createContext,
+  createElement,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 /**
- * 30s, not the 12s it was. Every open tab polls this all day (the dashboard
- * is a wallboard), and the wake-on-focus above is what makes a newly
- * deployed trip sheet reach a driver quickly — not the interval.
+ * 30s while a page is following live data, not the 12s it was. Every open tab
+ * polls all day (the dashboard is a wallboard), and the wake-on-focus above is
+ * what makes a newly deployed trip sheet reach a driver quickly — not the
+ * interval.
  */
-const DEFAULT_INTERVAL_MS = 30_000;
+const LIVE_INTERVAL_MS = 30_000;
+
+/**
+ * A page with nothing subscribed (Contacts, Settings, the sign screen) only
+ * needs the session check and the badge, which ran once a minute before.
+ */
+const IDLE_INTERVAL_MS = 60_000;
 
 /** Ceiling for error backoff — an outage settles to one attempt a minute. */
 const MAX_BACKOFF_MS = 60_000;
 
-export interface UseLiveSyncOptions {
-  /** Poll interval while the tab is visible and healthy. */
-  intervalMs?: number;
-  /** Set false to suspend entirely (e.g. before a driver has signed in). */
-  enabled?: boolean;
+type Listener = () => void;
+
+interface LiveSync {
+  subscribe(listener: Listener): () => void;
 }
 
-export function useLiveSync(
-  onChange: () => void,
-  { intervalMs = DEFAULT_INTERVAL_MS, enabled = true }: UseLiveSyncOptions = {}
-): void {
-  // Held in a ref so a caller passing an inline arrow does not tear down and
-  // rebuild the polling loop on every render. Assigned in an effect rather than
-  // during render, which would be a side effect in the render phase.
-  const onChangeRef = useRef(onChange);
+const LiveSyncContext = createContext<LiveSync | null>(null);
+
+export interface LiveSyncProviderProps {
+  children: ReactNode;
+  /**
+   * /api/sync answered 401/403. The layout re-checks the session, which
+   * redirects to sign-in if it is gone. Polling carries on at the backoff
+   * ceiling in case it was not (a company admin with no branch chosen).
+   */
+  onAuthProblem: () => void;
+  /** The office's courier badge. Never called for a driver. */
+  onAttention?: (count: number) => void;
+}
+
+export function LiveSyncProvider({ children, onAuthProblem, onAttention }: LiveSyncProviderProps) {
+  const [{ listeners, value }] = useState(() => {
+    const listeners = new Set<Listener>();
+    const value: LiveSync = {
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+    };
+    return { listeners, value };
+  });
+
+  // Held in a ref so a layout passing inline arrows does not tear down and
+  // rebuild the polling loop on every render.
+  const callbacks = useRef({ onAuthProblem, onAttention });
   useEffect(() => {
-    onChangeRef.current = onChange;
+    callbacks.current = { onAuthProblem, onAttention };
   });
 
   useEffect(() => {
-    if (!enabled) return;
-
     let stopped = false;
     let inFlight = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let cursor: string | null = null;
-    let backoff = intervalMs;
+    let backoff = LIVE_INTERVAL_MS;
+
+    const interval = () => (listeners.size > 0 ? LIVE_INTERVAL_MS : IDLE_INTERVAL_MS);
 
     const clear = () => {
       if (timer) {
@@ -98,17 +148,18 @@ export function useLiveSync(
           return;
         }
 
-        // A signed-out session should stop polling, not spin on 401s. The
-        // layout's own session check handles the redirect.
         if (res.status === 401 || res.status === 403) {
-          stopped = true;
+          callbacks.current.onAuthProblem();
+          schedule(MAX_BACKOFF_MS);
           return;
         }
 
         if (!res.ok) throw new Error(`sync ${res.status}`);
 
-        const data: { cursor?: string } = await res.json();
-        backoff = intervalMs;
+        const data: { cursor?: string; attention?: number } = await res.json();
+        backoff = LIVE_INTERVAL_MS;
+
+        if (typeof data.attention === "number") callbacks.current.onAttention?.(data.attention);
 
         if (typeof data.cursor === "string") {
           if (cursor === null) {
@@ -117,11 +168,11 @@ export function useLiveSync(
             cursor = data.cursor;
           } else if (data.cursor !== cursor) {
             cursor = data.cursor;
-            onChangeRef.current();
+            for (const listener of [...listeners]) listener();
           }
         }
 
-        schedule(intervalMs);
+        schedule(interval());
       } catch {
         backoff = Math.min(MAX_BACKOFF_MS, backoff * 2);
         schedule(backoff);
@@ -133,7 +184,7 @@ export function useLiveSync(
     /** Something happened that makes a check worthwhile right now. */
     const wake = () => {
       if (stopped || document.hidden || !navigator.onLine) return;
-      backoff = intervalMs;
+      backoff = LIVE_INTERVAL_MS;
       schedule(0);
     };
 
@@ -144,8 +195,9 @@ export function useLiveSync(
     // not seen yet. Dispatched by lib/offline-sync.ts.
     window.addEventListener("signex:sync-complete", wake as EventListener);
 
-    // First poll after one interval — the page has just fetched its data.
-    schedule(intervalMs);
+    // At once: this first answer is the session check on load, the badge, and
+    // the cursor baseline the pages' own first fetch is compared against.
+    schedule(0);
 
     return () => {
       stopped = true;
@@ -155,5 +207,40 @@ export function useLiveSync(
       window.removeEventListener("online", wake);
       window.removeEventListener("signex:sync-complete", wake as EventListener);
     };
-  }, [enabled, intervalMs]);
+  }, [listeners]);
+
+  return createElement(LiveSyncContext.Provider, { value }, children);
+}
+
+export interface UseLiveSyncOptions {
+  /** Set false to suspend entirely (e.g. before a driver has signed in). */
+  enabled?: boolean;
+}
+
+/** Call `onChange` whenever the caller's data moves. Needs a `LiveSyncProvider` above it. */
+export function useLiveSync(
+  onChange: () => void,
+  { enabled = true }: UseLiveSyncOptions = {}
+): void {
+  const liveSync = useContext(LiveSyncContext);
+
+  // Held in a ref so a caller passing an inline arrow does not resubscribe on
+  // every render. Assigned in an effect rather than during render, which would
+  // be a side effect in the render phase.
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  });
+
+  useEffect(() => {
+    if (!enabled) return;
+    if (!liveSync) {
+      // A page outside the admin/driver layouts would silently never update.
+      if (process.env.NODE_ENV !== "production") {
+        console.error("useLiveSync needs a LiveSyncProvider above it");
+      }
+      return;
+    }
+    return liveSync.subscribe(() => onChangeRef.current());
+  }, [liveSync, enabled]);
 }
