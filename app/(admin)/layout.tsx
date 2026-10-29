@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import ScopeSwitcher, { ScopeBanner } from "@/components/admin/ScopeSwitcher";
 import LogoMark from "@/components/LogoMark";
+import { LiveSyncProvider } from "@/hooks/useLiveSync";
 
 const navItems = [
   {
@@ -177,63 +178,38 @@ export default function AdminLayout({
   const [role, setRole] = useState<string | null>(null);
   const visibleNavItems = navItems.filter((item) => !item.superAdminOnly || role === "super_admin");
 
-  useEffect(() => {
-    const checkSession = () => {
-      fetch("/api/auth/session")
-        .then((r) => r.json())
-        .then((data) => {
-          if (data.kicked || !data.session) {
-            // Kicked: signed out from another device (or a password reset) —
-            // the login screen says so, rather than silently showing a form.
-            router.replace(data.kicked ? "/login?signedOut=1" : "/login");
-            return;
-          }
-          if (
-            data.session.role === "admin" ||
-            data.session.role === "super_admin" ||
-            data.session.role === "company_admin"
-          ) {
-            setSession({ name: data.session.name, email: data.session.email });
-            setRole(data.session.role);
-          }
-        })
-        .catch(() => {});
-    };
-
-    // Not while hidden: a background tab learns nothing it needs, and every API
-    // call is refused on a revoked session anyway. Shown again → checked at once.
-    const checkIfVisible = () => {
-      if (document.visibilityState === "visible") checkSession();
-    };
-    checkSession();
-    const interval = setInterval(checkIfVisible, 60_000);
-    document.addEventListener("visibilitychange", checkIfVisible);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", checkIfVisible);
-    };
+  const checkSession = useCallback(() => {
+    fetch("/api/auth/session")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.kicked || !data.session) {
+          // Kicked: signed out from another device (or a password reset) —
+          // the login screen says so, rather than silently showing a form.
+          router.replace(data.kicked ? "/login?signedOut=1" : "/login");
+          return;
+        }
+        if (
+          data.session.role === "admin" ||
+          data.session.role === "super_admin" ||
+          data.session.role === "company_admin"
+        ) {
+          setSession({ name: data.session.name, email: data.session.email });
+          setRole(data.session.role);
+        }
+      })
+      .catch(() => {});
   }, [router]);
 
-  // The Courier badge: sheets that need the office. Polled gently, and not
-  // at all while the tab is hidden; the dashboard carries the detail.
-  const [courierAttention, setCourierAttention] = useState(0);
+  // Once, for the name and role. After that there is no session timer: the
+  // LiveSyncProvider's poll is refused the moment the session is revoked, and
+  // calls checkSession then.
   useEffect(() => {
-    if (!role) return;
-    const look = () => {
-      if (document.visibilityState !== "visible") return;
-      fetch("/api/courier/attention")
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => typeof d?.attention === "number" && setCourierAttention(d.attention))
-        .catch(() => {});
-    };
-    look();
-    const interval = setInterval(look, 60_000);
-    document.addEventListener("visibilitychange", look);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", look);
-    };
-  }, [role, pathname]);
+    checkSession();
+  }, [checkSession]);
+
+  // The Courier badge: sheets that need the office. Carried on the live-sync
+  // poll (hidden tabs do not poll); the dashboard carries the detail.
+  const [courierAttention, setCourierAttention] = useState(0);
   const badgeFor = (href: string) => (href === "/courier" ? courierAttention : 0);
 
   const handleLogout = async () => {
@@ -396,7 +372,9 @@ export default function AdminLayout({
         {/* 16px gutter on a phone: 24px either side left too little room for
             the trip cards and invoice tables. */}
         <main className="flex-1 p-4 sm:p-6 md:p-8 pb-24 md:pb-8 overflow-y-auto bg-ink-surface">
-          {children}
+          <LiveSyncProvider onAuthProblem={checkSession} onAttention={setCourierAttention}>
+            {children}
+          </LiveSyncProvider>
         </main>
       </div>
     </div>

@@ -1694,8 +1694,17 @@ suite("cross-ADMIN isolation", () => {
         const dash = await (await GET(req("/api/dashboard"))).json();
         expect(dash.courier.attention).toBe(beforeA);
         expect(JSON.stringify(dash.courier)).not.toContain(b.id);
+
+        // The badge now rides on the change feed every office tab polls.
+        const sync = await import("@/app/api/sync/route");
+        useSession(adminSession(f.a));
+        expect((await (await sync.GET(req("/api/sync"))).json()).attention).toBe(beforeA);
+        useSession(adminSession(f.b));
+        expect((await (await sync.GET(req("/api/sync"))).json()).attention).toBe(beforeB + 1);
+
         useSession(driverSession(f.a));
         expect((await attention.GET(req("/api/courier/attention"))).status).toBe(403);
+        expect((await (await sync.GET(req("/api/sync"))).json()).attention).toBeUndefined();
       });
 
       it("a customer confirming moves the office's cursor, never a driver's", async () => {

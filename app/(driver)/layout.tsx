@@ -1,8 +1,9 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useCallback } from "react";
 import LogoMark from "@/components/LogoMark";
+import { LiveSyncProvider } from "@/hooks/useLiveSync";
 
 export default function DriverLayout({
   children,
@@ -11,33 +12,21 @@ export default function DriverLayout({
 }) {
   const router = useRouter();
 
-  useEffect(() => {
-    const checkSession = () => {
-      fetch("/api/auth/session")
-        .then((r) => r.json())
-        .then((data) => {
-          // Signed out, signed in elsewhere, or password reset by the office.
-          if (data.kicked || !data.session) {
-            localStorage.removeItem("signex-driver");
-            router.replace("/login");
-          }
-        })
-        .catch(() => {});
-    };
-
-    // Not while hidden — the phone spends most of the shift in a pocket. Taken
-    // out again, it checks at once, so a phone signed out by a newer one finds
-    // out before the driver taps anything.
-    const checkIfVisible = () => {
-      if (document.visibilityState === "visible") checkSession();
-    };
-    checkSession();
-    const interval = setInterval(checkIfVisible, 60_000);
-    document.addEventListener("visibilitychange", checkIfVisible);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", checkIfVisible);
-    };
+  // Asked only when the live-sync poll is refused. That poll runs on load and
+  // again the moment the phone comes out of the pocket, so a phone signed out
+  // by a newer one finds out before the driver taps anything — without a
+  // session timer of its own.
+  const checkSession = useCallback(() => {
+    fetch("/api/auth/session")
+      .then((r) => r.json())
+      .then((data) => {
+        // Signed out, signed in elsewhere, or password reset by the office.
+        if (data.kicked || !data.session) {
+          localStorage.removeItem("signex-driver");
+          router.replace("/login");
+        }
+      })
+      .catch(() => {});
   }, [router]);
 
   const handleLogout = async () => {
@@ -80,7 +69,9 @@ export default function DriverLayout({
       </header>
 
       {/* Content area with safe-area bottom padding */}
-      <main className="flex-1 flex flex-col safe-bottom">{children}</main>
+      <main className="flex-1 flex flex-col safe-bottom">
+        <LiveSyncProvider onAuthProblem={checkSession}>{children}</LiveSyncProvider>
+      </main>
     </div>
   );
 }
