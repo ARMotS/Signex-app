@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import PasswordInput from "@/components/PasswordInput";
+import Pager from "@/components/ui/Pager";
 import UsernameField, { type UsernameStatus } from "@/components/UsernameField";
 import { validatePassword, PASSWORD_HINT } from "@/lib/credentials";
 
@@ -24,6 +25,8 @@ const usernameUsable = (s: UsernameStatus) => s === "available" || s === "unchan
 
 export default function DriversPage() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -192,6 +195,11 @@ export default function DriversPage() {
 
   const activeDrivers = drivers.filter((d) => d.active);
   const inactiveDrivers = drivers.filter((d) => !d.active);
+  // Active first, then deactivated; a page left past the end shows the last.
+  const ordered = [...activeDrivers, ...inactiveDrivers];
+  const lastPage = Math.max(1, Math.ceil(ordered.length / pageSize));
+  const shownPage = Math.min(page, lastPage);
+  const shownDrivers = ordered.slice((shownPage - 1) * pageSize, shownPage * pageSize);
   const withoutLogin = drivers.filter((d) => !d.canSignIn);
 
   return (
@@ -376,7 +384,7 @@ export default function DriversPage() {
             <div className="col-span-4 text-right">Actions</div>
           </div>
           <div className="divide-y divide-ink-border stagger-children">
-            {[...activeDrivers, ...inactiveDrivers].map((d) => (
+            {shownDrivers.map((d) => (
               <div key={d.id}>
                 {editingId === d.id ? (
                   /* Edit mode — also sets a login, or resets a password */
@@ -518,6 +526,16 @@ export default function DriversPage() {
               </div>
             ))}
           </div>
+          <Pager
+            page={shownPage}
+            pageSize={pageSize}
+            total={ordered.length}
+            onPage={setPage}
+            onPageSize={(n) => {
+              setPageSize(n);
+              setPage(1);
+            }}
+          />
         </div>
       )}
     </div>

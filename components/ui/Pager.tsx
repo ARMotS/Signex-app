@@ -15,8 +15,10 @@ interface PagerProps {
   pageSize: number;
   total: number;
   onPage: (page: number) => void;
-  /** Offer 25 / 50 / 100 rows per page. */
+  /** Offer a choice of rows per page. */
   onPageSize?: (size: number) => void;
+  /** The choices, smallest first. Default 25 / 50 / 100. */
+  sizes?: readonly number[];
   disabled?: boolean;
 }
 
@@ -24,11 +26,11 @@ export function pageCountOf(total: number, pageSize: number): number {
   return Math.max(1, Math.ceil(total / Math.max(1, pageSize)));
 }
 
-export default function Pager({ page, pageSize, total, onPage, onPageSize, disabled }: PagerProps) {
+export default function Pager({ page, pageSize, total, onPage, onPageSize, sizes = PAGE_SIZES, disabled }: PagerProps) {
   const pages = pageCountOf(total, pageSize);
   // One page and nothing to choose: no bar. (With a size choice the bar stays
   // while a smaller size would still page — so 100 can be switched back.)
-  if (total === 0 || (pages <= 1 && (!onPageSize || total <= PAGE_SIZES[0]))) return null;
+  if (total === 0 || (pages <= 1 && (!onPageSize || total <= sizes[0]))) return null;
   const current = Math.min(Math.max(1, page), pages);
   const first = (current - 1) * pageSize + 1;
   const last = Math.min(current * pageSize, total);
@@ -54,7 +56,7 @@ export default function Pager({ page, pageSize, total, onPage, onPageSize, disab
               aria-label="Rows per page"
               className="h-6 px-1.5 text-xs font-mono bg-ink-card border border-ink-border rounded text-ink-black"
             >
-              {PAGE_SIZES.map((s) => (
+              {sizes.map((s) => (
                 <option key={s} value={s}>
                   {s}
                 </option>

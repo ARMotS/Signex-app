@@ -62,6 +62,16 @@ describe("page routing by role", () => {
     expect(await landing("/my-admins", "admin")).toBe("/dashboard");
     expect(await landing("/my-admins", "super_admin")).toBe("/users");
     expect(await landing("/my-admins", "driver")).toBe("/run");
+    expect(await landing("/my-branches", "company_admin")).toBeNull();
+    expect(await landing("/my-branches", "admin")).toBe("/dashboard");
+    expect(await landing("/my-branches", "super_admin")).toBe("/users");
+  });
+
+  it("opens usage to the company admin and the super admin only", async () => {
+    expect(await landing("/usage", "company_admin")).toBeNull();
+    expect(await landing("/usage", "super_admin")).toBeNull();
+    expect(await landing("/usage", "admin")).toBe("/dashboard");
+    expect(await landing("/usage", "driver")).toBe("/run");
   });
 
   it("lets each role through to its own pages", async () => {

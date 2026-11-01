@@ -127,7 +127,7 @@ export const POST = withAuth(async (request: NextRequest) => {
       action: "SCOPE_SWITCH",
       entity: "scope",
       entityId: tenantId,
-      details: "COMPANY_ADMIN switched branch",
+      details: "Company admin switched to this branch",
       // Logged in the branch it switched into, so that branch's activity shows it.
       tenantId,
     });

@@ -8,6 +8,9 @@
  */
 
 import { useState } from "react";
+
+/** Files listed before "Show all". */
+const FAILURES_SHOWN = 3;
 import Link from "next/link";
 import MappingWizard from "@/components/admin/import-mapping/MappingWizard";
 
@@ -42,6 +45,8 @@ export default function CourierInbox({
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [wizard, setWizard] = useState<{ file: File } | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
+  // A folder full of bad files must not push the sheets off the screen.
+  const [showAllFailures, setShowAllFailures] = useState(false);
 
   const check = async () => {
     setChecking(true);
@@ -133,7 +138,7 @@ export default function CourierInbox({
             Couldn&apos;t import from the folder ({inbox.failures.length})
           </h2>
           <ul className="divide-y divide-ink-border">
-            {inbox.failures.map((f) => (
+            {(showAllFailures ? inbox.failures : inbox.failures.slice(0, FAILURES_SHOWN)).map((f) => (
               <li key={f.itemId} className="px-4 py-3 flex flex-wrap items-center gap-3">
                 <div className="min-w-[14rem] flex-1">
                   <p className="text-sm font-mono text-ink-black break-all">{f.fileName}</p>
@@ -154,6 +159,13 @@ export default function CourierInbox({
               </li>
             ))}
           </ul>
+          {inbox.failures.length > FAILURES_SHOWN && (
+            <div className="px-4 py-2 border-t border-ink-border">
+              <button type="button" className="act" onClick={() => setShowAllFailures((v) => !v)}>
+                {showAllFailures ? "Show fewer" : `Show all ${inbox.failures.length}`}
+              </button>
+            </div>
+          )}
           <p className="px-4 py-2 text-xs text-ink-muted border-t border-ink-border">
             Fix the file in the folder (or set up a template) and it is picked up on the next look; a file deleted from
             the folder drops off this list.

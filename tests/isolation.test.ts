@@ -23,6 +23,7 @@
  * merely because the values happened to differ.
  */
 
+import type { Prisma } from "@prisma/client";
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import * as XLSX from "xlsx";
 import {
@@ -7039,6 +7040,239 @@ suite("cross-ADMIN isolation", () => {
         expect(await res.json()).toMatchObject({ code: "FOLDER_UNREADABLE" });
       } finally {
         fetchMock.mockImplementation(original);
+      }
+    });
+  });
+  // ── Looking across branches: overview, activity, usage ──────────────
+  // Company N: branches P and Q allocated to its lead, R in the same company
+  // but not allocated. B (Company Y) and the SUPER_ADMIN are the outsiders.
+  describe("looking across branches", () => {
+    let companyN: string;
+    let homeN: string;
+    let lead: { id: string; name: string; homeTenantId: string };
+    let p: { tenantId: string; adminId: string; driverId: string };
+    let q: { tenantId: string; adminId: string };
+    let r: { tenantId: string; adminId: string };
+
+    const branch = async (name: string, username: string) => {
+      const tenant = await db().tenant.create({
+        data: { name, slug: `${username.replace(/\./g, "-")}-n`, kind: "BRANCH", companyId: companyN },
+      });
+      const admin = await db().admin.create({
+        data: {
+          name: `${name} Office`,
+          email: `${username}@company-n.test`,
+          passwordHash: "unused",
+          tenantId: tenant.id,
+          login: { create: { username } },
+        },
+      });
+      await db().user.create({ data: { email: admin.email, name: admin.name, role: "ADMIN", tenantId: tenant.id } });
+      return { tenantId: tenant.id, adminId: admin.id };
+    };
+    const audit = (tenantId: string, data: Partial<Prisma.AuditLogCreateManyInput> & { action: Prisma.AuditLogCreateManyInput["action"] }) =>
+      db().auditLog.create({
+        data: { entity: "test", tenantId, ip: "10.9.8.7", userAgent: "SecretAgent/1", deviceId: "device-secret", ...data },
+      });
+    const get = async (path: string, session: ReturnType<typeof adminSession>) => {
+      const mod =
+        path.startsWith("/api/company/overview")
+          ? await import("@/app/api/company/overview/route")
+          : path.startsWith("/api/company/activity")
+            ? await import("@/app/api/company/activity/route")
+            : await import("@/app/api/usage/route");
+      useSession(session);
+      const res = await mod.GET(req(path));
+      return { status: res.status, body: await res.json() };
+    };
+    const asLead = (viewing: string | null = null) => companyAdminSession(lead, viewing);
+
+    beforeAll(async () => {
+      companyN = (await db().company.create({ data: { name: "Company N" } })).id;
+      homeN = (
+        await db().tenant.create({ data: { name: "Company N", slug: "company-n-home", kind: "COMPANY", companyId: companyN } })
+      ).id;
+      const leadRow = await db().admin.create({
+        data: {
+          name: "Company N Lead",
+          email: "lead@company-n.test",
+          passwordHash: "unused",
+          tenantId: homeN,
+          companyId: companyN,
+          login: { create: { username: "company.n.lead" } },
+        },
+      });
+      await db().user.create({ data: { email: leadRow.email, name: leadRow.name, role: "COMPANY_ADMIN", tenantId: homeN } });
+      lead = { id: leadRow.id, name: leadRow.name, homeTenantId: homeN };
+
+      const pb = await branch("Branch P2", "branch.p2");
+      const driver = await db().driver.create({
+        data: { name: "Thabo Driver", tenantId: pb.tenantId, login: { create: { username: "thabo.p2" } } },
+      });
+      p = { ...pb, driverId: driver.id };
+      q = await branch("Branch Q2", "branch.q2");
+      r = await branch("Branch R2", "branch.r2");
+      for (const b of [p, q]) {
+        await db().companyAdminAllocation.create({
+          data: { companyId: companyN, companyAdminId: lead.id, adminId: b.adminId, branchTenantId: b.tenantId },
+        });
+      }
+
+      // An account in P promoted to SUPER_ADMIN: lives there, never listed.
+      const promoted = await db().admin.create({
+        data: { name: "Promoted Boss", email: "boss@company-n.test", passwordHash: "unused", tenantId: p.tenantId },
+      });
+      await db().user.create({ data: { email: promoted.email, name: promoted.name, role: "SUPER_ADMIN", tenantId: p.tenantId } });
+
+      // P's history: the office, the driver, and the SUPER_ADMIN acting there.
+      await audit(p.tenantId, { action: "LOGIN", actorId: p.adminId, actorRole: "ADMIN", userName: "Branch P2 Office", details: "Signed in" });
+      await audit(p.tenantId, { action: "LOGIN", actorId: p.driverId, actorRole: "DRIVER", userName: "Thabo Driver", details: "Signed in" });
+      await audit(p.tenantId, { action: "SIGN", entity: "stop", actorId: p.driverId, actorRole: "DRIVER", userName: "Thabo Driver", details: "Stop 1 → SIGNED" });
+      await audit(p.tenantId, { action: "DRIVER_UPDATE", actorId: p.adminId, actorRole: "ADMIN", userName: "Branch P2 Office", details: "Renamed a driver" });
+      await audit(p.tenantId, { action: "PASSWORD_CHANGE", actorId: f.superAdmin.id, actorRole: "SUPER_ADMIN", userName: f.superAdmin.name, details: "SUPER-SECRET-RESET" });
+      await audit(p.tenantId, { action: "LOGIN", actorId: promoted.id, actorRole: "SUPER_ADMIN", userName: "Promoted Boss", details: "Signed in" });
+      // Old: outside a 7-day window, inside the date filter's month.
+      await audit(p.tenantId, { action: "UPLOAD", actorId: p.adminId, actorRole: "ADMIN", userName: "Branch P2 Office", details: "Old upload", createdAt: new Date("2025-06-15T10:00:00Z") });
+      await audit(q.tenantId, { action: "UPLOAD", actorId: q.adminId, actorRole: "ADMIN", userName: "Branch Q2 Office", details: "Q upload" });
+      await audit(r.tenantId, { action: "UPLOAD", actorId: r.adminId, actorRole: "ADMIN", userName: "Branch R2 Office", details: "R-UNALLOCATED-UPLOAD" });
+      await audit(f.b.tenantId, { action: "UPLOAD", actorId: f.b.admin.id, actorRole: "ADMIN", details: "B-OTHER-COMPANY-UPLOAD" });
+
+      // Work waiting in P (and in R, which the lead must not see).
+      for (const [tenantId, no] of [[p.tenantId, "880001"], [r.tenantId, "880002"]] as const) {
+        await db().creditNote.create({
+          data: {
+            tenantId,
+            creditNo: no,
+            creditNoNormalized: no,
+            creditNoClaim: no,
+            status: "NEEDS_REVIEW",
+            sourceItemId: `overview-${no}`,
+            sourceFilename: `CR-${no}.pdf`,
+            sourceFolder: "Originals",
+          },
+        });
+      }
+
+      // The driver is signed in right now on one phone.
+      const { startSession } = await import("@/lib/session");
+      await startSession({ id: p.driverId, role: "driver" });
+    });
+
+    it("is the company admin's (and, for usage, the super admin's) alone", async () => {
+      for (const session of [adminSession(f.a), driverSession(f.a), superAdminSession(f)]) {
+        expect((await get("/api/company/overview", session)).status).toBe(403);
+        expect((await get("/api/company/activity", session)).status).toBe(403);
+      }
+      for (const session of [adminSession(f.a), driverSession(f.a)]) {
+        expect((await get("/api/usage", session)).status).toBe(403);
+      }
+    });
+
+    it("overview: one card per allocated branch, each read from its own branch, from home or a branch", async () => {
+      for (const viewing of [null, p.tenantId]) {
+        const { status, body } = await get("/api/company/overview?tzOffset=-120", asLead(viewing));
+        expect(status).toBe(200);
+        expect(body.branches.map((b: { tenantId: string }) => b.tenantId).sort()).toEqual([p.tenantId, q.tenantId].sort());
+        const card = (id: string) => body.branches.find((b: { tenantId: string }) => b.tenantId === id);
+        expect(card(p.tenantId).creditNotesToReview).toBe(1);
+        expect(card(q.tenantId).creditNotesToReview).toBe(0);
+        expect(body.viewingTenantId).toBe(viewing);
+      }
+    });
+
+    it("activity: only allocated branches, never the super admin, never an IP or device", async () => {
+      const { status, body } = await get("/api/company/activity?size=100", asLead());
+      expect(status).toBe(200);
+      const details = body.entries.map((e: { details: string }) => e.details);
+      expect(details).toEqual(expect.arrayContaining(["Stop 1 → SIGNED", "Renamed a driver", "Q upload", "Old upload"]));
+      const raw = JSON.stringify(body);
+      for (const hidden of [
+        "SUPER-SECRET-RESET",
+        "Promoted Boss",
+        f.superAdmin.name,
+        "R-UNALLOCATED-UPLOAD",
+        "B-OTHER-COMPANY-UPLOAD",
+        "10.9.8.7",
+        "SecretAgent",
+        "device-secret",
+        r.tenantId,
+        f.b.tenantId,
+      ]) {
+        expect(raw, hidden).not.toContain(hidden);
+      }
+      expect(body.branches.map((b: { tenantId: string }) => b.tenantId).sort()).toEqual([p.tenantId, q.tenantId].sort());
+      // Newest first across branches.
+      const times = body.entries.map((e: { createdAt: string }) => Date.parse(e.createdAt));
+      expect([...times].sort((a, b) => b - a)).toEqual(times);
+    });
+
+    it("activity: filters by branch, action and dates; another branch is 404", async () => {
+      const onlyQ = (await get(`/api/company/activity?branch=${q.tenantId}`, asLead())).body;
+      expect(onlyQ.entries.map((e: { details: string }) => e.details)).toEqual(["Q upload"]);
+      const signs = (await get("/api/company/activity?action=SIGN", asLead())).body;
+      expect(signs.total).toBe(1);
+      const june = (await get("/api/company/activity?from=2025-06-01&to=2025-06-30&tzOffset=-120", asLead())).body;
+      expect(june.entries.map((e: { details: string }) => e.details)).toEqual(["Old upload"]);
+      for (const other of [r.tenantId, f.b.tenantId, f.superAdmin.tenantId, homeN, "no-such-branch"]) {
+        expect((await get(`/api/company/activity?branch=${other}`, asLead())).status, other).toBe(404);
+      }
+      // P: two sign-ins, a signature, a driver update, the June upload — not the two super admin entries.
+      expect((await get(`/api/company/activity?branch=${p.tenantId}`, asLead())).body.total).toBe(5);
+    });
+
+    it("usage: per branch and per account, with no super admin and no IPs", async () => {
+      const { status, body } = await get("/api/usage?days=7", asLead());
+      expect(status).toBe(200);
+      expect(body.days).toBe(7);
+      const ids = body.branches.map((b: { tenantId: string }) => b.tenantId).sort();
+      expect(ids).toEqual([p.tenantId, q.tenantId].sort());
+      const bp = body.branches.find((b: { tenantId: string }) => b.tenantId === p.tenantId);
+      expect(bp.accounts.map((a: { name: string }) => a.name).sort()).toEqual(["Branch P2 Office", "Thabo Driver"]);
+      const thabo = bp.accounts.find((a: { name: string }) => a.name === "Thabo Driver");
+      expect(thabo).toMatchObject({ role: "DRIVER", signIns: 1, signatures: 1, devicesNow: 1, username: "thabo.p2" });
+      const office = bp.accounts.find((a: { name: string }) => a.name === "Branch P2 Office");
+      // The June upload is outside the 7 days.
+      expect(office).toMatchObject({ role: "ADMIN", signIns: 1, actions: 1 });
+      expect(bp.totals).toMatchObject({ accounts: 2, signIns: 2, deliveriesSigned: 1, devicesNow: 1 });
+      const raw = JSON.stringify(body);
+      for (const hidden of ["Promoted Boss", f.superAdmin.name, "10.9.8.7", "SecretAgent", "device-secret", r.tenantId]) {
+        expect(raw, hidden).not.toContain(hidden);
+      }
+    });
+
+    it("usage: the super admin sees every branch, with its company", async () => {
+      const { status, body } = await get("/api/usage?days=30", superAdminSession(f));
+      expect(status).toBe(200);
+      const ids = body.branches.map((b: { tenantId: string }) => b.tenantId);
+      for (const t of [p.tenantId, q.tenantId, r.tenantId, f.a.tenantId, f.b.tenantId]) expect(ids).toContain(t);
+      expect(ids).not.toContain(homeN);
+      expect(ids).not.toContain(f.superAdmin.tenantId);
+      expect(body.branches.find((b: { tenantId: string }) => b.tenantId === r.tenantId).companyName).toBe("Company N");
+    });
+
+    it("a removed allocation takes the branch off every view at once", async () => {
+      await db().companyAdminAllocation.deleteMany({ where: { companyAdminId: lead.id, adminId: q.adminId } });
+      try {
+        const overview = (await get("/api/company/overview", asLead())).body;
+        expect(overview.branches.map((b: { tenantId: string }) => b.tenantId)).toEqual([p.tenantId]);
+        expect((await get(`/api/company/activity?branch=${q.tenantId}`, asLead())).status).toBe(404);
+        expect(JSON.stringify((await get("/api/company/activity", asLead())).body)).not.toContain("Q upload");
+        expect((await get("/api/usage", asLead())).body.branches.map((b: { tenantId: string }) => b.tenantId)).toEqual([p.tenantId]);
+      } finally {
+        await db().companyAdminAllocation.create({
+          data: { companyId: companyN, companyAdminId: lead.id, adminId: q.adminId, branchTenantId: q.tenantId },
+        });
+      }
+    });
+
+    it("a deactivated company sees no branches at all", async () => {
+      await db().company.update({ where: { id: companyN }, data: { isActive: false } });
+      try {
+        expect((await get("/api/company/overview", asLead())).body.branches).toEqual([]);
+        expect((await get("/api/company/activity", asLead())).body).toMatchObject({ entries: [], total: 0 });
+        expect((await get("/api/usage", asLead())).body.branches).toEqual([]);
+      } finally {
+        await db().company.update({ where: { id: companyN }, data: { isActive: true } });
       }
     });
   });

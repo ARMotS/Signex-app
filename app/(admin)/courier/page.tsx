@@ -59,7 +59,11 @@ interface ListView {
   size: number;
 }
 
-const DEFAULT_VIEW: ListView = { status: "ALL", q: "", from: "", to: "", page: 1, size: 25 };
+/** Ten a page: the tab sits under the folder panels, so a long page meant a lot of scrolling. */
+const PAGE_SIZE = 10;
+const PAGE_SIZES = [10, 25, 50] as const;
+
+const DEFAULT_VIEW: ListView = { status: "ALL", q: "", from: "", to: "", page: 1, size: PAGE_SIZE };
 
 function viewFromUrl(): ListView {
   const p = new URLSearchParams(window.location.search);
@@ -73,7 +77,7 @@ function viewFromUrl(): ListView {
     from: day("from"),
     to: day("to"),
     page: page > 0 ? page : 1,
-    size: [25, 50, 100].includes(size) ? size : 25,
+    size: (PAGE_SIZES as readonly number[]).includes(size) ? size : PAGE_SIZE,
   };
 }
 
@@ -85,7 +89,7 @@ function viewToParams(v: ListView): URLSearchParams {
   if (v.from) p.set("from", v.from);
   if (v.to) p.set("to", v.to);
   if (v.page > 1) p.set("page", String(v.page));
-  if (v.size !== 25) p.set("size", String(v.size));
+  if (v.size !== PAGE_SIZE) p.set("size", String(v.size));
   return p;
 }
 
@@ -313,19 +317,18 @@ export default function CourierPage() {
             <ul className="md:hidden divide-y divide-ink-border">
               {sheets.map((s) => (
                 <li key={s.id}>
-                  <Link href={`/courier/${s.id}`} className="block px-4 py-3 hover:bg-ink-surface/50">
+                  <Link href={`/courier/${s.id}`} className="block px-4 py-2.5 hover:bg-ink-surface/50">
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-sm text-ink-black">{s.courierSheetNo}</span>
-                      <span className="text-xs text-ink-muted">{formatSheetDate(s.sheetDate)}</span>
+                      <span className="text-xs text-ink-muted flex-1 min-w-0 truncate whitespace-nowrap">{formatSheetDate(s.sheetDate)}</span>
+                      <CourierStatusBadge status={s.status} />
                     </div>
-                    <p className="text-sm text-ink-black mt-0.5">{s.customerName}</p>
-                    <p className="text-xs text-ink-muted mt-0.5 font-mono">
+                    <p className="text-sm text-ink-black mt-0.5 truncate">{s.customerName}</p>
+                    <p className="text-xs text-ink-muted mt-0.5 font-mono truncate">
                       {s.invoiceCount} invoice{s.invoiceCount === 1 ? "" : "s"} · waybill {s.waybills.join(", ")}
                       {s.parcels ? ` · ${s.parcels} parcel${s.parcels === 1 ? "" : "s"}` : ""}
                     </p>
-                    <div className="mt-2">
-                      <SheetState s={s} />
-                    </div>
+                    <SheetNotes s={s} />
                   </Link>
                 </li>
               ))}
@@ -336,12 +339,39 @@ export default function CourierPage() {
               total={total}
               onPage={(page) => change({ page })}
               onPageSize={(size) => change({ size })}
+              sizes={PAGE_SIZES}
               disabled={loading}
             />
           </>
         )}
       </div>
     </div>
+  );
+}
+
+/** On a phone: the notes under the sheet, only when there are any. */
+function SheetNotes({ s }: { s: SheetSummary }) {
+  type Note = { text: string; tone: "red" | "amber" | "muted" };
+  const conf = s.confirmation ? CONFIRMATION_NOTE[s.confirmation] : null;
+  const notes = [
+    s.blockCount > 0 && { text: `${s.blockCount} to fix`, tone: "red" },
+    conf && { text: conf.text, tone: conf.tone === "red" ? "red" : conf.tone === "amber" ? "amber" : "muted" },
+    !s.hasEmail && (s.status === "NEEDS_ATTENTION" || s.status === "AWAITING_COLLECTION") && { text: "No email", tone: "amber" },
+  ].filter(Boolean) as Note[];
+  if (notes.length === 0) return null;
+  return (
+    <p className="text-xs mt-0.5">
+      {notes.map((n, i) => (
+        <span
+          key={n.text}
+          className={n.tone === "red" ? "text-ink-red" : n.tone === "muted" ? "text-ink-muted" : ""}
+          style={n.tone === "amber" ? { color: "var(--tone-amber-fg)" } : undefined}
+        >
+          {i > 0 && " · "}
+          {n.text}
+        </span>
+      ))}
+    </p>
   );
 }
 
