@@ -7,6 +7,9 @@ import ScopeSwitcher, { ChooseBranch, ScopeBanner, useScopes } from "@/component
 import LogoMark from "@/components/LogoMark";
 import { LiveSyncProvider } from "@/hooks/useLiveSync";
 
+/** A COMPANY_ADMIN's own pages: they work with no branch chosen. */
+const COMPANY_ADMIN_HOME_PAGES = ["/my-branches", "/usage", "/my-admins"];
+
 const navItems = [
   {
     label: "Dashboard",
@@ -144,6 +147,31 @@ const navItems = [
     ),
   },
   {
+    // COMPANY_ADMIN only: its branches side by side — today and activity.
+    label: "My branches",
+    href: "/my-branches",
+    companyAdminOnly: true,
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="10" width="7" height="11" rx="1" />
+        <rect x="14" y="3" width="7" height="18" rx="1" />
+        <path d="M6 14h1M6 17h1M17 7h1M17 11h1M17 15h1" />
+      </svg>
+    ),
+  },
+  {
+    // COMPANY_ADMIN (its branches) and SUPER_ADMIN (every branch).
+    label: "Usage",
+    href: "/usage",
+    oversight: true,
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 3v18h18" />
+        <path d="M7 15l4-4 3 3 5-6" />
+      </svg>
+    ),
+  },
+  {
     // COMPANY_ADMIN only: the branch admins allocated to it.
     label: "My admins",
     href: "/my-admins",
@@ -191,14 +219,18 @@ export default function AdminLayout({
   const [role, setRole] = useState<string | null>(null);
   const visibleNavItems = navItems.filter(
     (item) =>
-      (!item.superAdminOnly || role === "super_admin") && (!item.companyAdminOnly || role === "company_admin")
+      (!item.superAdminOnly || role === "super_admin") &&
+      (!item.companyAdminOnly || role === "company_admin") &&
+      (!item.oversight || role === "company_admin" || role === "super_admin")
   );
   const scopes = useScopes(role);
   // A COMPANY_ADMIN with no branch chosen has nothing to show on a branch
   // page (the server refuses it every one): it gets the branch picker
   // instead. Its own pages work from anywhere.
   const needsBranch =
-    role === "company_admin" && scopes?.isViewingOtherScope !== true && !pathname.startsWith("/my-admins");
+    role === "company_admin" &&
+    scopes?.isViewingOtherScope !== true &&
+    !COMPANY_ADMIN_HOME_PAGES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 
   const checkSession = useCallback(() => {
     fetch("/api/auth/session")

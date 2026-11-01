@@ -705,7 +705,9 @@ export interface CourierListQuery {
   size?: number;
 }
 
-const COURIER_PAGE_SIZES = [25, 50, 100];
+const COURIER_PAGE_SIZES = [10, 25, 50, 100];
+/** When a request names no size (a tab on an older bundle). */
+const COURIER_DEFAULT_SIZE = 25;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /** A list query from the URL; anything malformed is left out. */
@@ -720,7 +722,7 @@ export function readCourierListQuery(params: URLSearchParams): Required<CourierL
     from: day("from"),
     to: day("to"),
     page: page > 0 ? page : 1,
-    size: COURIER_PAGE_SIZES.includes(size) ? size : COURIER_PAGE_SIZES[0],
+    size: COURIER_PAGE_SIZES.includes(size) ? size : COURIER_DEFAULT_SIZE,
   };
 }
 
@@ -740,7 +742,7 @@ export async function listCourierSheetsPage(
 ): Promise<{ sheets: CourierSheetSummary[]; total: number; page: number; size: number; counts: Record<string, number> }> {
   const db = scopedPrisma(tenantId);
   const q = query.q?.trim() ?? "";
-  const size = query.size ?? COURIER_PAGE_SIZES[0];
+  const size = query.size ?? COURIER_DEFAULT_SIZE;
   const contains = { contains: q, mode: "insensitive" as const };
   const where: Prisma.CourierTripSheetWhereInput = {
     ...((query.from || query.to) && {

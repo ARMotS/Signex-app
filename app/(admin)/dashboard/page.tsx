@@ -4,7 +4,12 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { useLiveSync } from "@/hooks/useLiveSync";
 import Link from "next/link";
 import { DocChip } from "@/components/ui/Chips";
+import Pager from "@/components/ui/Pager";
 import type { CourierOverview } from "@/lib/courier-confirm";
+
+/** Active trip sheets and the email queue: rows per page. */
+const DASHBOARD_PAGE_SIZE = 10;
+const DASHBOARD_PAGE_SIZES = [10, 25, 50] as const;
 
 interface TripStop {
   id: string;
@@ -189,6 +194,11 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>("overview");
   const [expandedSheet, setExpandedSheet] = useState<string | null>(null);
+  // The wallboard's long lists page, ten at a time: a branch with twenty
+  // drivers out was a very long scroll. The poll keeps the page shown.
+  const [sheetsPage, setSheetsPage] = useState(1);
+  const [emailsPage, setEmailsPage] = useState(1);
+  const [listSize, setListSize] = useState(DASHBOARD_PAGE_SIZE);
   const [sending, setSending] = useState<Record<string, "sending" | "sent" | "failed">>({});
   const [sendingAll, setSendingAll] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -261,6 +271,14 @@ export default function DashboardPage() {
   const emails = data?.emails;
   const queue = useMemo(() => emails?.queue ?? [], [emails]);
   const sendableQueue = useMemo(() => queue.filter((q) => q.sendable), [queue]);
+  // A page left past the end (sheets completed, emails sent): the last page.
+  const pageOf = <T,>(rows: T[], page: number) => {
+    const last = Math.max(1, Math.ceil(rows.length / listSize));
+    const p = Math.min(page, last);
+    return { p, rows: rows.slice((p - 1) * listSize, p * listSize) };
+  };
+  const sheetsShown = pageOf(data?.tripSheets ?? [], sheetsPage);
+  const queueShown = pageOf(queue, emailsPage);
 
   /** Dispatcher send. The automatic one already tried; this is the follow-up. */
   const sendOne = useCallback(
@@ -714,7 +732,7 @@ export default function DashboardPage() {
                 </div>
               ) : (
                 <div className="space-y-3 stagger-children">
-                  {data.tripSheets.map((sheet) => {
+                  {sheetsShown.rows.map((sheet) => {
                     const signed = sheet.stops.filter((s) => s.status === "SIGNED").length;
                     const total = sheet.stops.length;
                     const pct = pctOf(signed, total);
@@ -822,6 +840,19 @@ export default function DashboardPage() {
                       </div>
                     );
                   })}
+                  <div className="bg-ink-card border border-ink-border rounded overflow-hidden empty:hidden">
+                    <Pager
+                      page={sheetsShown.p}
+                      pageSize={listSize}
+                      total={data.tripSheets.length}
+                      onPage={setSheetsPage}
+                      onPageSize={(n) => {
+                        setListSize(n);
+                        setSheetsPage(1);
+                      }}
+                      sizes={DASHBOARD_PAGE_SIZES}
+                    />
+                  </div>
                 </div>
               )}
             </div>
@@ -891,16 +922,29 @@ export default function DashboardPage() {
                     hint="Every signed delivery has had its confirmation sent"
                   />
                 ) : (
-                  <div className="divide-y divide-ink-border">
-                    {queue.map((item) => (
-                      <EmailQueueRow
-                        key={item.stopId}
-                        item={item}
-                        state={sending[item.stopId]}
-                        onSend={() => handleSendOne(item)}
-                      />
-                    ))}
-                  </div>
+                  <>
+                    <div className="divide-y divide-ink-border">
+                      {queueShown.rows.map((item) => (
+                        <EmailQueueRow
+                          key={item.stopId}
+                          item={item}
+                          state={sending[item.stopId]}
+                          onSend={() => handleSendOne(item)}
+                        />
+                      ))}
+                    </div>
+                    <Pager
+                      page={queueShown.p}
+                      pageSize={listSize}
+                      total={queue.length}
+                      onPage={setEmailsPage}
+                      onPageSize={(n) => {
+                        setListSize(n);
+                        setEmailsPage(1);
+                      }}
+                      sizes={DASHBOARD_PAGE_SIZES}
+                    />
+                  </>
                 )}
               </div>
             </div>

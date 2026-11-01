@@ -43,12 +43,17 @@ const ADMIN_ROUTES = [
   "/users",
   "/companies",
   "/my-admins",
+  "/my-branches",
+  "/usage",
 ];
 
 const SUPER_ADMIN_ONLY_ROUTES = ["/users", "/companies"];
 
-/** A COMPANY_ADMIN's own pages: the branch admins allocated to it. */
-const COMPANY_ADMIN_ONLY_ROUTES = ["/my-admins"];
+/** A COMPANY_ADMIN's own pages: its allocated admins, and its branches side by side. */
+const COMPANY_ADMIN_ONLY_ROUTES = ["/my-admins", "/my-branches"];
+
+/** Usage across branches: a company admin's branches, or every branch for the super admin. */
+const OVERSIGHT_ROUTES = ["/usage"];
 
 const DRIVER_ROUTES = ["/run", "/sign", "/collect"];
 
@@ -225,6 +230,10 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(home);
   }
 
+  if (matchesRoute(pathname, OVERSIGHT_ROUTES) && role !== "company_admin" && role !== "super_admin") {
+    return NextResponse.redirect(home);
+  }
+
   return NextResponse.next();
 }
 
@@ -252,6 +261,8 @@ export const config = {
     "/users/:path*",
     "/companies/:path*",
     "/my-admins/:path*",
+    "/my-branches/:path*",
+    "/usage/:path*",
     "/run/:path*",
     "/sign/:path*",
     "/collect/:path*",

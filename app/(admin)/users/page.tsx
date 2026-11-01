@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import PasswordInput from "@/components/PasswordInput";
+import Pager from "@/components/ui/Pager";
 import UsernameField, { type UsernameStatus } from "@/components/UsernameField";
 import { validatePassword, PASSWORD_HINT } from "@/lib/credentials";
 
@@ -33,6 +34,9 @@ interface User {
 
 export default function UsersPage() {
   const [users, setUsers] = useState<User[]>([]);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const shownPage = Math.min(page, Math.max(1, Math.ceil(users.length / pageSize)));
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
@@ -405,7 +409,7 @@ export default function UsersPage() {
               </tr>
             </thead>
             <tbody>
-              {users.map((user) => (
+              {users.slice((shownPage - 1) * pageSize, shownPage * pageSize).map((user) => (
                 <tr key={user.id} className={`border-b border-ink-border last:border-0 hover:bg-ink-surface/50 ${user.active ? "" : "opacity-60"}`}>
                   <td className="px-4 py-3 text-ink-black">
                     {user.name || "—"}
@@ -486,6 +490,16 @@ export default function UsersPage() {
               ))}
             </tbody>
           </table>
+          <Pager
+            page={shownPage}
+            pageSize={pageSize}
+            total={users.length}
+            onPage={setPage}
+            onPageSize={(n) => {
+              setPageSize(n);
+              setPage(1);
+            }}
+          />
         </div>
       )}
 

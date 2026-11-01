@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { Prisma } from "@prisma/client";
 import { getAllTripSheets, getCompletedTripSheets } from "@/lib/trip-data";
 import { dayWindow, parseTzOffset } from "@/lib/day-window";
 import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { courierOverview } from "@/lib/courier-confirm";
+import { UNTRIED_QUEUE_DAYS, outstandingEmailWhere } from "@/lib/email-queue";
 
 /**
  * Everything the dispatcher's wallboard shows, in one round trip.
@@ -18,20 +18,6 @@ import { courierOverview } from "@/lib/courier-confirm";
  *
  * `?tzOffset=` puts the day boundary on the viewer's clock — see lib/day-window.
  */
-/**
- * How far back an untried confirmation is still the dispatcher's problem.
- *
- * Confirmations only became automatic when this feature shipped, so every
- * delivery signed before that has emailStatus NOT_SENT — nobody ever tried,
- * because there was nothing to try. Without a bound the queue opens on day one
- * showing the entire history of the workspace, which is not a work list; it is
- * noise that buries the two deliveries that actually failed this morning.
- *
- * FAILED is deliberately NOT bounded (see the query below): the system tried
- * and could not deliver, and that must never quietly age out of view.
- */
-const UNTRIED_QUEUE_DAYS = 7;
-
 export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireOffice(ctx);
@@ -39,34 +25,9 @@ export const GET = withAuth(async (request: NextRequest) => {
   const { searchParams } = new URL(request.url);
   const day = dayWindow(new Date(), parseTzOffset(searchParams.get("tzOffset")));
 
-  const untriedSince = new Date(Date.now() - UNTRIED_QUEUE_DAYS * 24 * 60 * 60 * 1000);
-
-  /**
-   * What counts as outstanding. SENDING is excluded — an attempt in flight is
-   * not yet a problem, and offering a button for it only invites a duplicate.
-   */
-  const outstanding: Prisma.StopWhereInput = {
-    status: "SIGNED",
-    OR: [
-      // Tried and rejected. Always actionable, however old.
-      { emailStatus: "FAILED" },
-      // Never tried, or no address on file — only while it is still this
-      // week's work.
-      {
-        emailStatus: { in: ["NOT_SENT", "NO_EMAIL"] },
-        signedAt: { gte: untriedSince },
-      },
-      // Rescued: the admin finally added the customer this delivery was waiting
-      // on. Exempt from the age bound on purpose — the delivery only became
-      // sendable just now, and the whole point of repairing the link is that
-      // someone gets to act on it. Bounding by signedAt would silently discard
-      // exactly the backlog the repair exists to recover.
-      {
-        emailStatus: { in: ["NOT_SENT", "NO_EMAIL"] },
-        emailRelinkedAt: { not: null },
-      },
-    ],
-  };
+  // The dispatcher's email work — one rule with the company admin's branch
+  // cards (lib/email-queue.ts).
+  const outstanding = outstandingEmailWhere();
 
   const [
     tripSheets,

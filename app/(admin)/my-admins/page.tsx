@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import UsernameField, { type UsernameStatus } from "@/components/UsernameField";
 import { StatusBadge } from "@/components/ui/Chips";
 import { validatePassword, PASSWORD_HINT } from "@/lib/credentials";
+import { relativeTime } from "@/lib/relative-time";
 
 /**
  * COMPANY_ADMIN: the branch admins allocated to it, with their usernames and
@@ -25,18 +26,7 @@ const input =
   "w-full px-4 py-2.5 bg-ink-surface border border-ink-border rounded font-mono text-sm text-ink-black placeholder:text-ink-muted-light focus:outline-none focus:border-ink-green focus:ring-1 focus:ring-ink-green/20 transition-colors";
 const label = "block text-xs font-mono text-ink-muted uppercase tracking-wide mb-1.5";
 
-/** "4 min ago", "Yesterday 14:05", "12 Oct 2026" — read on the viewer's clock. */
-function lastActive(iso: string | null): string {
-  if (!iso) return "Never signed in";
-  const at = new Date(iso);
-  const mins = Math.floor((Date.now() - at.getTime()) / 60_000);
-  if (mins < 2) return "Just now";
-  if (mins < 60) return `${mins} min ago`;
-  if (mins < 24 * 60) return `${Math.floor(mins / 60)} h ago`;
-  const time = at.toLocaleTimeString("en-ZA", { hour: "2-digit", minute: "2-digit" });
-  if (mins < 48 * 60) return `Yesterday ${time}`;
-  return at.toLocaleDateString("en-ZA", { day: "numeric", month: "short", year: "numeric" });
-}
+const lastActive = (iso: string | null) => relativeTime(iso, "Never signed in");
 
 export default function MyAdminsPage() {
   const [admins, setAdmins] = useState<MyAdmin[] | null>(null);
