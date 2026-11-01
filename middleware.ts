@@ -42,9 +42,13 @@ const ADMIN_ROUTES = [
   "/backups",
   "/users",
   "/companies",
+  "/my-admins",
 ];
 
 const SUPER_ADMIN_ONLY_ROUTES = ["/users", "/companies"];
+
+/** A COMPANY_ADMIN's own pages: the branch admins allocated to it. */
+const COMPANY_ADMIN_ONLY_ROUTES = ["/my-admins"];
 
 const DRIVER_ROUTES = ["/run", "/sign", "/collect"];
 
@@ -217,6 +221,10 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(home);
   }
 
+  if (matchesRoute(pathname, COMPANY_ADMIN_ONLY_ROUTES) && role !== "company_admin") {
+    return NextResponse.redirect(home);
+  }
+
   return NextResponse.next();
 }
 
@@ -243,6 +251,7 @@ export const config = {
     "/backups/:path*",
     "/users/:path*",
     "/companies/:path*",
+    "/my-admins/:path*",
     "/run/:path*",
     "/sign/:path*",
     "/collect/:path*",

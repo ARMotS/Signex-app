@@ -55,11 +55,16 @@ describe("stamp wording", () => {
   });
 
   it("words the three lines as the brief does", () => {
-    expect(LINES).toEqual({
+    expect(LINES).toMatchObject({
       dispatched: "Dispatched by Thandi M from Signex Polokwane on 22/10/2026, 14:05",
       collected: "Collected by Sipho K from The Courier Guy on 22/10/2026, 14:05",
       footer: "Courier trip sheet 200189 · Waybill W500",
     });
+  });
+
+  it("marks the sheet and waybill numbers bold, and only them", () => {
+    expect(LINES.footerParts.filter((p) => p.bold).map((p) => p.text)).toEqual(["200189", "W500"]);
+    expect(LINES.footerParts.map((p) => p.text).join("")).toBe(LINES.footer);
   });
 
   it("never prints a blank where a name belongs", () => {
@@ -154,6 +159,35 @@ describe("stampCourierHandover", () => {
     const original = await invoice({ footerTop: 400 });
     const { appended } = await stampCourierHandover(original, { lines: LINES, signaturePng, area: DEFAULT_STAMP_AREA });
     expect(appended).toBe(false);
+  });
+
+  it("prints the sheet and waybill numbers as runs of their own, inside the stamp", async () => {
+    const { pdf } = await stampCourierHandover(await invoice(), { lines: LINES, signaturePng, area: DEFAULT_STAMP_AREA });
+    const items = (await extractPageItems(pdf))[0];
+    const rect = areaRect(DEFAULT_STAMP_AREA, 595, HEIGHT);
+    for (const n of ["200189", "W500"]) {
+      const run = items.find((i) => i.str === n);
+      expect(run, n).toBeDefined();
+      expect(run!.x).toBeGreaterThanOrEqual(rect.x);
+      expect(run!.x + run!.width).toBeLessThanOrEqual(rect.x + rect.width);
+    }
+  });
+
+  it("cuts a waybill list too long for the stamp rather than running off it", async () => {
+    const lines = courierStampLines({
+      dispatcherName: "A",
+      dispatchCompany: "B",
+      courierDriverName: "C",
+      courierCompany: "D",
+      at: new Date("2026-10-22T12:05:00Z"),
+      courierSheetNo: "200189",
+      waybillNo: Array.from({ length: 40 }, (_, i) => `WB${1000 + i}`).join(", "),
+    });
+    const { pdf } = await stampCourierHandover(await invoice(), { lines, signaturePng, area: DEFAULT_STAMP_AREA });
+    const rect = areaRect(DEFAULT_STAMP_AREA, 595, HEIGHT);
+    for (const i of (await extractPageItems(pdf))[0].filter((i) => i.y > HEIGHT - rect.y - rect.height)) {
+      expect(i.x + i.width).toBeLessThanOrEqual(rect.x + rect.width + 0.5);
+    }
   });
 
   it("a name Helvetica cannot draw does not fail the stamp", async () => {

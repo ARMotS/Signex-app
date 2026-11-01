@@ -110,6 +110,10 @@ export async function POST(request: NextRequest) {
     );
 
     const { account } = result;
+    // A COMPANY_ADMIN's own scope holds no data: start it in a branch it
+    // oversees. getSessionContext() re-checks the allocation every request.
+    const startBranch =
+      account.role === "company_admin" ? await firstAllocatedBranch(account.id) : null;
     const started = await createSession(
       {
         id: account.id,
@@ -120,10 +124,7 @@ export async function POST(request: NextRequest) {
       },
       {
         evictOldest: body?.confirmEvict === true,
-        // A COMPANY_ADMIN's own scope holds no data: start it in a branch it
-        // oversees. getSessionContext() re-checks the allocation every request.
-        viewTenantId:
-          account.role === "company_admin" ? await firstAllocatedBranch(account.id) : null,
+        viewTenantId: startBranch,
       }
     );
 
@@ -163,7 +164,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       role: account.role,
-      redirectTo: homePathForRole(account.role),
+      // With no branch allocated yet, a company admin's dashboard would be
+      // empty-handed; its own page says why.
+      redirectTo:
+        account.role === "company_admin" && !startBranch ? "/my-admins" : homePathForRole(account.role),
       account: { id: account.id, name: account.name },
     });
   } catch (error) {

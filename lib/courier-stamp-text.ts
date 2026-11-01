@@ -42,16 +42,25 @@ export interface StampLines {
   dispatched: string;
   collected: string;
   footer: string;
+  /** The footer in runs: the sheet and waybill numbers print bold, to be read at a glance. */
+  footerParts: { text: string; bold: boolean }[];
 }
 
 /** The three lines of the stamp, as the brief words them. */
 export function courierStampLines(s: StampInput): StampLines {
   const when = formatStampTime(s.at);
   const name = (v: string) => v.trim() || "—";
+  const footerParts = [
+    { text: "Courier trip sheet ", bold: false },
+    { text: s.courierSheetNo, bold: true },
+    { text: " · Waybill ", bold: false },
+    { text: s.waybillNo || "—", bold: true },
+  ];
   return {
     dispatched: `Dispatched by ${name(s.dispatcherName)} from ${name(s.dispatchCompany)} on ${when}`,
     collected: `Collected by ${name(s.courierDriverName)} from ${name(s.courierCompany)} on ${when}`,
-    footer: `Courier trip sheet ${s.courierSheetNo} · Waybill ${s.waybillNo || "—"}`,
+    footer: footerParts.map((p) => p.text).join(""),
+    footerParts,
   };
 }
 

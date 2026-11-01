@@ -21,6 +21,7 @@ import path from "path";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { readConfig } from "./config";
 import { wrapText } from "./collections";
+import { drawnWidth } from "./pdf-measure";
 import {
   getOneDriveInvoiceSource,
   listOneDriveInvoiceFiles,
@@ -261,7 +262,8 @@ export async function saveSignedInvoiceDetailed(
 /**
  * Embed a signature image (PNG) onto a PDF page at the configured position.
  * Reads position config from the database (falls back to bottom-right of last page).
- * Adds the signature image, a label ("Customer Signature"), and a timestamp.
+ * Draws a box the size Settings shows and fits everything inside it: a label
+ * ("Customer Signature"), the signature, and who signed when.
  * Returns the modified PDF as a Buffer.
  */
 export async function embedSignatureOnPdf(
@@ -285,55 +287,17 @@ export async function embedSignatureOnPdf(
   // Embed the PNG signature image
   const signatureImage = await pdfDoc.embedPng(signatureImageBytes);
 
-  // Get page dimensions
   const { width: pageWidth, height: pageHeight } = targetPage.getSize();
-
-  // Scale signature to fit — use configured width percentage
-  const maxWidth = (pos.widthPercent / 100) * pageWidth;
-  const maxHeight = maxWidth * 0.4; // aspect ratio constraint
-  const imgDims = signatureImage.scale(1);
-  const scale = Math.min(maxWidth / imgDims.width, maxHeight / imgDims.height, 1);
-  const sigWidth = imgDims.width * scale;
-  const sigHeight = imgDims.height * scale;
-
-  // Convert percentage position to absolute PDF coordinates
-  const xPos = (pos.xPercent / 100) * pageWidth;
-  const yPos = (pos.yPercent / 100) * pageHeight;
+  const box = signatureBoxRect(pos, pageWidth, pageHeight);
 
   // A partial delivery gets one more line in the box, pointing at the
   // exceptions page — the customer's signature is for what was accepted.
   const partial = rejectedLines.length > 0;
 
-  // Draw a light background box for the signature area
-  targetPage.drawRectangle({
-    x: xPos - 15,
-    y: yPos - 15,
-    width: sigWidth + 30,
-    height: sigHeight + (partial ? 66 : 55),
-    color: rgb(0.97, 0.97, 0.95),
-    borderColor: rgb(0.85, 0.83, 0.80),
-    borderWidth: 0.5,
-  });
-
-  // Draw the signature image
-  targetPage.drawImage(signatureImage, {
-    x: xPos,
-    y: yPos,
-    width: sigWidth,
-    height: sigHeight,
-  });
-
-  // Draw a baseline under the signature
-  targetPage.drawLine({
-    start: { x: xPos - 10, y: yPos - 2 },
-    end: { x: xPos + sigWidth + 10, y: yPos - 2 },
-    thickness: 0.5,
-    color: rgb(0.7, 0.7, 0.7),
-  });
-
-  // Add label and timestamp text
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const fontSize = 7;
+  const [font, bold] = await Promise.all([
+    pdfDoc.embedFont(StandardFonts.Helvetica),
+    pdfDoc.embedFont(StandardFonts.HelveticaBold),
+  ]);
   const now = new Date();
   const timestamp = now.toLocaleString("en-ZA", {
     day: "2-digit",
@@ -341,14 +305,6 @@ export async function embedSignatureOnPdf(
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  });
-
-  targetPage.drawText("CUSTOMER SIGNATURE", {
-    x: xPos - 10,
-    y: yPos + sigHeight + 20,
-    size: fontSize + 1,
-    font,
-    color: rgb(0.4, 0.4, 0.4),
   });
 
   // The name is typed by the customer, and the standard Helvetica font can
@@ -363,25 +319,33 @@ export async function embedSignatureOnPdf(
     ? `Signed by ${stampName} · ${timestamp}`
     : `Signed · ${timestamp}`;
 
-  targetPage.drawText(signedText, {
-    x: xPos - 10,
-    y: yPos + sigHeight + 8,
-    size: fontSize,
-    font,
-    color: rgb(0.6, 0.6, 0.6),
+  const layout = layoutSignatureBox(
+    box,
+    {
+      label: "CUSTOMER SIGNATURE",
+      notice: partial
+        ? `PARTIAL DELIVERY · ${rejectedLines.length} line${rejectedLines.length !== 1 ? "s" : ""} removed — see last page`
+        : null,
+      signed: signedText,
+    },
+    { font, bold },
+    { width: signatureImage.width, height: signatureImage.height }
+  );
+
+  targetPage.drawRectangle({
+    ...box,
+    color: rgb(0.97, 0.97, 0.95),
+    borderColor: rgb(0.85, 0.83, 0.8),
+    borderWidth: 0.5,
   });
+  targetPage.drawImage(signatureImage, layout.image);
+  targetPage.drawLine({ ...layout.rule, thickness: 0.5, color: rgb(0.7, 0.7, 0.7) });
+  const tone = { label: rgb(0.4, 0.4, 0.4), notice: rgb(0.75, 0.15, 0.12), signed: rgb(0.45, 0.45, 0.45) };
+  for (const t of layout.texts) {
+    targetPage.drawText(t.text, { x: t.x, y: t.y, size: t.size, font: t.bold ? bold : font, color: tone[t.role] });
+  }
 
   if (partial) {
-    targetPage.drawText(
-      `PARTIAL DELIVERY · ${rejectedLines.length} line${rejectedLines.length !== 1 ? "s" : ""} removed — see last page`,
-      {
-        x: xPos - 10,
-        y: yPos + sigHeight + 32,
-        size: fontSize,
-        font,
-        color: rgb(0.75, 0.15, 0.12),
-      }
-    );
     await appendDeliveryExceptionsPage(pdfDoc, rejectedLines, timestamp, stampName);
   }
 
@@ -390,6 +354,149 @@ export async function embedSignatureOnPdf(
 
   const modifiedPdfBytes = await pdfDoc.save();
   return Buffer.from(modifiedPdfBytes);
+}
+
+// ─── The signature box ────────────────────────────────────────────────────
+
+export interface BoxRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The signature box in points, exactly as Settings previews it: left edge at
+ * x%, bottom edge at y%, width w% of the page width, height 0.45·w% of the
+ * page height. Pulled back onto the page if the configured corner would push
+ * it off (the preview lets it overhang).
+ */
+export function signatureBoxRect(
+  pos: { xPercent: number; yPercent: number; widthPercent: number },
+  pageWidth: number,
+  pageHeight: number
+): BoxRect {
+  const width = Math.min(pageWidth, (pos.widthPercent / 100) * pageWidth);
+  const height = Math.min(pageHeight, ((pos.widthPercent * 0.45) / 100) * pageHeight);
+  const x = Math.max(0, Math.min((pos.xPercent / 100) * pageWidth, pageWidth - width));
+  const y = Math.max(0, Math.min((pos.yPercent / 100) * pageHeight, pageHeight - height));
+  return { x, y, width, height };
+}
+
+interface Measures {
+  widthOfTextAtSize: (text: string, size: number) => number;
+}
+
+/** Word-wrap to a width, breaking a word that is wider than the line by itself. */
+function wrapToWidth(text: string, font: Measures, size: number, maxWidth: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (drawnWidth(font, candidate, size) <= maxWidth) {
+      line = candidate;
+      continue;
+    }
+    if (line) lines.push(line);
+    line = word;
+    while (drawnWidth(font, line, size) > maxWidth && line.length > 1) {
+      let cut = line.length - 1;
+      while (cut > 1 && drawnWidth(font, line.slice(0, cut), size) > maxWidth) cut--;
+      lines.push(line.slice(0, cut));
+      line = line.slice(cut);
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+export interface SignatureBoxLayout {
+  texts: { role: "label" | "notice" | "signed"; text: string; x: number; y: number; size: number; bold: boolean }[];
+  image: BoxRect;
+  rule: { start: { x: number; y: number }; end: { x: number; y: number } };
+}
+
+const LINE = 1.2; // line height, in font sizes
+const MIN_TEXT = 4;
+
+/**
+ * Lay the box out so everything sits inside it with even padding: the label
+ * (and a partial-delivery notice) at the top, the "Signed by" line at the
+ * bottom, both wrapped to the box's width, and the signature scaled into what
+ * is left, centred on its rule. Text shrinks before the signature is squeezed
+ * below 40% of the box; in a box too small even for that, the last lines that
+ * do not fit are cut with an ellipsis rather than drawn outside it.
+ */
+export function layoutSignatureBox(
+  box: BoxRect,
+  text: { label: string; notice: string | null; signed: string },
+  fonts: { font: Measures; bold: Measures },
+  image: { width: number; height: number }
+): SignatureBoxLayout {
+  const pad = Math.max(3, Math.min(8, Math.min(box.width, box.height) * 0.07));
+  const gap = pad / 2;
+  const innerW = box.width - pad * 2;
+  const innerH = box.height - pad * 2;
+
+  const measure = (size: number) => {
+    const labelSize = size + 0.5;
+    const label = wrapToWidth(text.label, fonts.bold, labelSize, innerW);
+    const notice = text.notice ? wrapToWidth(text.notice, fonts.font, size, innerW) : [];
+    const signed = wrapToWidth(text.signed, fonts.font, size, innerW);
+    const top = label.length * labelSize * LINE + notice.length * size * LINE;
+    const bottom = signed.length * size * LINE;
+    return { size, labelSize, label, notice, signed, top, bottom, sig: innerH - top - bottom - gap * 2 };
+  };
+
+  let m = measure(Math.max(MIN_TEXT, Math.min(8, box.height / 9)));
+  while (m.sig < innerH * 0.4 && m.size > MIN_TEXT) m = measure(Math.max(MIN_TEXT, m.size - 0.25));
+
+  // Last resort for a tiny box: keep the signature at least a fifth of it,
+  // cutting the signed line first, then the notice.
+  const floor = innerH * 0.2;
+  const cut = (lines: string[]) => {
+    const kept = lines.slice(0, -1);
+    if (kept.length) kept[kept.length - 1] = `${kept[kept.length - 1].replace(/.{1,2}$/, "")}…`;
+    return kept;
+  };
+  while (m.sig < floor && (m.signed.length > 1 || m.notice.length > 1)) {
+    if (m.signed.length > 1) m.signed = cut(m.signed);
+    else m.notice = cut(m.notice);
+    m.top = m.label.length * m.labelSize * LINE + m.notice.length * m.size * LINE;
+    m.bottom = m.signed.length * m.size * LINE;
+    m.sig = innerH - m.top - m.bottom - gap * 2;
+  }
+
+  const texts: SignatureBoxLayout["texts"] = [];
+  const left = box.x + pad;
+  // Baselines: the cap height sits just under the block's top, descenders
+  // stay above its bottom.
+  let top = box.y + box.height - pad;
+  for (const line of m.label) {
+    texts.push({ role: "label", text: line, x: left, y: top - m.labelSize * 0.95, size: m.labelSize, bold: true });
+    top -= m.labelSize * LINE;
+  }
+  for (const line of m.notice) {
+    texts.push({ role: "notice", text: line, x: left, y: top - m.size * 0.95, size: m.size, bold: false });
+    top -= m.size * LINE;
+  }
+  let bottomTop = box.y + pad + m.bottom;
+  for (const line of m.signed) {
+    texts.push({ role: "signed", text: line, x: left, y: bottomTop - m.size * 0.95, size: m.size, bold: false });
+    bottomTop -= m.size * LINE;
+  }
+
+  const ruleY = box.y + pad + m.bottom + gap;
+  const areaH = Math.max(0, top - gap - (ruleY + 1));
+  const scale = Math.min(innerW / image.width, areaH / image.height);
+  const w = image.width * scale;
+  const h = image.height * scale;
+
+  return {
+    texts,
+    image: { x: box.x + (box.width - w) / 2, y: ruleY + 1, width: w, height: h },
+    rule: { start: { x: left, y: ruleY }, end: { x: box.x + box.width - pad, y: ruleY } },
+  };
 }
 
 /** One refused line, as printed on the exceptions page and in the email. */
