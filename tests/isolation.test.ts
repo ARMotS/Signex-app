@@ -1152,7 +1152,9 @@ suite("cross-ADMIN isolation", () => {
 
         const sheet = await db().courierTripSheet.findFirstOrThrow({ where: { tenantId: f.a.tenantId, courierSheetNo: "600001" } });
         expect(sheet.sourceFileId).toBe("inbox-good");
-        expect(sheet.sourceFilePath).toBe("OneDrive: /Courier-A/2026/10/CTS600001_ACME-TRADING.xlsx");
+        // Filed under the sheet's own month (which was October only while it was October).
+        const month = sheet.sheetDate.toISOString().slice(0, 7).replace("-", "/");
+        expect(sheet.sourceFilePath).toBe(`OneDrive: /Courier-A/${month}/CTS600001_ACME-TRADING.xlsx`);
         expect(sheet.importedByName).toBe("Courier Trip Sheets folder");
         expect(sheet.sourceFileBytes).toBeNull();
 
@@ -1389,7 +1391,9 @@ suite("cross-ADMIN isolation", () => {
         expect(uploads.map((u) => u.url.replace(/^.*\/items\//, ""))).toEqual(["signed-A:/IV-7105.pdf:/content"]);
         expect([...new Set(graphCalls.map((c) => c.token).filter(Boolean))]).toEqual(["access-token-A"]);
         const { extractPageItems } = await import("@/lib/invoice-header");
-        const stamped = (await extractPageItems(uploads[0].body)).flat().map((i) => i.str).join(" ");
+        // The footer prints its numbers as runs of their own (bold): read the
+        // page as one line of text, whitespace collapsed.
+        const stamped = (await extractPageItems(uploads[0].body)).flat().map((i) => i.str).join(" ").replace(/\s+/g, " ");
         expect(stamped).toContain("Collected by Sipho K from The Courier Guy");
         expect(stamped).toContain("Courier trip sheet 710005");
 
@@ -6331,7 +6335,8 @@ suite("cross-ADMIN isolation", () => {
       const sync = await import("@/app/api/sync/route");
       const dashboard = await import("@/app/api/dashboard/route");
       expect((await drivers.GET(req("/api/drivers"))).status).toBe(403);
-      expect((await sync.GET(req("/api/sync"))).status).toBe(403);
+      // The live-sync poll answers (it carries the session check), with no data.
+      expect(await (await sync.GET(req("/api/sync"))).json()).toEqual({ cursor: "no-branch", attention: 0 });
       expect((await dashboard.GET(req("/api/dashboard"))).status).toBe(403);
     });
 
@@ -6618,6 +6623,266 @@ suite("cross-ADMIN isolation", () => {
       expect(await db().admin.findUnique({ where: { id: lead.id } })).toBeNull();
       expect(await db().companyAdminAllocation.count({ where: { companyAdminId: lead.id } })).toBe(0);
       expect(await db().tenant.findUnique({ where: { id: lead.tenantId } })).toMatchObject({ kind: "COMPANY", companyId });
+    });
+  });
+  // ── A COMPANY_ADMIN's own page: its allocated branch admins ──────────
+  // Self-contained: Company M with branches P (allocated) and Q (same
+  // company, not allocated), its lead and a second company admin.
+  describe("a company admin's own admins", () => {
+    let companyM: string;
+    let homeM: string;
+    let lead: { id: string; name: string; homeTenantId: string };
+    let second: string;
+    let p: { tenantId: string; adminId: string };
+    let q: { tenantId: string; adminId: string };
+
+    const branch = async (name: string, username: string) => {
+      const tenant = await db().tenant.create({
+        data: { name, slug: `${username.replace(/\./g, "-")}-scope`, kind: "BRANCH", companyId: companyM },
+      });
+      const admin = await db().admin.create({
+        data: {
+          name: `${name} Office`,
+          email: `${username}@company-m.test`,
+          passwordHash: "unused",
+          tenantId: tenant.id,
+          login: { create: { username } },
+        },
+      });
+      await db().user.create({ data: { email: admin.email, name: admin.name, role: "ADMIN", tenantId: tenant.id } });
+      return { tenantId: tenant.id, adminId: admin.id };
+    };
+    const companyAdmin = async (name: string, username: string) => {
+      const admin = await db().admin.create({
+        data: {
+          name,
+          email: `${username}@company-m.test`,
+          passwordHash: "unused",
+          tenantId: homeM,
+          companyId: companyM,
+          login: { create: { username } },
+        },
+      });
+      await db().user.create({ data: { email: admin.email, name, role: "COMPANY_ADMIN", tenantId: homeM } });
+      return admin.id;
+    };
+    const allocate = (adminId: string, branchTenantId: string, companyAdminId = lead.id) =>
+      db().companyAdminAllocation.create({
+        data: { companyId: companyM, companyAdminId, adminId, branchTenantId },
+      });
+
+    const list = async (viewing: string | null = null) => {
+      const { GET } = await import("@/app/api/company/admins/route");
+      useSession(companyAdminSession(lead, viewing));
+      const res = await GET(req("/api/company/admins"));
+      return { status: res.status, body: await res.json() };
+    };
+    const put = async (id: string, body: Record<string, unknown>, viewing: string | null = null) => {
+      const { PUT } = await import("@/app/api/company/admins/[id]/route");
+      useSession(companyAdminSession(lead, viewing));
+      const res = await PUT(req(`/api/company/admins/${id}`, { method: "PUT", body }), params({ id }));
+      return { status: res.status, body: await res.json() };
+    };
+    const credentials = async (adminId: string) => {
+      const row = await db().admin.findUniqueOrThrow({
+        where: { id: adminId },
+        select: { passwordHash: true, login: { select: { username: true } } },
+      });
+      return { passwordHash: row.passwordHash, username: row.login?.username ?? null };
+    };
+
+    beforeAll(async () => {
+      companyM = (await db().company.create({ data: { name: "Company M" } })).id;
+      homeM = (
+        await db().tenant.create({ data: { name: "Company M", slug: "company-m-home", kind: "COMPANY", companyId: companyM } })
+      ).id;
+      lead = { id: await companyAdmin("Company M Lead", "company.m.lead"), name: "Company M Lead", homeTenantId: homeM };
+      second = await companyAdmin("Company M Second", "company.m.second");
+      p = await branch("Branch P", "branch.p");
+      q = await branch("Branch Q", "branch.q");
+      await allocate(p.adminId, p.tenantId);
+      // The second company admin oversees Q: allocated, but not to the lead.
+      await allocate(q.adminId, q.tenantId, second);
+    });
+
+    it("is the COMPANY_ADMIN's alone", async () => {
+      const routes = await import("@/app/api/company/admins/route");
+      const one = await import("@/app/api/company/admins/[id]/route");
+      for (const session of [adminSession(f.a), driverSession(f.a), superAdminSession(f)]) {
+        useSession(session);
+        expect((await routes.GET(req("/api/company/admins"))).status).toBe(403);
+        const res = await one.PUT(
+          req(`/api/company/admins/${p.adminId}`, { method: "PUT", body: { username: "hijack.p" } }),
+          params({ id: p.adminId })
+        );
+        expect(res.status).toBe(403);
+      }
+      expect((await credentials(p.adminId)).username).toBe("branch.p");
+    });
+
+    it("lists exactly its allocated admins, from its home scope or a branch", async () => {
+      for (const viewing of [null, p.tenantId]) {
+        const { status, body } = await list(viewing);
+        expect(status).toBe(200);
+        expect(body.admins).toEqual([
+          {
+            id: p.adminId,
+            name: "Branch P Office",
+            username: "branch.p",
+            branchTenantId: p.tenantId,
+            branch: "Branch P",
+            active: true,
+            lastActiveAt: null,
+          },
+        ]);
+      }
+    });
+
+    it("never lists the SUPER_ADMIN, another company's admins, an unallocated admin or another company admin", async () => {
+      const raw = JSON.stringify((await list()).body);
+      for (const hidden of [
+        f.superAdmin.id,
+        f.superAdmin.email,
+        f.a.admin.id,
+        f.b.admin.id,
+        f.a.driver.id,
+        q.adminId,
+        second,
+        lead.id,
+      ]) {
+        expect(raw).not.toContain(hidden);
+      }
+    });
+
+    it("shows when an admin was last active, from its sessions", async () => {
+      const { startSession } = await import("@/lib/session");
+      const started = await startSession({ id: p.adminId, role: "admin" });
+      expect(started.ok).toBe(true);
+      const seen = new Date("2026-10-30T08:15:00Z");
+      await db().userSession.updateMany({ where: { adminId: p.adminId }, data: { lastSeenAt: seen } });
+      expect(new Date((await list()).body.admins[0].lastActiveAt).getTime()).toBe(seen.getTime());
+    });
+
+    it("renames an allocated admin, audited as the COMPANY_ADMIN in the branch's log", async () => {
+      const res = await put(p.adminId, { username: "  Branch.P.Renamed " });
+      expect(res.status).toBe(200);
+      expect((await credentials(p.adminId)).username).toBe("branch.p.renamed");
+      expect(
+        await db().auditLog.findFirst({
+          where: { action: "USERNAME_CHANGE", entityId: p.adminId },
+          orderBy: { createdAt: "desc" },
+        })
+      ).toMatchObject({
+        actorId: lead.id,
+        actorRole: "COMPANY_ADMIN",
+        tenantId: p.tenantId,
+        metadata: { from: "branch.p", to: "branch.p.renamed" },
+      });
+    });
+
+    it("refuses a username another account holds, in any scope or role", async () => {
+      for (const taken of [CREDENTIALS.superAdmin.username, CREDENTIALS.driver("B").username, "branch.q", "company.m.second"]) {
+        const res = await put(p.adminId, { username: taken });
+        expect(res.status, taken).toBe(409);
+      }
+      expect((await credentials(p.adminId)).username).toBe("branch.p.renamed");
+    });
+
+    it("resets an allocated admin's password and signs it out everywhere, from its home scope", async () => {
+      const { startSession } = await import("@/lib/session");
+      await startSession({ id: p.adminId, role: "admin" });
+      expect(await db().userSession.count({ where: { adminId: p.adminId, revokedAt: null } })).toBeGreaterThan(0);
+      const before = (await credentials(p.adminId)).passwordHash;
+
+      const res = await put(p.adminId, { password: "New-Branch-P-1" }, null);
+      expect(res.status).toBe(200);
+      expect((await credentials(p.adminId)).passwordHash).not.toBe(before);
+      expect(await db().userSession.count({ where: { adminId: p.adminId, revokedAt: null } })).toBe(0);
+      expect(
+        await db().auditLog.findFirst({
+          where: { action: "PASSWORD_CHANGE", entityId: p.adminId },
+          orderBy: { createdAt: "desc" },
+        })
+      ).toMatchObject({ actorId: lead.id, actorRole: "COMPANY_ADMIN", tenantId: p.tenantId, metadata: { self: false } });
+
+      // A weak password is refused, and nothing changes.
+      const hash = (await credentials(p.adminId)).passwordHash;
+      expect((await put(p.adminId, { password: "short" })).status).toBe(400);
+      expect((await credentials(p.adminId)).passwordHash).toBe(hash);
+    });
+
+    it("answers 404 for anyone else, and writes nothing", async () => {
+      const targets = {
+        "unallocated, same company": q.adminId,
+        "another company's admin": f.b.admin.id,
+        "a company X admin": f.a.admin.id,
+        "the SUPER_ADMIN": f.superAdmin.id,
+        "a driver": f.a.driver.id,
+        "another company admin": second,
+        "itself": lead.id,
+        "no such id": "no-such-admin",
+      };
+      const before = await db().admin.findMany({
+        where: { id: { in: Object.values(targets) } },
+        select: { id: true, passwordHash: true, login: { select: { username: true } } },
+      });
+      const driverBefore = await db().driver.findUniqueOrThrow({
+        where: { id: f.a.driver.id },
+        select: { passwordHash: true, login: { select: { username: true } } },
+      });
+      const audits = await db().auditLog.count();
+
+      for (const [who, id] of Object.entries(targets)) {
+        for (const viewing of [null, p.tenantId]) {
+          expect((await put(id, { username: "stolen.name" }, viewing)).status, who).toBe(404);
+          expect((await put(id, { password: "Stolen-Pass-1" }, viewing)).status, who).toBe(404);
+        }
+      }
+
+      expect(
+        await db().admin.findMany({
+          where: { id: { in: Object.values(targets) } },
+          select: { id: true, passwordHash: true, login: { select: { username: true } } },
+        })
+      ).toEqual(before);
+      expect(
+        await db().driver.findUniqueOrThrow({
+          where: { id: f.a.driver.id },
+          select: { passwordHash: true, login: { select: { username: true } } },
+        })
+      ).toEqual(driverBefore);
+      expect(await db().loginName.count({ where: { username: "stolen.name" } })).toBe(0);
+      expect(await db().auditLog.count()).toBe(audits);
+    });
+
+    it("loses an admin from the list and the actions the moment its allocation is removed", async () => {
+      await db().companyAdminAllocation.deleteMany({ where: { companyAdminId: lead.id, adminId: p.adminId } });
+      try {
+        expect((await list()).body.admins).toEqual([]);
+        expect((await put(p.adminId, { username: "after.removal" })).status).toBe(404);
+        expect((await credentials(p.adminId)).username).toBe("branch.p.renamed");
+      } finally {
+        await allocate(p.adminId, p.tenantId);
+      }
+      expect((await list()).body.admins.map((a: { id: string }) => a.id)).toEqual([p.adminId]);
+    });
+
+    it("loses every admin while its company is deactivated", async () => {
+      await db().company.update({ where: { id: companyM }, data: { isActive: false } });
+      try {
+        expect((await list()).body.admins).toEqual([]);
+        expect((await put(p.adminId, { username: "while.inactive" })).status).toBe(404);
+      } finally {
+        await db().company.update({ where: { id: companyM }, data: { isActive: true } });
+      }
+    });
+
+    it("its live-sync poll at home carries the session check, and no data", async () => {
+      const sync = await import("@/app/api/sync/route");
+      useSession(companyAdminSession(lead, null));
+      const res = await sync.GET(req("/api/sync"));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ cursor: "no-branch", attention: 0 });
     });
   });
 });

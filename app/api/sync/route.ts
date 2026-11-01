@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getScope } from "@/lib/tenant";
+import { getSessionContext } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { buildSyncCursor } from "@/lib/sync-cursor";
 import { courierOverview } from "@/lib/courier-confirm";
@@ -26,7 +26,19 @@ import { courierOverview } from "@/lib/courier-confirm";
 export const dynamic = "force-dynamic";
 
 export const GET = withAuth(async () => {
-  const ctx = await getScope();
+  // The session context, not getScope(): this route needs only the scope id
+  // (the cursor helpers take it first), and one session check per poll.
+  // A COMPANY_ADMIN with no branch chosen — the one case getScope() refuses —
+  // has no data to watch, but the poll still carries its session check, so it
+  // gets a fixed cursor rather than a 403 the layout would read as an auth
+  // problem.
+  const ctx = await getSessionContext();
+  if (ctx.role === "COMPANY_ADMIN" && !ctx.isViewingOtherScope) {
+    return NextResponse.json(
+      { cursor: "no-branch", attention: 0 },
+      { headers: { "Cache-Control": "no-store, must-revalidate" } }
+    );
+  }
   const isDriver = ctx.role === "DRIVER";
 
   const [cursor, courier] = await Promise.all([
@@ -38,8 +50,8 @@ export const GET = withAuth(async () => {
     }),
     // The office's Courier nav badge rides on this poll instead of a timer of
     // its own (it was /api/courier/attention, once a minute per tab). Every
-    // other role here is office: getScope() has already refused a company
-    // admin with no branch chosen. Recomputed every poll, not only when the
+    // other role here is office: a company admin with no branch chosen has
+    // already been answered above. Recomputed every poll, not only when the
     // cursor moves — "no answer" is reached by the clock, not by a write.
     isDriver ? null : courierOverview(ctx.tenantId, new Date()),
   ]);

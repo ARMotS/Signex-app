@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, useEffect, useCallback } from "react";
-import ScopeSwitcher, { ScopeBanner } from "@/components/admin/ScopeSwitcher";
+import ScopeSwitcher, { ChooseBranch, ScopeBanner, useScopes } from "@/components/admin/ScopeSwitcher";
 import LogoMark from "@/components/LogoMark";
 import { LiveSyncProvider } from "@/hooks/useLiveSync";
 
@@ -144,6 +144,19 @@ const navItems = [
     ),
   },
   {
+    // COMPANY_ADMIN only: the branch admins allocated to it.
+    label: "My admins",
+    href: "/my-admins",
+    companyAdminOnly: true,
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
+        <circle cx="12" cy="10" r="2.5" />
+        <path d="M8 16c.8-1.6 2.3-2.5 4-2.5s3.2.9 4 2.5" />
+      </svg>
+    ),
+  },
+  {
     label: "Backups",
     href: "/backups",
     icon: (
@@ -176,7 +189,16 @@ export default function AdminLayout({
   const [session, setSession] = useState<{ name: string; email?: string } | null>(null);
 
   const [role, setRole] = useState<string | null>(null);
-  const visibleNavItems = navItems.filter((item) => !item.superAdminOnly || role === "super_admin");
+  const visibleNavItems = navItems.filter(
+    (item) =>
+      (!item.superAdminOnly || role === "super_admin") && (!item.companyAdminOnly || role === "company_admin")
+  );
+  const scopes = useScopes(role);
+  // A COMPANY_ADMIN with no branch chosen has nothing to show on a branch
+  // page (the server refuses it every one): it gets the branch picker
+  // instead. Its own pages work from anywhere.
+  const needsBranch =
+    role === "company_admin" && scopes?.isViewingOtherScope !== true && !pathname.startsWith("/my-admins");
 
   const checkSession = useCallback(() => {
     fetch("/api/auth/session")
@@ -230,7 +252,7 @@ export default function AdminLayout({
             SIGNEX
           </span>
           <span className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/5 text-sidebar-text">
-            ADMIN
+            {role === "company_admin" ? "COMPANY" : "ADMIN"}
           </span>
         </div>
 
@@ -273,8 +295,8 @@ export default function AdminLayout({
           })}
         </nav>
 
-        {/* Scope switcher — SUPER_ADMIN only, renders nothing otherwise */}
-        <ScopeSwitcher role={role} />
+        {/* Scope switcher — SUPER_ADMIN and COMPANY_ADMIN, nothing otherwise */}
+        <ScopeSwitcher role={role} data={scopes} />
         </div>
 
         {/* Footer */}
@@ -365,15 +387,16 @@ export default function AdminLayout({
           </nav>
         </div>
 
-        {/* Warns whenever a SUPER_ADMIN is viewing another ADMIN's scope */}
-        <ScopeBanner role={role} />
+        {/* Whose data is on screen: a SUPER_ADMIN in another scope, a
+            COMPANY_ADMIN in one of its branches */}
+        <ScopeBanner role={role} data={scopes} />
 
         {/* ─── Content ─────────────────────────────────────────────────── */}
         {/* 16px gutter on a phone: 24px either side left too little room for
             the trip cards and invoice tables. */}
         <main className="flex-1 p-4 sm:p-6 md:p-8 pb-24 md:pb-8 overflow-y-auto bg-ink-surface">
           <LiveSyncProvider onAuthProblem={checkSession} onAttention={setCourierAttention}>
-            {children}
+            {needsBranch ? <ChooseBranch data={scopes} /> : children}
           </LiveSyncProvider>
         </main>
       </div>

@@ -256,6 +256,15 @@ export default function CollectAndSign({
             <p className="text-[11px] text-ink-muted uppercase tracking-wide">On each invoice</p>
             <p>{preview.dispatched}</p>
             <p className="font-semibold">{preview.collected}</p>
+            <p className="text-ink-muted">
+              {preview.footerParts.map((p, i) =>
+                p.bold ? (
+                  <strong key={i} className="font-semibold text-ink-black">{p.text}</strong>
+                ) : (
+                  <span key={i}>{p.text}</span>
+                )
+              )}
+            </p>
           </div>
 
           <div>

@@ -12,6 +12,7 @@
 import { PDFDocument, rgb, StandardFonts, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
 import { extractPageItems, type TextItem } from "./invoice-header";
 import type { StampArea, StampLines } from "./courier-stamp-text";
+import { drawnWidth } from "./pdf-measure";
 
 export interface Rect {
   x: number;
@@ -58,9 +59,9 @@ const safe = (text: string) =>
 /** Shrink to fit the width, then cut — a long name never runs off the box. */
 function fitted(font: PDFFont, text: string, size: number, maxWidth: number): { text: string; size: number } {
   let s = size;
-  while (s > 6 && font.widthOfTextAtSize(text, s) > maxWidth) s -= 0.5;
+  while (s > 6 && drawnWidth(font, text, s) > maxWidth) s -= 0.5;
   let t = text;
-  while (t.length > 1 && font.widthOfTextAtSize(t, s) > maxWidth) t = t.slice(0, -2) + "…";
+  while (t.length > 1 && drawnWidth(font, t, s) > maxWidth) t = t.slice(0, -2) + "…";
   return { text: t, size: s };
 }
 
@@ -92,7 +93,7 @@ function drawBlock(page: PDFPage, rect: Rect, lines: StampLines, signature: PDFI
   }
 
   // The rule the signature sits on, then the footer at the bottom.
-  const footerSize = Math.max(6, size - 1.5);
+  const footerSize = Math.max(6.5, size - 0.5);
   const footerY = rect.y + pad;
   const ruleY = footerY + footerSize + 4;
   const sigTop = y - 2;
@@ -107,14 +108,46 @@ function drawBlock(page: PDFPage, rect: Rect, lines: StampLines, signature: PDFI
     thickness: 0.6,
     color: rgb(0.55, 0.55, 0.55),
   });
-  const footer = fitted(font, safe(lines.footer), footerSize, inner);
-  page.drawText(footer.text, {
-    x: rect.x + (rect.width - font.widthOfTextAtSize(footer.text, footer.size)) / 2,
-    y: footerY,
-    size: footer.size,
-    font,
-    color: muted,
-  });
+  drawFooter(page, rect.x + pad, footerY, inner, lines, footerSize, font, bold, ink, muted);
+}
+
+/**
+ * The footer, centred: its labels in grey, the courier sheet and waybill
+ * numbers in bold ink. Shrinks to fit; if the waybills are still too long at
+ * the smallest size, the last number is cut with an ellipsis.
+ */
+function drawFooter(
+  page: PDFPage,
+  x: number,
+  y: number,
+  width: number,
+  lines: StampLines,
+  size: number,
+  font: PDFFont,
+  bold: PDFFont,
+  ink: ReturnType<typeof rgb>,
+  muted: ReturnType<typeof rgb>
+) {
+  // safe() trims, so only the numbers go through it: the labels' own spaces
+  // are part of the line. An em dash is drawable (WinAnsi), so it stands in
+  // for a number that had nothing printable.
+  const parts = lines.footerParts.map((p) => ({
+    ...p,
+    text: p.bold ? safe(p.text) || "—" : p.text.replace(/[^\x20-\x7E\xA0-\xFF]/g, ""),
+  }));
+  const total = (s: number) => parts.reduce((w, p) => w + drawnWidth(p.bold ? bold : font, p.text, s), 0);
+
+  let s = size;
+  while (s > 5.5 && total(s) > width) s -= 0.5;
+  const last = parts[parts.length - 1];
+  while (total(s) > width && last.text.length > 1) last.text = `${last.text.slice(0, -2)}…`;
+
+  let cx = x + (width - total(s)) / 2;
+  for (const p of parts) {
+    const f = p.bold ? bold : font;
+    page.drawText(p.text, { x: cx, y, size: s, font: f, color: p.bold ? ink : muted });
+    cx += drawnWidth(f, p.text, s);
+  }
 }
 
 /**

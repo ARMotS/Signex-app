@@ -57,6 +57,13 @@ describe("page routing by role", () => {
     expect(await landing("/companies", "super_admin")).toBeNull();
   });
 
+  it("keeps everyone but a COMPANY_ADMIN off its own page", async () => {
+    expect(await landing("/my-admins", "company_admin")).toBeNull();
+    expect(await landing("/my-admins", "admin")).toBe("/dashboard");
+    expect(await landing("/my-admins", "super_admin")).toBe("/users");
+    expect(await landing("/my-admins", "driver")).toBe("/run");
+  });
+
   it("lets each role through to its own pages", async () => {
     expect(await landing("/dashboard", "admin")).toBeNull();
     expect(await landing("/dashboard", "super_admin")).toBeNull();
