@@ -67,6 +67,13 @@ describe("page routing by role", () => {
     expect(await landing("/my-branches", "super_admin")).toBe("/users");
   });
 
+  it("opens devices to every office account, not drivers", async () => {
+    for (const role of ["admin", "company_admin", "super_admin"]) {
+      expect(await landing("/devices", role)).toBeNull();
+    }
+    expect(await landing("/devices", "driver")).toBe("/run");
+  });
+
   it("opens usage to the company admin and the super admin only", async () => {
     expect(await landing("/usage", "company_admin")).toBeNull();
     expect(await landing("/usage", "super_admin")).toBeNull();

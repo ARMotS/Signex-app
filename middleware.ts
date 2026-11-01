@@ -45,6 +45,7 @@ const ADMIN_ROUTES = [
   "/my-admins",
   "/my-branches",
   "/usage",
+  "/devices",
 ];
 
 const SUPER_ADMIN_ONLY_ROUTES = ["/users", "/companies"];
@@ -263,6 +264,7 @@ export const config = {
     "/my-admins/:path*",
     "/my-branches/:path*",
     "/usage/:path*",
+    "/devices/:path*",
     "/run/:path*",
     "/sign/:path*",
     "/collect/:path*",

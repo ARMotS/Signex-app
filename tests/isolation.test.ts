@@ -7276,4 +7276,217 @@ suite("cross-ADMIN isolation", () => {
       }
     });
   });
+  // ── The devices page ────────────────────────────────────────────────
+  // Company D: branch S allocated to its lead, branch T not. B and the
+  // SUPER_ADMIN are the outsiders.
+  describe("the devices page", () => {
+    let companyD: string;
+    let lead: { id: string; name: string; homeTenantId: string };
+    let second: string;
+    let s: { tenantId: string; adminId: string; driverId: string; driver2Id: string };
+    let t: { tenantId: string; adminId: string; driverId: string };
+    const ua = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36";
+    const IP = "10.77.66.55";
+
+    const branch = async (name: string, username: string) => {
+      const tenant = await db().tenant.create({
+        data: { name, slug: `${username.replace(/\./g, "-")}-d`, kind: "BRANCH", companyId: companyD },
+      });
+      const admin = await db().admin.create({
+        data: { name: `${name} Office`, email: `${username}@company-d.test`, passwordHash: "unused", tenantId: tenant.id, login: { create: { username } } },
+      });
+      await db().user.create({ data: { email: admin.email, name: admin.name, role: "ADMIN", tenantId: tenant.id } });
+      const driver = await db().driver.create({
+        data: { name: `${name} Driver`, tenantId: tenant.id, login: { create: { username: `${username}.drv` } } },
+      });
+      return { tenantId: tenant.id, adminId: admin.id, driverId: driver.id };
+    };
+    const start = async (id: string, role: "admin" | "driver" | "company_admin" | "super_admin") => {
+      const { startSession } = await import("@/lib/session");
+      const r = await startSession({ id, role }, { ip: IP, userAgent: ua, evictOldest: true });
+      if (!r.ok) throw new Error("no session");
+      const row = await db().userSession.findFirstOrThrow({
+        where: role === "driver" ? { driverId: id, revokedAt: null } : { adminId: id, revokedAt: null },
+        orderBy: { createdAt: "desc" },
+      });
+      return row.id;
+    };
+    const list = async (session: ReturnType<typeof adminSession>, query = "") => {
+      const { GET } = await import("@/app/api/devices/route");
+      useSession(session);
+      const res = await GET(req(`/api/devices${query}`));
+      return { status: res.status, body: await res.json() };
+    };
+    const signOut = async (session: ReturnType<typeof adminSession>, id: string) => {
+      const { POST } = await import("@/app/api/devices/[id]/sign-out/route");
+      useSession(session);
+      const res = await POST(req(`/api/devices/${id}/sign-out`, { method: "POST" }), params({ id }));
+      return { status: res.status, body: await res.json() };
+    };
+    const live = async (id: string) => (await db().userSession.findUniqueOrThrow({ where: { id } })).revokedAt === null;
+    const ids = (body: { accounts: { id: string }[] }) => body.accounts.map((a) => a.id);
+    const officeS = () => ({ ...adminSession(f.a), id: s.adminId, name: "Branch S Office", tenantId: s.tenantId });
+    const asLead = () => companyAdminSession(lead, null);
+
+    beforeAll(async () => {
+      companyD = (await db().company.create({ data: { name: "Company D" } })).id;
+      const home = await db().tenant.create({ data: { name: "Company D", slug: "company-d-home", kind: "COMPANY", companyId: companyD } });
+      const mk = async (name: string, username: string) => {
+        const a = await db().admin.create({
+          data: { name, email: `${username}@company-d.test`, passwordHash: "unused", tenantId: home.id, companyId: companyD, login: { create: { username } } },
+        });
+        await db().user.create({ data: { email: a.email, name, role: "COMPANY_ADMIN", tenantId: home.id } });
+        return a.id;
+      };
+      lead = { id: await mk("Company D Lead", "company.d.lead"), name: "Company D Lead", homeTenantId: home.id };
+      second = await mk("Company D Second", "company.d.second");
+      const sb = await branch("Branch S", "branch.s");
+      const driver2 = await db().driver.create({ data: { name: "Branch S Spare", tenantId: sb.tenantId } });
+      s = { ...sb, driver2Id: driver2.id };
+      t = await branch("Branch T", "branch.t");
+      await db().companyAdminAllocation.create({
+        data: { companyId: companyD, companyAdminId: lead.id, adminId: s.adminId, branchTenantId: s.tenantId },
+      });
+    });
+
+    it("is refused to drivers", async () => {
+      expect((await list(driverSession(f.a))).status).toBe(403);
+      const id = await start(s.driverId, "driver");
+      expect((await signOut(driverSession(f.a), id)).status).toBe(403);
+      expect(await live(id)).toBe(true);
+    });
+
+    it("a branch admin sees itself and its drivers, and no one else", async () => {
+      const { status, body } = await list(officeS(), "?all=1");
+      expect(status).toBe(200);
+      expect(ids(body).sort()).toEqual([s.adminId, s.driverId, s.driver2Id].sort());
+      expect(body.accounts[0]).toMatchObject({ id: s.adminId, isSelf: true });
+      expect(body.withIp).toBe(false);
+    });
+
+    it("a company admin sees itself, its allocated admins and their drivers, and no one else", async () => {
+      const { body } = await list(asLead(), "?all=1");
+      expect(ids(body).sort()).toEqual([lead.id, s.adminId, s.driverId, s.driver2Id].sort());
+      const raw = JSON.stringify(body);
+      for (const hidden of [t.adminId, t.driverId, second, f.superAdmin.id, f.b.admin.id, f.b.driver.id]) {
+        expect(raw, hidden).not.toContain(hidden);
+      }
+    });
+
+    it("the super admin sees everyone, with IP addresses; nobody else gets an IP", async () => {
+      await start(t.driverId, "driver");
+      const sa = (await list(superAdminSession(f), `?q=branch%20t`)).body;
+      expect(ids(sa)).toContain(t.driverId);
+      expect(JSON.stringify(sa)).toContain(IP);
+      for (const session of [officeS(), asLead()]) {
+        const raw = JSON.stringify((await list(session, "?all=1")).body);
+        expect(raw).not.toContain(IP);
+        expect(raw).not.toContain("ipAddress");
+      }
+    });
+
+    it("a branch admin signs out its driver's device, once, and it is logged", async () => {
+      const id = (await db().userSession.findFirstOrThrow({ where: { driverId: s.driverId, revokedAt: null } })).id;
+      const first = await signOut(officeS(), id);
+      expect(first).toMatchObject({ status: 200, body: { alreadyEnded: false } });
+      expect(await db().userSession.findUniqueOrThrow({ where: { id } })).toMatchObject({ revokedReason: "signed_out_remotely" });
+      expect((await signOut(officeS(), id)).body).toMatchObject({ alreadyEnded: true });
+      expect(
+        await db().auditLog.findFirst({ where: { action: "LOGOUT", entityId: s.driverId }, orderBy: { createdAt: "desc" } })
+      ).toMatchObject({ actorId: s.adminId, actorRole: "ADMIN", tenantId: s.tenantId, metadata: { remote: true, sessionId: id } });
+      // It shows under recently signed out, with why.
+      const driver = (await list(officeS())).body.accounts.find((a: { id: string }) => a.id === s.driverId);
+      expect(driver.recent[0]).toMatchObject({ id, endedReason: "signed_out_remotely" });
+    });
+
+    it("anyone else's device is 404, and nothing changes", async () => {
+      const tDriver = (await db().userSession.findFirstOrThrow({ where: { driverId: t.driverId, revokedAt: null } })).id;
+      const bDriver = await start(f.b.driver.id, "driver");
+      const sa = await start(f.superAdmin.id, "super_admin");
+      const secondCa = await start(second, "company_admin");
+      const leadDevice = await start(lead.id, "company_admin");
+      for (const [who, id] of Object.entries({ tDriver, bDriver, sa, secondCa, leadDevice, none: "no-such-session" })) {
+        expect((await signOut(officeS(), id)).status, `admin → ${who}`).toBe(404);
+      }
+      for (const [who, id] of Object.entries({ tDriver, bDriver, sa, secondCa })) {
+        expect((await signOut(asLead(), id)).status, `lead → ${who}`).toBe(404);
+      }
+      for (const id of [tDriver, bDriver, sa, secondCa, leadDevice]) expect(await live(id)).toBe(true);
+    });
+
+    it("its own current device is refused (that is Log out); its other devices sign out", async () => {
+      const { hashSessionToken } = await import("@/lib/session");
+      const current = await db().userSession.create({
+        data: { tokenHash: hashSessionToken("test-token"), adminId: lead.id, expiresAt: new Date(Date.now() + 3_600_000) },
+      });
+      try {
+        const listed = (await list(asLead())).body.accounts.find((a: { id: string }) => a.id === lead.id);
+        expect(listed.devices.find((d: { id: string }) => d.id === current.id).isCurrent).toBe(true);
+        expect((await signOut(asLead(), current.id))).toMatchObject({ status: 400, body: { code: "CURRENT_DEVICE" } });
+        expect(await live(current.id)).toBe(true);
+        const other = (await db().userSession.findFirstOrThrow({ where: { adminId: lead.id, revokedAt: null, NOT: { id: current.id } } })).id;
+        expect((await signOut(asLead(), other)).status).toBe(200);
+        expect(await live(other)).toBe(false);
+      } finally {
+        await db().userSession.update({ where: { id: current.id }, data: { revokedAt: new Date(), revokedReason: "logout" } });
+      }
+    });
+
+    it("a company admin signs out an allocated admin's device — until the allocation goes", async () => {
+      const a1 = await start(s.adminId, "admin");
+      const a2 = await start(s.adminId, "admin");
+      expect((await signOut(asLead(), a1)).status).toBe(200);
+      await db().companyAdminAllocation.deleteMany({ where: { companyAdminId: lead.id, adminId: s.adminId } });
+      try {
+        expect((await signOut(asLead(), a2)).status).toBe(404);
+        expect(await live(a2)).toBe(true);
+        expect(ids((await list(asLead(), "?all=1")).body)).toEqual([lead.id]);
+      } finally {
+        await db().companyAdminAllocation.create({
+          data: { companyId: companyD, companyAdminId: lead.id, adminId: s.adminId, branchTenantId: s.tenantId },
+        });
+      }
+    });
+
+    it("shows the last 30 days of signed-out devices, not older", async () => {
+      const old = await db().userSession.create({
+        data: { tokenHash: "old-hash-devices", driverId: s.driver2Id, expiresAt: new Date(Date.now() - 39 * 86_400_000), revokedAt: new Date(Date.now() - 40 * 86_400_000), revokedReason: "logout" },
+      });
+      const recent = await db().userSession.create({
+        data: { tokenHash: "recent-hash-devices", driverId: s.driver2Id, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: new Date(Date.now() - 2 * 86_400_000), revokedReason: "replaced" },
+      });
+      const spare = (await list(officeS())).body.accounts.find((a: { id: string }) => a.id === s.driver2Id);
+      expect(spare.recent.map((r: { id: string }) => r.id)).toEqual([recent.id]);
+      expect(spare.recent[0].endedReason).toBe("replaced");
+      expect(JSON.stringify(spare)).not.toContain(old.id);
+    });
+
+    it("signing out clears the token the previous deploy would still accept", async () => {
+      const { hashSessionToken } = await import("@/lib/session");
+      const token = "legacy-token-for-devices-test";
+      await db().driver.update({ where: { id: s.driver2Id }, data: { sessionToken: token } });
+      const row = await db().userSession.create({
+        data: { tokenHash: hashSessionToken(token), driverId: s.driver2Id, expiresAt: new Date(Date.now() + 3_600_000) },
+      });
+      expect((await signOut(officeS(), row.id)).status).toBe(200);
+      expect((await db().driver.findUniqueOrThrow({ where: { id: s.driver2Id } })).sessionToken).toBeNull();
+
+      const adminToken = "legacy-admin-token-for-devices-test";
+      await db().admin.update({ where: { id: s.adminId }, data: { sessionTokens: { push: adminToken }, sessionToken: adminToken } });
+      const adminRow = await db().userSession.create({
+        data: { tokenHash: hashSessionToken(adminToken), adminId: s.adminId, expiresAt: new Date(Date.now() + 3_600_000) },
+      });
+      expect((await signOut(asLead(), adminRow.id)).status).toBe(200);
+      const after = await db().admin.findUniqueOrThrow({ where: { id: s.adminId } });
+      expect(after.sessionTokens).not.toContain(adminToken);
+      expect(after.sessionToken).not.toBe(adminToken);
+    });
+
+    it("lists only accounts with devices unless asked for all", async () => {
+      const withDevices = ids((await list(officeS())).body);
+      const everyone = ids((await list(officeS(), "?all=1")).body);
+      expect(everyone.length).toBeGreaterThanOrEqual(withDevices.length);
+      expect(withDevices[0]).toBe(s.adminId); // self first, devices or not
+    });
+  });
 });
