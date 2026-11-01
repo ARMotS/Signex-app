@@ -8,7 +8,7 @@ import LogoMark from "@/components/LogoMark";
 import { LiveSyncProvider } from "@/hooks/useLiveSync";
 
 /** A COMPANY_ADMIN's own pages: they work with no branch chosen. */
-const COMPANY_ADMIN_HOME_PAGES = ["/my-branches", "/usage", "/my-admins"];
+const COMPANY_ADMIN_HOME_PAGES = ["/my-branches", "/usage", "/my-admins", "/devices"];
 
 const navItems = [
   {
@@ -181,6 +181,18 @@ const navItems = [
         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
         <circle cx="12" cy="10" r="2.5" />
         <path d="M8 16c.8-1.6 2.3-2.5 4-2.5s3.2.9 4 2.5" />
+      </svg>
+    ),
+  },
+  {
+    // Every office account: its own devices, and those of the accounts below it.
+    label: "Devices",
+    href: "/devices",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="4" width="14" height="10" rx="1.5" />
+        <path d="M6 18h6M9 14v4" />
+        <rect x="17" y="8" width="5" height="12" rx="1" />
       </svg>
     ),
   },
