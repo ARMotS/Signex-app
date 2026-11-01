@@ -8,7 +8,7 @@ import { logAudit } from "@/lib/audit";
 import { readInvoiceNoPattern } from "@/lib/config";
 import { awaitingCreditReview } from "@/lib/collection-confirm";
 import { normalizeInvoiceNo, type InvoiceNoPattern } from "@/lib/invoice-number";
-import { applyFilter, facetsOf, pageOf, parseFilterState, parsePageSize, toCsv, type FilterAccessors } from "@/lib/record-filter";
+import { applyFilter, dateWindowOf, facetsOf, pageOf, parseFilterState, parsePageSize, toCsv, type FilterAccessors } from "@/lib/record-filter";
 
 /**
  * The dispatcher's collections view and the credit-return report accounts
@@ -110,8 +110,11 @@ export const GET = withAuth(async (request: NextRequest) => {
 
   if (searchParams.get("view") === "page") {
     const state = parseFilterState(searchParams);
+    // A date range narrows the read itself, so it reaches collections older
+    // than the newest 2000 (and trips older than the newest 500 archived).
+    const report = { capped: false };
     const [all, pattern] = await Promise.all([
-      listCollections(ctx.tenantId, { limit: 2000 }),
+      listCollections(ctx.tenantId, { limit: 2000, ...dateWindowOf(state), report }),
       readInvoiceNoPattern(ctx.tenantId),
     ]);
     const acc = accessors(pattern);
@@ -139,6 +142,7 @@ export const GET = withAuth(async (request: NextRequest) => {
       collections: page.items,
       total: page.total,
       next: page.next,
+      capped: report.capped,
       // The dropdowns offer what exists in the whole scope, not just this page.
       facets: facetsOf(all, acc, (r) => r.driverName, (r) => `${r.tripDate ?? ""} · ${r.driverName ?? ""} · ${r.tripName ?? ""}`),
       counts: {

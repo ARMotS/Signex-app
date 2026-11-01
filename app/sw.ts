@@ -32,6 +32,23 @@ const serwist = new Serwist({
       matcher: ({ url }) => /^\/(api\/public\/)?delivery\//.test(url.pathname),
       handler: new NetworkOnly(),
     },
+    // The office's lists — network first with NO timeout. Slow is not offline:
+    // with the 10s timeout below, a big invoice folder that took 11s to list
+    // was answered from the cache instead — a copy up to a day old, shown as
+    // current, totals and all. The cache still answers when the network fails.
+    {
+      matcher: ({ url }) =>
+        /^\/api\/(invoices|collections|credit-notes|courier|dashboard|exceptions)$/.test(url.pathname),
+      handler: new NetworkFirst({
+        cacheName: "signex-api-cache",
+        plugins: [
+          new ExpirationPlugin({
+            maxEntries: 100,
+            maxAgeSeconds: 24 * 60 * 60, // 1 day
+          }),
+        ],
+      }),
+    },
     // API calls — network first with 10s timeout, cache fallback
     {
       matcher: ({ url }) => url.pathname.startsWith("/api/"),

@@ -6885,4 +6885,161 @@ suite("cross-ADMIN isolation", () => {
       expect(await res.json()).toEqual({ cursor: "no-branch", attention: 0 });
     });
   });
+  // ── Paged lists: Courier, Credits, Collections, and the Invoices listing ──
+  describe("paged lists", () => {
+    const courierPage = async (fx: typeof f.a, query: string) => {
+      const { GET } = await import("@/app/api/courier/route");
+      useSession(adminSession(fx));
+      const res = await GET(req(`/api/courier?view=page&${query}`));
+      return { status: res.status, body: await res.json() };
+    };
+    const sheet = (fx: typeof f.a, no: string, day: string, extra: Record<string, unknown> = {}) =>
+      db().courierTripSheet.create({
+        data: {
+          tenantId: fx.tenantId,
+          courierSheetNo: no,
+          sheetDate: new Date(`${day}T00:00:00Z`),
+          customerName: `Paging Customer ${no}`,
+          sourceFileName: `cts-${no}-p5.xlsx`,
+          importedById: fx.admin.id,
+          status: "AWAITING_COLLECTION",
+          waybills: [`WB${no}`],
+          invoices: { create: [{ lineNo: 1, invoiceNo: `IV-${no}`, invoiceNoNormalized: no, waybillNo: `WB${no}`, parcels: 1 }] },
+          ...extra,
+        },
+      });
+
+    beforeAll(async () => {
+      await db().courierTripSheet.deleteMany({});
+      // 30 sheets in A across a year and a half; 5 in B with the same numbers.
+      for (let i = 0; i < 30; i++) {
+        const day = new Date(Date.UTC(2025, 0, 1) + i * 17 * 86_400_000).toISOString().slice(0, 10);
+        await sheet(f.a, String(800100 + i), day, i % 3 === 0 ? { status: "NEEDS_ATTENTION" } : {});
+      }
+      for (let i = 0; i < 5; i++) await sheet(f.b, String(800100 + i), "2025-01-01");
+    });
+
+    afterAll(async () => {
+      await db().courierTripSheet.deleteMany({});
+    });
+
+    it("courier: pages through the caller's own sheets only, newest first", async () => {
+      const first = await courierPage(f.a, "");
+      expect(first.status).toBe(200);
+      expect(first.body).toMatchObject({ total: 30, page: 1, size: 25 });
+      expect(first.body.sheets).toHaveLength(25);
+      expect(first.body.sheets[0].courierSheetNo).toBe("800129");
+      expect(first.body.counts).toMatchObject({ ALL: 30, NEEDS_ATTENTION: 10, AWAITING_COLLECTION: 20 });
+
+      const second = await courierPage(f.a, "page=2");
+      expect(second.body.sheets.map((s: { courierSheetNo: string }) => s.courierSheetNo)).toEqual(
+        ["800104", "800103", "800102", "800101", "800100"]
+      );
+      // Past the end: the last page, not an empty one.
+      expect((await courierPage(f.a, "page=99")).body.page).toBe(2);
+      expect((await courierPage(f.a, "size=50")).body.sheets).toHaveLength(30);
+
+      const bIds = new Set((await db().courierTripSheet.findMany({ where: { tenantId: f.b.tenantId } })).map((s) => s.id));
+      for (const q of ["", "page=2", "q=800100", "from=2025-01-01&to=2025-01-01"]) {
+        const ids = (await courierPage(f.a, q)).body.sheets.map((s: { id: string }) => s.id);
+        expect(ids.some((id: string) => bIds.has(id)), q).toBe(false);
+      }
+      expect((await courierPage(f.b, "")).body).toMatchObject({ total: 5, counts: { ALL: 5 } });
+    });
+
+    it("courier: search, dates and status reach the oldest sheet, in the database", async () => {
+      const oldest = (q: string) => courierPage(f.a, q).then((r) => r.body);
+      expect((await oldest("from=2025-01-01&to=2025-01-01")).sheets.map((s: { courierSheetNo: string }) => s.courierSheetNo)).toEqual(["800100"]);
+      expect((await oldest("q=paging%20customer%20800100")).total).toBe(1);
+      expect((await oldest("q=IV-80010")).total).toBe(10); // invoice number by substring
+      expect((await oldest("q=wb800100")).total).toBe(1); // a waybill by its whole number
+      const attention = await oldest("status=NEEDS_ATTENTION");
+      expect(attention.total).toBe(10);
+      // The status tabs count the search and dates, not the status chosen.
+      expect(attention.counts.ALL).toBe(30);
+      // Rubbish in the URL is ignored, not an error.
+      expect((await courierPage(f.a, "status=NOPE&from=yesterday&page=-3&size=7")).body).toMatchObject({ total: 30, page: 1, size: 25 });
+    });
+
+    it("courier: the old response shape still answers a tab on the previous bundle", async () => {
+      const { GET } = await import("@/app/api/courier/route");
+      useSession(adminSession(f.a));
+      const body = await (await GET(req("/api/courier"))).json();
+      expect(body.sheets).toHaveLength(30);
+      expect(body.total).toBeUndefined();
+    });
+
+    it("credits: a date range reaches notes by their own date, in the caller's scope only", async () => {
+      const note = (fx: typeof f.a, no: string, creditDate: string | null) =>
+        db().creditNote.create({
+          data: {
+            tenantId: fx.tenantId,
+            creditNo: no,
+            creditNoNormalized: no,
+            creditNoClaim: no,
+            creditDate: creditDate ? new Date(`${creditDate}T00:00:00Z`) : null,
+            status: "RECEIVED",
+            sourceItemId: `paging-${fx.tenantId}-${no}`,
+            sourceFilename: `CR-${no}.pdf`,
+            sourceFolder: "Originals",
+          },
+        });
+      await note(f.a, "990001", "2024-03-05");
+      await note(f.a, "990002", "2024-04-20");
+      await note(f.b, "990001", "2024-03-05");
+
+      const { GET } = await import("@/app/api/credit-notes/route");
+      useSession(adminSession(f.a));
+      const body = await (await GET(req("/api/credit-notes?view=page&from=2024-03-01&to=2024-03-31&tzOffset=-120"))).json();
+      expect(body.creditNotes.map((n: { creditNo: string }) => n.creditNo)).toEqual(["990001"]);
+      expect(body.total).toBe(1);
+      expect(body.capped).toBe(false);
+      const theirs = await db().creditNote.findFirstOrThrow({ where: { tenantId: f.b.tenantId, creditNo: "990001" } });
+      expect(JSON.stringify(body)).not.toContain(theirs.id);
+      await db().creditNote.deleteMany({ where: { creditNo: { in: ["990001", "990002"] } } });
+    });
+
+    it("collections: says when a ceiling cut the read short", async () => {
+      const { listCollections } = await import("@/lib/trip-data");
+      const all = await listCollections(f.a.tenantId, { limit: 2000 });
+      const report = { capped: false };
+      await listCollections(f.a.tenantId, { limit: 1, report });
+      expect(report.capped).toBe(all.length > 1);
+
+      const { GET } = await import("@/app/api/collections/route");
+      useSession(adminSession(f.a));
+      const body = await (await GET(req("/api/collections?view=page&from=2020-01-01&to=2020-01-31"))).json();
+      expect(body).toMatchObject({ total: 0, capped: false });
+    });
+
+    it("invoices: one load lists the invoice folder once, with the caller's own token", async () => {
+      const { GET } = await import("@/app/api/invoices/route");
+      useSession(adminSession(f.a));
+      graphCalls.length = 0;
+      const res = await GET(req("/api/invoices"));
+      expect(res.status).toBe(200);
+      const listings = graphCalls.filter((c) => c.url.includes("/items/invoice-folder-A/children"));
+      expect(listings).toHaveLength(1);
+      expect([...new Set(graphCalls.map((c) => c.token).filter(Boolean))]).toEqual(["access-token-A"]);
+    });
+
+    it("invoices: a folder that cannot be read is an error, never an empty list", async () => {
+      const fetchMock = vi.mocked(fetch);
+      const original = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation(async (url: any, init: any) =>
+        String(url).includes("/children")
+          ? new Response(JSON.stringify({ error: { code: "accessDenied" } }), { status: 403 })
+          : original(url, init)
+      );
+      try {
+        const { GET } = await import("@/app/api/invoices/route");
+        useSession(adminSession(f.a));
+        const res = await GET(req("/api/invoices"));
+        expect(res.status).toBe(502);
+        expect(await res.json()).toMatchObject({ code: "FOLDER_UNREADABLE" });
+      } finally {
+        fetchMock.mockImplementation(original);
+      }
+    });
+  });
 });

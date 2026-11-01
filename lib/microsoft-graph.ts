@@ -1493,6 +1493,26 @@ export async function listOneDriveProcessedTripSheets(
 }
 
 /**
+ * The invoice folder's PDFs and its "signed" subfolder's PDFs, listing the
+ * invoice folder ONCE. The Invoices tab used to list it three times per load
+ * (files, again to find "signed", again for duplicates): on a big folder that
+ * pushed the request past the service worker's timeout, which then showed a
+ * stale copy with stale totals.
+ */
+export async function listInvoiceFolder(
+  tenantId: string
+): Promise<{ pdfs: OneDriveItem[]; signed: OneDriveItem[] }> {
+  const account = await getAccount(tenantId);
+  if (!account?.invoiceFolderItemId) return { pdfs: [], signed: [] };
+
+  const isPdf = (item: OneDriveItem) => !item.folder && item.name.toLowerCase().endsWith(".pdf");
+  const children = await listFolderById(tenantId, account.invoiceFolderItemId);
+  const signedFolder = children.find((item) => item.folder && item.name.toLowerCase() === "signed");
+  const signed = signedFolder ? await listFolderById(tenantId, signedFolder.id) : [];
+  return { pdfs: children.filter(isPdf), signed: signed.filter(isPdf) };
+}
+
+/**
  * List signed invoice files from this scope's OneDrive "signed" subfolder.
  */
 export async function listOneDriveSignedInvoices(

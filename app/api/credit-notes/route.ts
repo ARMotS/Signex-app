@@ -10,7 +10,7 @@ import type { CreditIssue } from "@/lib/credit-note";
 import { readInvoiceNoPattern } from "@/lib/config";
 import { normalizeInvoiceNo } from "@/lib/invoice-number";
 import { parseTzOffset } from "@/lib/day-window";
-import { applyFilter, facetsOf, pageOf, parseFilterState, parsePageSize, toCsv, type FilterAccessors } from "@/lib/record-filter";
+import { applyFilter, dateWindowOf, facetsOf, pageOf, parseFilterState, parsePageSize, toCsv, type FilterAccessors } from "@/lib/record-filter";
 
 /**
  * The Credits page.
@@ -93,6 +93,9 @@ function toRow(n: NoteWithLinks) {
 
 type Row = ReturnType<typeof toRow>;
 
+/** Notes read per list request; a date range reaches past it. */
+const NOTE_READ_CAP = 2000;
+
 const CSV_HEADERS = ["Credit No", "Credit date", "Invoice No", "Customer", "Account", "Total", "Status", "Review issues", "Warnings", "Collections", "Signed by", "Signed at", "File"];
 
 export const GET = withAuth(async (request: NextRequest) => {
@@ -103,10 +106,16 @@ export const GET = withAuth(async (request: NextRequest) => {
 
   if (searchParams.get("view") === "page") {
     const state = parseFilterState(searchParams);
+    // A date range narrows the read itself (the list dates a note by its
+    // credit date, else when it arrived), so it reaches notes older than the
+    // newest 2000. applyFilter still decides each row exactly.
+    const { since, until } = dateWindowOf(state);
+    const window = since || until ? { ...(since && { gte: since }), ...(until && { lt: until }) } : null;
     const [notes, pattern, grouped, account] = await Promise.all([
       ctx.db.creditNote.findMany({
+        ...(window && { where: { OR: [{ creditDate: window }, { creditDate: null, createdAt: window }] } }),
         orderBy: [{ creditDate: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
-        take: 2000,
+        take: NOTE_READ_CAP,
         select: LIST_SELECT,
       }),
       readInvoiceNoPattern(ctx.tenantId),
@@ -175,6 +184,7 @@ export const GET = withAuth(async (request: NextRequest) => {
       creditNotes: page.items,
       total: page.total,
       next: page.next,
+      capped: notes.length >= NOTE_READ_CAP,
       facets: facetsOf(all, acc),
     });
   }

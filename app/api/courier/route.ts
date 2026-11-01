@@ -7,7 +7,9 @@ import {
   CourierError,
   importCourierSheet,
   listCourierSheets,
+  listCourierSheetsPage,
   previewCourierSheet,
+  readCourierListQuery,
 } from "@/lib/courier-import";
 
 /**
@@ -19,12 +21,25 @@ import {
 /** Reading a sheet lists the invoice folder — see the note in ../trip-sheet/route.ts. */
 export const maxDuration = 60;
 
-export const GET = withAuth(async () => {
+/**
+ * GET /api/courier?view=page&q&status&from&to&page&size — one page, filtered
+ * in the database (lib/courier-import.ts listCourierSheetsPage). Without
+ * view=page, the newest 500 as before: a tab still on the previous bundle.
+ */
+export const GET = withAuth(async (request: NextRequest) => {
   const ctx = await getScope();
   requireOffice(ctx);
   // This tab polls, so it carries the look at the courier folder (throttled
   // per scope, after the response — see lib/courier-inbox.ts).
   scheduleCourierInbox(ctx.tenantId);
+  const params = new URL(request.url).searchParams;
+  if (params.get("view") === "page") {
+    const [page, inbox] = await Promise.all([
+      listCourierSheetsPage(ctx.tenantId, readCourierListQuery(params)),
+      courierInboxState(ctx.tenantId),
+    ]);
+    return NextResponse.json({ ...page, inbox });
+  }
   const [sheets, inbox] = await Promise.all([listCourierSheets(ctx.tenantId), courierInboxState(ctx.tenantId)]);
   return NextResponse.json({ sheets, inbox });
 });

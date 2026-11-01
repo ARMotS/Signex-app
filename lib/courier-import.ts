@@ -11,7 +11,7 @@
 
 import fs from "fs";
 import path from "path";
-import { Prisma, type CourierStatus } from "@prisma/client";
+import { Prisma, CourierStatus } from "@prisma/client";
 import { scopedPrisma } from "./db-scoped";
 import { readInvoiceNoPattern } from "./config";
 import { ensureInvoices } from "./invoice-registry";
@@ -642,50 +642,147 @@ export interface CourierSheetSummary {
   createdAt: string;
 }
 
+const SUMMARY_SELECT = {
+  id: true,
+  courierSheetNo: true,
+  sheetDate: true,
+  customerName: true,
+  waybills: true,
+  parcels: true,
+  courierCompany: true,
+  status: true,
+  issues: true,
+  customerEmail: true,
+  filingCompletedAt: true,
+  emailStatus: true,
+  reminderSentAt: true,
+  confirmedAt: true,
+  createdAt: true,
+  invoices: { orderBy: { lineNo: "asc" }, select: { invoiceNo: true } },
+} satisfies Prisma.CourierTripSheetSelect;
+
+type SummaryRow = Prisma.CourierTripSheetGetPayload<{ select: typeof SUMMARY_SELECT }>;
+
+function toSummary(r: SummaryRow): CourierSheetSummary {
+  const issues = issuesOf(r.issues);
+  return {
+    id: r.id,
+    courierSheetNo: r.courierSheetNo,
+    sheetDate: r.sheetDate.toISOString().slice(0, 10),
+    customerName: r.customerName,
+    waybills: r.waybills,
+    invoiceCount: r.invoices.length,
+    invoiceNos: r.invoices.map((i) => i.invoiceNo),
+    parcels: r.parcels,
+    courierCompany: r.courierCompany,
+    status: r.status,
+    blockCount: issues.filter((i) => i.level === "block").length,
+    warningCount: issues.filter((i) => i.level === "warning").length,
+    hasEmail: !!r.customerEmail,
+    confirmation: confirmationState(r),
+    createdAt: r.createdAt.toISOString(),
+  };
+}
+
 /** The scope's courier trip sheets, newest first. */
 export async function listCourierSheets(tenantId: string, limit = 500): Promise<CourierSheetSummary[]> {
   const rows = await scopedPrisma(tenantId).courierTripSheet.findMany({
     orderBy: [{ sheetDate: "desc" }, { createdAt: "desc" }],
     take: limit,
-    select: {
-      id: true,
-      courierSheetNo: true,
-      sheetDate: true,
-      customerName: true,
-      waybills: true,
-      parcels: true,
-      courierCompany: true,
-      status: true,
-      issues: true,
-      customerEmail: true,
-      filingCompletedAt: true,
-      emailStatus: true,
-      reminderSentAt: true,
-      confirmedAt: true,
-      createdAt: true,
-      invoices: { orderBy: { lineNo: "asc" }, select: { invoiceNo: true } },
-    },
+    select: SUMMARY_SELECT,
   });
-  return rows.map((r) => {
-    const issues = issuesOf(r.issues);
-    return {
-      id: r.id,
-      courierSheetNo: r.courierSheetNo,
-      sheetDate: r.sheetDate.toISOString().slice(0, 10),
-      customerName: r.customerName,
-      waybills: r.waybills,
-      invoiceCount: r.invoices.length,
-      invoiceNos: r.invoices.map((i) => i.invoiceNo),
-      parcels: r.parcels,
-      courierCompany: r.courierCompany,
-      status: r.status,
-      blockCount: issues.filter((i) => i.level === "block").length,
-      warningCount: issues.filter((i) => i.level === "warning").length,
-      hasEmail: !!r.customerEmail,
-      confirmation: confirmationState(r),
-      createdAt: r.createdAt.toISOString(),
-    };
+  return rows.map(toSummary);
+}
+
+export interface CourierListQuery {
+  q?: string;
+  status?: string;
+  /** YYYY-MM-DD, inclusive, on the sheet's own date. */
+  from?: string;
+  to?: string;
+  /** 1-based. */
+  page?: number;
+  size?: number;
+}
+
+const COURIER_PAGE_SIZES = [25, 50, 100];
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A list query from the URL; anything malformed is left out. */
+export function readCourierListQuery(params: URLSearchParams): Required<CourierListQuery> {
+  const day = (k: string) => (DAY.test(params.get(k) ?? "") ? params.get(k)! : "");
+  const status = params.get("status") ?? "";
+  const page = Number.parseInt(params.get("page") ?? "", 10);
+  const size = Number.parseInt(params.get("size") ?? "", 10);
+  return {
+    q: (params.get("q") ?? "").trim().slice(0, 100),
+    status: (Object.values(CourierStatus) as string[]).includes(status) ? status : "",
+    from: day("from"),
+    to: day("to"),
+    page: page > 0 ? page : 1,
+    size: COURIER_PAGE_SIZES.includes(size) ? size : COURIER_PAGE_SIZES[0],
+  };
+}
+
+/**
+ * One page of the scope's courier trip sheets, filtered in the database —
+ * search, status and dates reach every sheet the scope has ever had, not
+ * just the newest few hundred. `counts` are per status for the search and
+ * dates in force (the status tabs), `total` is the filtered count.
+ *
+ * Search matches the sheet number, customer, courier company and invoice
+ * numbers by substring; a waybill by its whole number (an array column has no
+ * substring search without raw SQL).
+ */
+export async function listCourierSheetsPage(
+  tenantId: string,
+  query: CourierListQuery
+): Promise<{ sheets: CourierSheetSummary[]; total: number; page: number; size: number; counts: Record<string, number> }> {
+  const db = scopedPrisma(tenantId);
+  const q = query.q?.trim() ?? "";
+  const size = query.size ?? COURIER_PAGE_SIZES[0];
+  const contains = { contains: q, mode: "insensitive" as const };
+  const where: Prisma.CourierTripSheetWhereInput = {
+    ...((query.from || query.to) && {
+      sheetDate: {
+        ...(query.from && { gte: new Date(`${query.from}T00:00:00Z`) }),
+        ...(query.to && { lte: new Date(`${query.to}T00:00:00Z`) }),
+      },
+    }),
+    ...(q && {
+      OR: [
+        { courierSheetNo: contains },
+        { customerName: contains },
+        { courierCompany: contains },
+        { waybills: { has: q } },
+        { waybills: { has: q.toUpperCase() } },
+        { invoices: { some: { invoiceNo: contains } } },
+      ],
+    }),
+  };
+  const filtered: Prisma.CourierTripSheetWhereInput = { ...where, ...(query.status && { status: query.status as CourierStatus }) };
+
+  const [total, grouped] = await Promise.all([
+    db.courierTripSheet.count({ where: filtered }),
+    db.courierTripSheet.groupBy({ by: ["status"], where, _count: { _all: true } }),
+  ]);
+  // A page past the end (sheets gone since, an old link): the last page.
+  const pages = Math.max(1, Math.ceil(total / size));
+  const page = Math.min(Math.max(1, query.page ?? 1), pages);
+  const rows = await db.courierTripSheet.findMany({
+    where: filtered,
+    orderBy: [{ sheetDate: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+    skip: (page - 1) * size,
+    take: size,
+    select: SUMMARY_SELECT,
   });
+
+  const counts: Record<string, number> = { ALL: 0 };
+  for (const g of grouped) {
+    counts[g.status] = g._count._all;
+    counts.ALL += g._count._all;
+  }
+  return { sheets: rows.map(toSummary), total, page, size, counts };
 }
 
 /** One sheet, as the detail view shows it. Another scope's id is not found. */

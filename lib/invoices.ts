@@ -25,7 +25,7 @@ import { drawnWidth } from "./pdf-measure";
 import {
   getOneDriveInvoiceSource,
   listOneDriveInvoiceFiles,
-  listOneDriveSignedInvoices,
+  listInvoiceFolder,
   getInvoiceItemByName,
   getSignedInvoiceItemByName,
   downloadInvoiceByName,
@@ -68,23 +68,29 @@ export interface InvoiceFile {
  * Uses OneDrive Graph API if an invoice folder is configured there,
  * otherwise falls back to the local filesystem.
  */
-export async function listInvoiceFiles(tenantId: string): Promise<InvoiceFile[]> {
+export async function listInvoiceFiles(
+  tenantId: string,
+  /**
+   * Throw when the OneDrive folder cannot be read, instead of answering an
+   * empty list. The Invoices tab sets it: an empty list there reads as "no
+   * invoices" and shows wrong totals. Matching and imports keep the old
+   * empty answer.
+   */
+  options: { strict?: boolean } = {}
+): Promise<InvoiceFile[]> {
   // Try OneDrive first
   const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
-    return listInvoiceFilesFromOneDrive(tenantId);
+    return listInvoiceFilesFromOneDrive(tenantId, options.strict ?? false);
   }
 
   // Fall back to local filesystem
   return listInvoiceFilesFromLocal(tenantId);
 }
 
-async function listInvoiceFilesFromOneDrive(tenantId: string): Promise<InvoiceFile[]> {
+async function listInvoiceFilesFromOneDrive(tenantId: string, strict: boolean): Promise<InvoiceFile[]> {
   try {
-    const [items, signedItems] = await Promise.all([
-      listOneDriveInvoiceFiles(tenantId),
-      listOneDriveSignedInvoices(tenantId),
-    ]);
+    const { pdfs: items, signed: signedItems } = await listInvoiceFolder(tenantId);
 
     const signedSet = new Set(signedItems.map((s) => s.name.toLowerCase()));
     const signedTimeMap = new Map(
@@ -107,7 +113,15 @@ async function listInvoiceFilesFromOneDrive(tenantId: string): Promise<InvoiceFi
     });
   } catch (err) {
     console.error("Failed to list OneDrive invoice files:", err);
+    if (strict) throw new InvoiceFolderUnreadable();
     return [];
+  }
+}
+
+/** The invoice folder could not be listed (OneDrive down, throttled, token gone). */
+export class InvoiceFolderUnreadable extends Error {
+  constructor() {
+    super("Could not read the invoice folder from OneDrive. Try Sync in a moment.");
   }
 }
 
@@ -750,18 +764,6 @@ export interface DuplicateGroup {
 export async function findDuplicateInvoices(
   tenantId: string
 ): Promise<DuplicateGroup[]> {
-  // Normalize: strip common copy patterns like " (1)", " - Copy", "_copy", etc.
-  const normalize = (filename: string): string => {
-    const name = filename.replace(/\.pdf$/i, "");
-    return name
-      .replace(/\s*\(\d+\)\s*$/i, "")     // " (1)", " (2)"
-      .replace(/\s*-\s*copy\s*\d*$/i, "")  // " - Copy", " - Copy2"
-      .replace(/_copy\d*$/i, "")           // "_copy", "_copy2"
-      .replace(/\s+/g, " ")
-      .trim()
-      .toUpperCase();
-  };
-
   // Get file list from whichever source is active
   const onedrive = await getOneDriveInvoiceSource(tenantId);
   let pdfFiles: string[];
@@ -779,6 +781,27 @@ export async function findDuplicateInvoices(
     const files = fs.readdirSync(folderPath);
     pdfFiles = files.filter((f) => f.toLowerCase().endsWith(".pdf"));
   }
+
+  return duplicateGroupsOf(pdfFiles);
+}
+
+/**
+ * Copies of one invoice among these filenames (" (1)", " - Copy", "_copy2"
+ * …), groups of two or more. Pure: the Invoices tab runs it on the listing it
+ * already has rather than listing the folder again.
+ */
+export function duplicateGroupsOf(pdfFiles: string[]): DuplicateGroup[] {
+  // Normalize: strip common copy patterns like " (1)", " - Copy", "_copy", etc.
+  const normalize = (filename: string): string => {
+    const name = filename.replace(/\.pdf$/i, "");
+    return name
+      .replace(/\s*\(\d+\)\s*$/i, "")     // " (1)", " (2)"
+      .replace(/\s*-\s*copy\s*\d*$/i, "")  // " - Copy", " - Copy2"
+      .replace(/_copy\d*$/i, "")           // "_copy", "_copy2"
+      .replace(/\s+/g, " ")
+      .trim()
+      .toUpperCase();
+  };
 
   const groups = new Map<string, string[]>();
   for (const file of pdfFiles) {
