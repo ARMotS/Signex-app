@@ -7,6 +7,7 @@ import { creditReviewRequired } from "@/lib/collection-confirm";
 import CreditReviewControl from "@/components/admin/CreditReviewControl";
 import RecordFilterBar, { Highlight, type FilterBarConfig } from "@/components/admin/RecordFilterBar";
 import { usePagedRecords, useRecordFilters } from "@/hooks/useRecordFilters";
+import Pager from "@/components/ui/Pager";
 
 /**
  * The dispatcher's collections view and the credit-return report accounts
@@ -72,6 +73,8 @@ interface Counts {
 interface PageExtra {
   counts: Counts;
   facets: { customers: string[]; drivers: { id: string; name: string }[]; trips: { id: string; name: string }[] };
+  /** The read behind the list stopped at its ceiling: older rows need a date range. */
+  capped?: boolean;
 }
 
 const STATUS_LABEL: Record<CollectionRecord["status"], string> = {
@@ -240,8 +243,8 @@ function FolderPanel() {
 }
 
 export default function CollectionsPage() {
-  const [filters, setFilters] = useRecordFilters("collections");
-  const list = usePagedRecords<CollectionRecord, PageExtra>("/api/collections", "collections", filters);
+  const [filters, setFilters, filtersLoaded] = useRecordFilters("collections");
+  const list = usePagedRecords<CollectionRecord, PageExtra>("/api/collections", "collections", filters, filtersLoaded);
   const records = list.items;
   const counts = list.extra?.counts ?? null;
   const [sendingId, setSendingId] = useState<string | null>(null);
@@ -564,13 +567,19 @@ export default function CollectionsPage() {
               </div>
             ))}
           </div>
-          {list.next && (
-            <div className="px-4 py-3 border-t border-ink-border text-center">
-              <button type="button" onClick={list.loadMore} disabled={list.loadingMore} className="act">
-                {list.loadingMore ? "Loading…" : `Load more · ${records.length} of ${list.total ?? "?"}`}
-              </button>
-            </div>
+          {list.extra?.capped && (
+            <p className="px-4 py-2 border-t border-ink-border text-[11px] font-mono text-ink-muted">
+              Only the newest records are searched here. Set a date range to reach older ones.
+            </p>
           )}
+          <Pager
+            page={list.page}
+            pageSize={list.pageSize}
+            total={list.total ?? 0}
+            onPage={list.setPage}
+            onPageSize={list.setPageSize}
+            disabled={list.loading}
+          />
         </div>
       )}
     </div>

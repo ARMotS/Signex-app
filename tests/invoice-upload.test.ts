@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  duplicateGroupsOf,
   sanitizeInvoiceFilename,
   invoiceFilenameForNumber,
   looksLikePdf,
@@ -161,5 +162,17 @@ describe("collectMissingInvoices", () => {
       driverResult({ stops: [stop("A-1", "A-1.pdf"), stop("A-2", "A-2.pdf")] }),
     ];
     expect(collectMissingInvoices(results, new Set())).toEqual([]);
+  });
+});
+
+describe("duplicateGroupsOf", () => {
+  it("groups copies of one invoice from the listing it is given", () => {
+    expect(
+      duplicateGroupsOf(["IV-1.pdf", "IV-1 (1).pdf", "IV-1 - Copy.pdf", "IV-2.pdf", "iv-3_copy2.pdf", "IV-3.PDF"])
+    ).toEqual([
+      { invoiceNumber: "IV-1", filenames: ["IV-1.pdf", "IV-1 (1).pdf", "IV-1 - Copy.pdf"] },
+      { invoiceNumber: "IV-3", filenames: ["iv-3_copy2.pdf", "IV-3.PDF"] },
+    ]);
+    expect(duplicateGroupsOf([])).toEqual([]);
   });
 });

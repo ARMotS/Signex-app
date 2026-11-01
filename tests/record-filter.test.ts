@@ -3,6 +3,7 @@ import {
   EMPTY_FILTER,
   activeFilterCount,
   applyFilter,
+  dateWindowOf,
   filterToParams,
   filterToRequestParams,
   pageOf,
@@ -97,6 +98,32 @@ describe("sorting and paging", () => {
     expect(first).toMatchObject({ total: 30, next: "25" });
     expect(first.items).toHaveLength(25);
     expect(pageOf(many, first.next)).toMatchObject({ items: [25, 26, 27, 28, 29], next: null });
+  });
+
+  it("pages by number: page n of size s starts at (n-1)*s", () => {
+    const many = Array.from({ length: 120 }, (_, i) => i);
+    expect(pageOf(many, String(2 * 50), 50).items).toEqual(many.slice(100, 120));
+    expect(pageOf(many, "500", 25)).toMatchObject({ items: [], total: 120, next: null });
+  });
+});
+
+describe("the database date window", () => {
+  it("is empty with no range", () => {
+    expect(dateWindowOf(state())).toEqual({});
+  });
+
+  it("is wider than the range on both sides, so no viewer's day is cut", () => {
+    const w = dateWindowOf(state({ from: "2026-03-05", to: "2026-03-05" }));
+    // The 5th in UTC+14 starts 10:00 on the 4th UTC; in UTC-12 it ends 12:00 on the 6th.
+    expect(w.since!.getTime()).toBeLessThanOrEqual(Date.parse("2026-03-04T10:00:00Z"));
+    expect(w.until!.getTime()).toBeGreaterThanOrEqual(Date.parse("2026-03-06T12:00:00Z"));
+  });
+
+  it("resolves a preset the same way the filter does", () => {
+    const now = new Date(2026, 9, 15, 12);
+    const w = dateWindowOf(state({ preset: "month" }), now);
+    expect(w.since!.toISOString().slice(0, 10)).toBe("2026-09-30");
+    expect(w.until).toBeDefined();
   });
 });
 

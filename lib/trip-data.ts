@@ -1609,6 +1609,9 @@ export interface CollectionRecord {
   tripName: string | null;
 }
 
+/** Completed trips read per collections list (those holding collections, newest first). */
+const ARCHIVE_READ_CAP = 500;
+
 export interface CollectionQuery {
   type?: CollectionType;
   status?: CollectionStatus;
@@ -1623,6 +1626,12 @@ export interface CollectionQuery {
   /** Default false — only collections that reached an outcome. */
   onlyCompleted?: boolean;
   limit?: number;
+  /**
+   * Set to true when a ceiling cut the read short (live rows, archived trips,
+   * or the merged list): rows older than those returned exist. Lets a list say
+   * "narrow the dates" instead of silently ending.
+   */
+  report?: { capped: boolean };
 }
 
 /**
@@ -1753,6 +1762,7 @@ export async function listCollections(
     completedTripSheetId: null,
   }));
 
+  if (query.report) query.report.capped = live.length >= cap;
   if (!includeArchived) return records.slice(0, cap);
 
   // The archive is filtered in JS because the collections are JSON. Bounded
@@ -1768,7 +1778,7 @@ export async function listCollections(
       ...(since && { completedAt: { gte: since } }),
     },
     orderBy: { completedAt: "desc" },
-    take: 500,
+    take: ARCHIVE_READ_CAP,
     // Not the whole row: `stops` (every run's full stop list, as JSON) is the
     // bulk of it and nothing here reads it.
     select: {
@@ -1781,6 +1791,8 @@ export async function listCollections(
       collections: true,
     },
   });
+
+  if (query.report && archives.length >= ARCHIVE_READ_CAP) query.report.capped = true;
 
   // The rows outlive their trips (detached at completion), so an archived
   // entry's invoice — and the office's decision, which may be made after the
@@ -1858,6 +1870,7 @@ export async function listCollections(
     return b.collectedAt.getTime() - a.collectedAt.getTime();
   });
 
+  if (query.report && records.length > cap) query.report.capped = true;
   return records.slice(0, cap);
 }
 

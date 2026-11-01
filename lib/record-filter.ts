@@ -155,6 +155,23 @@ export function filterToRequestParams(state: FilterState, now = new Date()): URL
   return p;
 }
 
+/**
+ * The state's date range as a UTC window a database read can narrow by, so a
+ * range reaches rows older than the read's row ceiling. Deliberately WIDER
+ * than the range (a day before, two after — the viewer may be up to 14h
+ * either side of UTC): it is a pre-filter, and applyFilter still decides each
+ * row exactly. Empty when no range is set.
+ */
+export function dateWindowOf(state: FilterState, now = new Date()): { since?: Date; until?: Date } {
+  const range = state.preset ? resolvePreset(state.preset, now) : { from: state.from, to: state.to };
+  const day = 24 * 60 * 60 * 1000;
+  const at = (ymd: string, days: number) => new Date(Date.parse(`${ymd}T00:00:00Z`) + days * day);
+  return {
+    ...(range.from && { since: at(range.from, -1) }),
+    ...(range.to && { until: at(range.to, 2) }),
+  };
+}
+
 /** How a tab tells the rulebook where each field is on its rows. */
 export interface FilterAccessors<T> {
   /** Everything the quick search should find (numbers raw AND normalized). */

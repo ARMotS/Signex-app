@@ -7,6 +7,7 @@ import RecordFilterBar, { Highlight, type FilterBarConfig } from "@/components/a
 import { DocChip, StatusBadge } from "@/components/ui/Chips";
 import { applyFilter, toCsv, type FilterAccessors, type FilterState } from "@/lib/record-filter";
 import { useRecordFilters } from "@/hooks/useRecordFilters";
+import Pager from "@/components/ui/Pager";
 
 interface InvoiceFile {
   name: string;
@@ -98,6 +99,7 @@ interface TripUsage {
 
 interface InvoiceData {
   folder: string;
+  source?: "onedrive" | "local";
   count: number;
   signedCount: number;
   unsignedCount: number;
@@ -109,11 +111,13 @@ export default function InvoicesPage() {
   const [data, setData] = useState<InvoiceData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // FOLDER_UNREADABLE: OneDrive did not answer — a retry, not a setting, fixes it.
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [filter, setFilter] = useState<"ALL" | "SIGNED" | "UNSIGNED">("ALL");
   /** Search and filters over the folder listing — see lib/record-filter.ts. */
   const [filters, setFiltersState] = useRecordFilters("invoices");
   const [currentPage, setCurrentPage] = useState(1);
-  const ITEMS_PER_PAGE = 20;
+  const [pageSize, setPageSize] = useState(25);
 
   // Selection state
   const [selectedInvoices, setSelectedInvoices] = useState<Set<string>>(new Set());
@@ -191,8 +195,11 @@ export default function InvoicesPage() {
       .then((json) => {
         if (json.error) {
           setError(json.error);
+          setErrorCode(json.code ?? null);
         } else {
           setData(json);
+          setError(null);
+          setErrorCode(null);
         }
       })
       .catch(() => setError("Failed to connect to server"))
@@ -207,8 +214,10 @@ export default function InvoicesPage() {
       .then((json) => {
         if (json.error) {
           setError(json.error);
+          setErrorCode(json.code ?? null);
         } else {
           setData(json);
+          setErrorCode(null);
           setSelectedInvoices(new Set());
         }
       })
@@ -327,10 +336,10 @@ export default function InvoicesPage() {
   };
 
   // Pagination
-  const totalPages = Math.max(1, Math.ceil(filteredInvoices.length / ITEMS_PER_PAGE));
+  const totalPages = Math.max(1, Math.ceil(filteredInvoices.length / pageSize));
   const paginatedInvoices = filteredInvoices.slice(
-    (currentPage - 1) * ITEMS_PER_PAGE,
-    currentPage * ITEMS_PER_PAGE
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
   );
 
   // Reset to page 1 when filter changes
@@ -484,7 +493,7 @@ export default function InvoicesPage() {
                 ? "Loading…"
                 : error
                 ? "Error loading invoices"
-                : `${data?.count ?? 0} invoices in local folder`}
+                : `${data?.count ?? 0} invoices in ${data?.source === "onedrive" ? "the OneDrive folder" : "the local folder"}`}
             </p>
           </div>
           <button
@@ -545,7 +554,7 @@ export default function InvoicesPage() {
               >
                 {f === "ALL" ? "All" : f === "SIGNED" ? "Signed" : "Unsigned"}
                 <span className={countClass}>
-                  {filterCounts[f]}
+                  {error ? "—" : filterCounts[f]}
                 </span>
               </button>
             );
@@ -645,9 +654,16 @@ export default function InvoicesPage() {
       {error && (
         <div className="bg-ink-red-dim border border-ink-red/20 rounded p-6 text-center">
           <p className="text-sm font-mono text-ink-red mb-2">{error}</p>
-          <p className="text-xs text-ink-muted">
-            Go to <Link href="/settings" className="text-[#0078D4] underline">Settings</Link> and choose an invoice folder via OneDrive, or set a local folder path.
-          </p>
+          {errorCode === "FOLDER_UNREADABLE" ? (
+            <p className="text-xs text-ink-muted">
+              The counts are hidden until the folder answers, so they are never wrong. If Sync keeps failing,
+              reconnect OneDrive in <Link href="/settings" className="text-[#0078D4] underline">Settings</Link>.
+            </p>
+          ) : (
+            <p className="text-xs text-ink-muted">
+              Go to <Link href="/settings" className="text-[#0078D4] underline">Settings</Link> and choose an invoice folder via OneDrive, or set a local folder path.
+            </p>
+          )}
         </div>
       )}
 
@@ -927,85 +943,16 @@ export default function InvoicesPage() {
             </div>
           )}
 
-          {/* Pagination */}
-          {/* Pagination. On a phone the numbered buttons do not fit beside the
-              count — the row was wider than the card and clipped off — so a
-              compact Prev · n / N · Next takes their place there. */}
-          {totalPages > 1 && (
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-3 sm:px-5 py-3 border-t border-ink-border bg-ink-surface/50">
-              <p className="text-xs font-mono text-ink-muted">
-                Showing {(currentPage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(currentPage * ITEMS_PER_PAGE, filteredInvoices.length)} of {filteredInvoices.length}
-              </p>
-              <div className="flex sm:hidden items-center justify-between gap-2">
-                <button
-                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                  disabled={currentPage === 1}
-                  className="act flex-1 justify-center !h-9"
-                >
-                  ‹ Prev
-                </button>
-                <span className="text-xs font-mono text-ink-muted px-2 whitespace-nowrap">
-                  {currentPage} / {totalPages}
-                </span>
-                <button
-                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={currentPage === totalPages}
-                  className="act flex-1 justify-center !h-9"
-                >
-                  Next ›
-                </button>
-              </div>
-              <div className="hidden sm:flex items-center gap-1">
-                <button
-                  onClick={() => setCurrentPage(1)}
-                  disabled={currentPage === 1}
-                  className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                >
-                  «
-                </button>
-                <button
-                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                  disabled={currentPage === 1}
-                  className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                >
-                  ‹ Prev
-                </button>
-                {Array.from({ length: totalPages }, (_, i) => i + 1)
-                  .filter((p) => p === 1 || p === totalPages || Math.abs(p - currentPage) <= 2)
-                  .map((p, idx, arr) => (
-                    <span key={p} className="flex items-center">
-                      {idx > 0 && arr[idx - 1] !== p - 1 && (
-                        <span className="px-1 text-xs text-ink-muted-light">…</span>
-                      )}
-                      <button
-                        onClick={() => setCurrentPage(p)}
-                        className={`w-7 h-7 text-xs font-mono rounded transition-colors ${
-                          p === currentPage
-                            ? "bg-ink-black text-white"
-                            : "text-ink-muted hover:text-ink-black hover:bg-ink-surface"
-                        }`}
-                      >
-                        {p}
-                      </button>
-                    </span>
-                  ))}
-                <button
-                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={currentPage === totalPages}
-                  className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                >
-                  Next ›
-                </button>
-                <button
-                  onClick={() => setCurrentPage(totalPages)}
-                  disabled={currentPage === totalPages}
-                  className="px-2 py-1 text-xs font-mono text-ink-muted hover:text-ink-black disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                >
-                  »
-                </button>
-              </div>
-            </div>
-          )}
+          <Pager
+            page={currentPage}
+            pageSize={pageSize}
+            total={filteredInvoices.length}
+            onPage={setCurrentPage}
+            onPageSize={(size) => {
+              setPageSize(size);
+              setCurrentPage(1);
+            }}
+          />
         </div>
       )}
 

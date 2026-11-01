@@ -6,6 +6,7 @@ import SignaturePad, { type SignaturePadHandle } from "@/components/SignaturePad
 import { DocChip, StatusBadge as Badge, collectionKind, collectionTone, creditNoteTone } from "@/components/ui/Chips";
 import RecordFilterBar, { Highlight, type FilterBarConfig } from "@/components/admin/RecordFilterBar";
 import { usePagedRecords, useRecordFilters } from "@/hooks/useRecordFilters";
+import Pager from "@/components/ui/Pager";
 
 /**
  * Credit notes from the accounting software, read off the branch's credits
@@ -170,11 +171,13 @@ interface PageExtra {
   counts: Record<Status, number>;
   folder: Folder;
   facets: { customers: string[] };
+  /** The read behind the list stopped at its ceiling: older rows need a date range. */
+  capped?: boolean;
 }
 
 export default function CreditsPage() {
-  const [filters, setFilters] = useRecordFilters("credits");
-  const list = usePagedRecords<CreditRow, PageExtra>("/api/credit-notes", "creditNotes", filters);
+  const [filters, setFilters, filtersLoaded] = useRecordFilters("credits");
+  const list = usePagedRecords<CreditRow, PageExtra>("/api/credit-notes", "creditNotes", filters, filtersLoaded);
   const rows = list.items;
   const counts = list.extra?.counts ?? null;
   const folder = list.extra?.folder ?? null;
@@ -464,13 +467,19 @@ export default function CreditsPage() {
               ))}
             </tbody>
           </table>
-          {list.next && (
-            <div className="px-4 py-3 border-t border-ink-border text-center">
-              <button type="button" onClick={list.loadMore} disabled={list.loadingMore} className="act">
-                {list.loadingMore ? "Loading…" : `Load more · ${rows.length} of ${list.total ?? "?"}`}
-              </button>
-            </div>
+          {list.extra?.capped && (
+            <p className="px-4 py-2 border-t border-ink-border text-[11px] font-mono text-ink-muted">
+              Only the newest credit notes are searched here. Set a date range to reach older ones.
+            </p>
           )}
+          <Pager
+            page={list.page}
+            pageSize={list.pageSize}
+            total={list.total ?? 0}
+            onPage={list.setPage}
+            onPageSize={list.setPageSize}
+            disabled={list.loading}
+          />
         </div>
       )}
 

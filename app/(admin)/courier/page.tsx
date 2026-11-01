@@ -7,12 +7,13 @@
  * See lib/courier-import.ts.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { ConfirmationState } from "@/lib/courier-sheet";
 import CourierUpload from "@/components/admin/courier/CourierUpload";
 import CourierInbox, { type InboxState } from "@/components/admin/courier/CourierInbox";
+import Pager from "@/components/ui/Pager";
 import CourierStatusBadge, {
   COURIER_STATUS,
   COURIER_STATUS_ORDER,
@@ -48,63 +49,140 @@ const CONFIRMATION_NOTE: Record<ConfirmationState, { text: string; tone: "muted"
   confirmed: null,
 };
 
+/** The list's filters and page, as the URL carries them. */
+interface ListView {
+  status: CourierStatus | "ALL";
+  q: string;
+  from: string;
+  to: string;
+  page: number;
+  size: number;
+}
+
+const DEFAULT_VIEW: ListView = { status: "ALL", q: "", from: "", to: "", page: 1, size: 25 };
+
+function viewFromUrl(): ListView {
+  const p = new URLSearchParams(window.location.search);
+  const status = p.get("status") as CourierStatus | null;
+  const day = (k: string) => (/^\d{4}-\d{2}-\d{2}$/.test(p.get(k) ?? "") ? p.get(k)! : "");
+  const page = Number.parseInt(p.get("page") ?? "", 10);
+  const size = Number.parseInt(p.get("size") ?? "", 10);
+  return {
+    status: status && COURIER_STATUS_ORDER.includes(status) ? status : "ALL",
+    q: (p.get("q") ?? "").slice(0, 100),
+    from: day("from"),
+    to: day("to"),
+    page: page > 0 ? page : 1,
+    size: [25, 50, 100].includes(size) ? size : 25,
+  };
+}
+
+/** Only what differs from the defaults, so a plain visit keeps a plain URL. */
+function viewToParams(v: ListView): URLSearchParams {
+  const p = new URLSearchParams();
+  if (v.status !== "ALL") p.set("status", v.status);
+  if (v.q.trim()) p.set("q", v.q.trim());
+  if (v.from) p.set("from", v.from);
+  if (v.to) p.set("to", v.to);
+  if (v.page > 1) p.set("page", String(v.page));
+  if (v.size !== 25) p.set("size", String(v.size));
+  return p;
+}
+
 export default function CourierPage() {
   const router = useRouter();
   const [sheets, setSheets] = useState<SheetSummary[]>([]);
+  const [total, setTotal] = useState(0);
+  const [counts, setCounts] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showUpload, setShowUpload] = useState(false);
-  const [status, setStatus] = useState<CourierStatus | "ALL">("ALL");
-  const [query, setQuery] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  // What the list shows. Typing goes to `typed` first and reaches the view
+  // after a pause, so each keystroke is not a request.
+  const [view, setView] = useState<ListView | null>(null);
+  const [typed, setTyped] = useState("");
+  const seq = useRef(0);
 
   const [inbox, setInbox] = useState<InboxState | null>(null);
 
-  const load = useCallback(
-    () =>
-      fetch("/api/courier")
-        .then(async (res) => {
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error);
-          setSheets(data.sheets);
-          setInbox(data.inbox);
-          setError(null);
-        })
-        .catch(() => setError("Could not load courier trip sheets"))
-        .finally(() => setLoading(false)),
-    []
-  );
+  // The URL's view, once, after mount (the server render has no URL).
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const v = viewFromUrl();
+      setView(v);
+      setTyped(v.q);
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+
+  /** Change the filters (back to page 1) or the page. */
+  const change = useCallback((patch: Partial<ListView>) => {
+    setView((v) => {
+      const base = v ?? DEFAULT_VIEW;
+      const filterChanged = (["status", "q", "from", "to", "size"] as const).some(
+        (k) => k in patch && patch[k] !== base[k]
+      );
+      return { ...base, ...patch, page: patch.page ?? (filterChanged ? 1 : base.page) };
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!view || typed === view.q) return;
+    const t = setTimeout(() => change({ q: typed }), 300);
+    return () => clearTimeout(t);
+  }, [typed, view, change]);
+
+  const load = useCallback(async (v: ListView) => {
+    const id = ++seq.current;
+    const params = viewToParams(v);
+    params.set("view", "page");
+    if (!params.has("size")) params.set("size", String(v.size));
+    try {
+      const res = await fetch(`/api/courier?${params.toString()}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      if (id !== seq.current) return; // a newer request is on its way
+      setSheets(data.sheets);
+      setTotal(data.total);
+      setCounts(data.counts ?? {});
+      setInbox(data.inbox);
+      setError(null);
+      // The server answers the last page when asked past the end.
+      if (typeof data.page === "number" && data.page !== v.page) change({ page: data.page });
+    } catch {
+      if (id === seq.current) setError("Could not load courier trip sheets");
+    } finally {
+      if (id === seq.current) setLoading(false);
+    }
+  }, [change]);
+
+  // Load whenever the view changes, and keep the URL in step with it.
+  useEffect(() => {
+    if (!view) return;
+    const url = new URL(window.location.href);
+    for (const k of ["status", "q", "from", "to", "page", "size"]) url.searchParams.delete(k);
+    viewToParams(view).forEach((value, k) => url.searchParams.set(k, value));
+    window.history.replaceState(window.history.state, "", url.toString());
+    void load(view);
+  }, [view, load]);
 
   // Each load also schedules a look at the courier folder (throttled on the
   // server to once a minute), so a sheet the Trip application saves turns up
   // here without anyone pressing anything — while the tab is open and seen.
+  // Only the page in view is re-read.
   useEffect(() => {
-    void load();
+    if (!view) return;
     const timer = setInterval(() => {
-      if (document.visibilityState === "visible") void load();
+      if (document.visibilityState === "visible") void load(view);
     }, 60_000);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [view, load]);
 
-  const counts = useMemo(() => {
-    const c: Record<string, number> = { ALL: sheets.length };
-    for (const s of sheets) c[s.status] = (c[s.status] ?? 0) + 1;
-    return c;
-  }, [sheets]);
-
-  const shown = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return sheets.filter((s) => {
-      if (status !== "ALL" && s.status !== status) return false;
-      if (from && s.sheetDate < from) return false;
-      if (to && s.sheetDate > to) return false;
-      if (!q) return true;
-      return [s.courierSheetNo, s.customerName, s.courierCompany ?? "", ...s.waybills, ...s.invoiceNos].some((v) =>
-        v.toLowerCase().includes(q)
-      );
-    });
-  }, [sheets, status, query, from, to]);
+  const v = view ?? DEFAULT_VIEW;
+  const status = v.status;
+  const reload = () => {
+    if (view) void load(view);
+  };
 
   return (
     <div className="animate-fade-in">
@@ -127,7 +205,7 @@ export default function CourierPage() {
         </button>
       </div>
 
-      {inbox && <CourierInbox inbox={inbox} onChanged={() => void load()} />}
+      {inbox && <CourierInbox inbox={inbox} onChanged={reload} />}
 
       {showUpload && (
         <div className="mb-6">
@@ -149,7 +227,7 @@ export default function CourierPage() {
                 type="button"
                 role="tab"
                 aria-selected={status === s}
-                onClick={() => setStatus(s)}
+                onClick={() => change({ status: s })}
                 className={`act ${status === s ? "act-primary" : ""}`}
               >
                 {s === "ALL" ? "All" : COURIER_STATUS[s].label}
@@ -160,19 +238,19 @@ export default function CourierPage() {
           <div className="flex flex-wrap items-center gap-2">
             <input
               type="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
               placeholder="Search sheet, customer, waybill or invoice…"
               aria-label="Search courier trip sheets"
               className="flex-1 min-w-[14rem] px-3 py-1.5 text-sm bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-green"
             />
             <label className="flex items-center gap-1.5 text-xs text-ink-muted">
               From
-              <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="px-2 py-1 text-sm bg-ink-surface border border-ink-border rounded" />
+              <input type="date" value={v.from} onChange={(e) => change({ from: e.target.value })} className="px-2 py-1 text-sm bg-ink-surface border border-ink-border rounded" />
             </label>
             <label className="flex items-center gap-1.5 text-xs text-ink-muted">
               To
-              <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="px-2 py-1 text-sm bg-ink-surface border border-ink-border rounded" />
+              <input type="date" value={v.to} onChange={(e) => change({ to: e.target.value })} className="px-2 py-1 text-sm bg-ink-surface border border-ink-border rounded" />
             </label>
           </div>
         </div>
@@ -180,9 +258,11 @@ export default function CourierPage() {
         {error && <p className="px-4 py-3 text-sm text-ink-red">{error}</p>}
         {loading ? (
           <p className="px-4 py-6 text-sm text-ink-muted">Loading…</p>
-        ) : shown.length === 0 ? (
+        ) : sheets.length === 0 ? (
           <p className="px-4 py-6 text-sm text-ink-muted">
-            {sheets.length === 0 ? "No courier trip sheets yet. Upload one to start." : "Nothing matches these filters."}
+            {(counts.ALL ?? 0) === 0 && !v.q && !v.from && !v.to
+              ? "No courier trip sheets yet. Upload one to start."
+              : "Nothing matches these filters."}
           </p>
         ) : (
           <>
@@ -201,7 +281,7 @@ export default function CourierPage() {
                 </tr>
               </thead>
               <tbody>
-                {shown.map((s) => (
+                {sheets.map((s) => (
                   <tr
                     key={s.id}
                     onClick={() => router.push(`/courier/${s.id}`)}
@@ -231,7 +311,7 @@ export default function CourierPage() {
 
             {/* Cards on a phone */}
             <ul className="md:hidden divide-y divide-ink-border">
-              {shown.map((s) => (
+              {sheets.map((s) => (
                 <li key={s.id}>
                   <Link href={`/courier/${s.id}`} className="block px-4 py-3 hover:bg-ink-surface/50">
                     <div className="flex items-center gap-2">
@@ -250,6 +330,14 @@ export default function CourierPage() {
                 </li>
               ))}
             </ul>
+            <Pager
+              page={v.page}
+              pageSize={v.size}
+              total={total}
+              onPage={(page) => change({ page })}
+              onPageSize={(size) => change({ size })}
+              disabled={loading}
+            />
           </>
         )}
       </div>

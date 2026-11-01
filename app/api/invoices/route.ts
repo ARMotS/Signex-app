@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { listInvoiceFiles, getInvoiceFolderPath, deleteInvoiceFiles, deleteInvoiceOriginalOnly, findDuplicateInvoices } from "@/lib/invoices";
+import {
+  listInvoiceFiles,
+  getInvoiceFolderPath,
+  deleteInvoiceFiles,
+  deleteInvoiceOriginalOnly,
+  duplicateGroupsOf,
+  InvoiceFolderUnreadable,
+} from "@/lib/invoices";
 import { getCloudAccountStatus } from "@/lib/microsoft-graph";
 import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
@@ -26,12 +33,25 @@ export const GET = withAuth(async () => {
   const cloudStatus = await getCloudAccountStatus(ctx.tenantId);
   const isOneDrive = !!cloudStatus?.invoiceFolderItemId;
 
-  const [files, folderPath, duplicates, pattern] = await Promise.all([
-    listInvoiceFiles(ctx.tenantId),
-    getInvoiceFolderPath(ctx.tenantId),
-    findDuplicateInvoices(ctx.tenantId),
-    readInvoiceNoPattern(ctx.tenantId),
-  ]);
+  // The folder is listed once per load; duplicates come from that same
+  // listing. A folder that cannot be read is an error, never an empty list —
+  // "0 invoices" would be shown as fact, with every total wrong.
+  let files: Awaited<ReturnType<typeof listInvoiceFiles>>;
+  let folderPath: string;
+  let pattern: Awaited<ReturnType<typeof readInvoiceNoPattern>>;
+  try {
+    [files, folderPath, pattern] = await Promise.all([
+      listInvoiceFiles(ctx.tenantId, { strict: true }),
+      getInvoiceFolderPath(ctx.tenantId),
+      readInvoiceNoPattern(ctx.tenantId),
+    ]);
+  } catch (err) {
+    if (err instanceof InvoiceFolderUnreadable) {
+      return NextResponse.json({ error: err.message, code: "FOLDER_UNREADABLE" }, { status: 502 });
+    }
+    throw err;
+  }
+  const duplicates = duplicateGroupsOf(files.map((f) => f.filename));
 
   // Every file seen gets a registry row ("fill": a listing never re-points an
   // invoice at a different copy of itself), then the rows supply each file's
