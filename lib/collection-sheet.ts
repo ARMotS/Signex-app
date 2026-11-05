@@ -154,16 +154,16 @@ export function tokens(cell: Cell): { text: string; x: number }[] {
  * Rows by vertical centre, top to bottom; cells in each row left to right.
  *
  * Chained: each cell is compared with the cell above it, not with the row's
- * first. One sheet line spans a small raised Reason digit, the 9pt
- * description and the 12pt product no / Qty — about 6pt from top to bottom —
- * while lines are 20pt apart.
+ * first. One sheet line spans a small raised Reason cell, the 9pt description
+ * and the 12pt product no / Qty — about 6pt from top to bottom, with a wrapped
+ * reason printed between them — while lines are 20pt apart.
  */
-export function toRows(cells: Cell[]): Cell[][] {
+export function toRows(cells: Cell[], tolerance = 4): Cell[][] {
   const rows: Cell[][] = [];
   let prev: Cell | null = null;
   for (const cell of [...cells].sort((a, b) => a.cy - b.cy)) {
     const row = rows[rows.length - 1];
-    if (row && prev && cell.cy - prev.cy <= Math.max(4, Math.max(prev.height, cell.height) * 0.6)) row.push(cell);
+    if (row && prev && cell.cy - prev.cy <= Math.max(tolerance, Math.max(prev.height, cell.height) * 0.6)) row.push(cell);
     else rows.push([cell]);
     prev = cell;
   }
@@ -192,15 +192,29 @@ export function joinTouching(cells: Cell[]): { x: number; text: string }[] {
   return out;
 }
 
+/** Cells of one column as text, top to bottom: a reason may wrap within its line. */
+function columnText(cells: Cell[]): string {
+  const rows: Cell[][] = [];
+  for (const cell of [...cells].sort((a, b) => a.cy - b.cy)) {
+    const row = rows[rows.length - 1];
+    if (row && cell.cy - row[row.length - 1].cy <= 4) row.push(cell);
+    else rows.push([cell]);
+  }
+  return rows.flatMap((row) => joinTouching(row).map((c) => c.text)).join(" ");
+}
+
 interface RawLine {
   textChunks: { x: number; text: string }[];
   ints: number[];
   reasonText: string;
+  /** Where the Returned figure sits: what is printed right of it is the Reason. */
+  returnedX: number;
 }
 
 /** The table on one page, or [] when the page has no recognisable heading. */
 function readTable(items: TextItem[]): RawLine[] {
-  const rows = toRows(toCells(items));
+  // 7pt: a wrapped reason prints between one line's two baselines.
+  const rows = toRows(toCells(items), 7);
   const headerIndex = rows.findIndex((row) => {
     const words = row.flatMap(tokens);
     return words.some((w) => /^description$/i.test(w.text)) && words.some((w) => /^(qty|quantity)$/i.test(w.text));
@@ -221,28 +235,57 @@ function readTable(items: TextItem[]): RawLine[] {
     const left = row.filter((c) => c.x < numericFrom);
     const middle = row.filter((c) => c.x >= numericFrom && c.x < reasonFrom);
     const reason = row.filter((c) => c.x >= reasonFrom);
-    // Figures in order: Qty, Returned, then the Reason code.
-    const ints = middle
+    // Figures in order: Qty, then Returned. The Reason cell starts right after
+    // Returned on the client's sheet — well before its heading — so whatever is
+    // printed right of that figure is the reason, typed words or a lone digit.
+    const figureCells = middle.filter((c) => isInt(c.text.split(/\s+/)[0]));
+    const figures = figureCells
       .flatMap(tokens)
       .filter((t) => isInt(t.text))
-      .sort((a, b) => a.x - b.x)
-      .map((t) => Number(t.text));
+      .sort((a, b) => a.x - b.x);
+    const returned = figures[1];
+    const ints = figures.filter((t) => !returned || t.x <= returned.x).map((t) => Number(t.text));
+    // A run pdf.js stitched across the two ("0 DAMAGED") gives up only its words.
+    const beyondReturned = returned
+      ? middle.flatMap((c) => {
+          const after = tokens(c).filter((t) => t.x > returned.x);
+          return after.length > 0 ? [{ ...c, x: after[0].x, text: after.map((t) => t.text).join(" ") }] : [];
+        })
+      : [];
+    const reasonText = columnText([...beyondReturned, ...reason]);
     // A description that runs into the numeric zone is still description.
-    const overflow = middle.filter((c) => !c.text.split(/\s+/).every(isInt));
+    const overflow = middle.filter((c) => !isInt(c.text.split(/\s+/)[0]) && (!returned || c.x < returned.x));
     const textCells = [...left, ...overflow];
     const gap = row[0].cy - lastCy;
+    const prev = lines[lines.length - 1];
+    // Printed only in the Reason column, just under a line: that reason wrapped.
+    const reasonWrapped =
+      prev &&
+      ints.length === 0 &&
+      left.length === 0 &&
+      gap < row[0].height * 1.8 &&
+      row.every((c) => c.x > prev.returnedX);
 
     if (ints.length > 0 && textCells.length > 0) {
       lines.push({
         textChunks: joinTouching(textCells),
         ints,
-        reasonText: reason.map((c) => c.text).join(" "),
+        reasonText,
+        returnedX: returned?.x ?? reasonFrom,
       });
       lastCy = row[0].cy;
-    } else if (lines.length > 0 && ints.length === 0 && textCells.length > 0 && gap < row[0].height * 1.8) {
-      // A description wrapped onto a second line.
-      const prev = lines[lines.length - 1];
-      prev.textChunks.push(...joinTouching(textCells).map((c) => ({ ...c, x: Infinity })));
+    } else if (reasonWrapped) {
+      prev.reasonText = [prev.reasonText, columnText(row)].filter(Boolean).join(" ");
+      lastCy = row[0].cy;
+    } else if (prev && ints.length === 0 && textCells.length > 0 && gap < row[0].height * 1.8) {
+      // A description wrapped onto a second line — its reason may have too.
+      const beyond = row.filter((c) => c.x > prev.returnedX);
+      prev.textChunks.push(
+        ...joinTouching(textCells.filter((c) => c.x <= prev.returnedX)).map((c) => ({ ...c, x: Infinity }))
+      );
+      if (beyond.length > 0) {
+        prev.reasonText = [prev.reasonText, columnText(beyond)].filter(Boolean).join(" ");
+      }
       lastCy = row[0].cy;
     } else if (lines.length > 0 || gap > 80) {
       break; // past the table: the footer, or nothing where lines should be
@@ -288,7 +331,7 @@ function toLines(raw: RawLine[], firstLineNo: number): SheetLine[] {
       description = joined[0] ?? "";
     }
 
-    const [qty, returned, code] = line.ints;
+    const [qty, returned] = line.ints;
     return {
       lineNo: firstLineNo + i,
       itemCode,
@@ -296,7 +339,7 @@ function toLines(raw: RawLine[], firstLineNo: number): SheetLine[] {
       description: description || shortName || itemCode || "",
       qtyListed: qty,
       qtyReturnedPrinted: returned ?? null,
-      reasonCode: line.reasonText || (code !== undefined ? String(code) : null),
+      reasonCode: line.reasonText || null,
     };
   });
 }

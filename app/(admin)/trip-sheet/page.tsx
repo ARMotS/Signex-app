@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { useLiveSync } from "@/hooks/useLiveSync";
+import StatusTabs from "@/components/ui/StatusTabs";
 import { FilterSearch } from "@/components/admin/FilterSearch";
 import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 import CollectionSheetPanel, { type SheetCollection } from "@/components/admin/CollectionSheetPanel";
@@ -2805,58 +2806,44 @@ export default function TripSheetPage() {
           {/* Tab bar. Completed sheets come from the archive rather than from
               live trip sheets — closing one out deletes it, which is why the
               day's work needs somewhere else to live. */}
-          <div className="flex items-center justify-between border-b border-ink-border">
-            <div className="flex items-center overflow-x-auto">
-              {([
-                { id: "active" as const, label: "Active Trip Sheets", short: "Active", count: tripSheets.length },
-                {
-                  id: "completed" as const,
-                  label: completedRange === "today" ? "Completed Today" : "All Completed",
-                  short: completedRange === "today" ? "Today" : "Completed",
-                  count: completedSheets.length,
-                },
-              ]).map((t) => (
+          <StatusTabs
+            active={tripTab}
+            onChange={(id) => {
+              setTripTab(id);
+              setShowActiveTrips(true);
+            }}
+            tabs={[
+              { id: "active" as const, label: "Active Trip Sheets", short: "Active", count: tripSheets.length },
+              {
+                id: "completed" as const,
+                label: completedRange === "today" ? "Completed Today" : "All Completed",
+                short: completedRange === "today" ? "Today" : "Completed",
+                count: completedSheets.length,
+              },
+            ]}
+            trailing={
                 <button
-                  key={t.id}
-                  onClick={() => {
-                    setTripTab(t.id);
-                    setShowActiveTrips(true);
-                  }}
-                  className={`flex items-center gap-2 px-3 sm:px-5 py-3 sm:py-4 font-mono text-[13px] sm:text-sm font-medium uppercase tracking-wide whitespace-nowrap border-b-2 -mb-px transition-colors ${
-                    tripTab === t.id
-                      ? "border-ink-green text-ink-black"
-                      : "border-transparent text-ink-muted hover:text-ink-black"
-                  }`}
+                  onClick={() => setShowActiveTrips(!showActiveTrips)}
+                  className="px-3 sm:px-5 py-3 sm:py-4 text-ink-muted hover:text-ink-black transition-colors shrink-0"
+                  title={showActiveTrips ? "Collapse" : "Expand"}
+                  aria-label={showActiveTrips ? "Collapse" : "Expand"}
                 >
-                  <span className="sm:hidden">{t.short}</span>
-                  <span className="hidden sm:inline">{t.label}</span>
-                  <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-mono font-medium rounded-full bg-ink-surface text-ink-muted">
-                    {t.count}
-                  </span>
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className={`transition-transform ${showActiveTrips ? "rotate-180" : ""}`}
+                  >
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
                 </button>
-              ))}
-            </div>
-            <button
-              onClick={() => setShowActiveTrips(!showActiveTrips)}
-              className="px-3 sm:px-5 py-3 sm:py-4 text-ink-muted hover:text-ink-black transition-colors shrink-0"
-              title={showActiveTrips ? "Collapse" : "Expand"}
-              aria-label={showActiveTrips ? "Collapse" : "Expand"}
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className={`transition-transform ${showActiveTrips ? "rotate-180" : ""}`}
-              >
-                <polyline points="6 9 12 15 18 9" />
-              </svg>
-            </button>
-          </div>
+            }
+          />
 
           {/* Search row. One box serving both tabs, so a driver's name typed
               against the live sheets survives the switch into the archive. */}

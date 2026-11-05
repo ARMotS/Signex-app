@@ -13,13 +13,16 @@
  *   • A REJECTED collection stays on record — the signed receipt is the
  *     customer's proof of what was handed over — but no credit note is ever
  *     matched to it, and one that arrives for it is flagged on the Credits page.
+ *   • The handling charge (the sheet's Charged / NO Charge / 20% to Customer
+ *     boxes) is optional and decided with it. Left out of a request it stays
+ *     as it was, so a tab on the previous bundle cannot wipe it; null clears it.
  *   • The decision can be changed — a dispatcher who approves by mistake
  *     rejects again — and is recorded each time. Readers of the archive take
  *     it from the row, not the frozen snapshot.
  */
 
 import { scopedPrisma } from "./db-scoped";
-import { creditReviewRequired } from "./collection-confirm";
+import { CREDIT_CHARGES, creditReviewRequired, type CreditCharge } from "./collection-confirm";
 import { reassessCreditNote } from "./credit-intake";
 import { logAudit } from "./audit";
 
@@ -35,7 +38,8 @@ export async function reviewCreditCollection(
   collectionId: string,
   decision: unknown,
   reason: unknown,
-  by: string
+  by: string,
+  charge?: unknown
 ): Promise<ReviewResult> {
   if (decision !== "APPROVE" && decision !== "REJECT") {
     return { outcome: "invalid", error: "decision must be APPROVE or REJECT" };
@@ -45,6 +49,9 @@ export async function reviewCreditCollection(
     return { outcome: "invalid", error: "Say why the collection is rejected for credit." };
   }
   if (text.length > 600) return { outcome: "invalid", error: "Keep the reason under 600 characters." };
+  if (charge !== undefined && charge !== null && !CREDIT_CHARGES.includes(charge as CreditCharge)) {
+    return { outcome: "invalid", error: "That handling charge is not recognised." };
+  }
 
   const db = scopedPrisma(tenantId);
   const collection = await db.collection.findFirst({
@@ -56,6 +63,7 @@ export async function reviewCreditCollection(
       originalInvoiceNo: true,
       status: true,
       creditReview: true,
+      creditCharge: true,
     },
   });
   if (!collection) return { outcome: "not_found" };
@@ -75,6 +83,7 @@ export async function reviewCreditCollection(
       creditReviewReason: text || null,
       creditReviewedBy: by,
       creditReviewedAt: new Date(),
+      ...(charge !== undefined && { creditCharge: charge as CreditCharge | null }),
     },
   });
   if (res.count === 0) {
@@ -91,6 +100,8 @@ export async function reviewCreditCollection(
       collectionNo: collection.collectionNo,
       previous: collection.creditReview,
       reason: text || null,
+      charge: charge === undefined ? collection.creditCharge : charge,
+      previousCharge: collection.creditCharge,
     }),
     tenantId,
   });

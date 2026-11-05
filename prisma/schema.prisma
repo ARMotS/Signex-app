@@ -499,6 +499,15 @@ enum CreditReview {
   REJECTED
 }
 
+/// The boxes beside "Credit Authorized by" on the office's collection sheet:
+/// the handling charge decided with the approval or rejection. Optional, one
+/// at a time (client decision) — null means none was ticked.
+enum CreditCharge {
+  CHARGED
+  NO_CHARGE
+  CUSTOMER_20
+}
+
 enum CollectionSheetStatus {
   MISSING
   READY
@@ -624,6 +633,7 @@ model Collection {
   creditReviewReason String?   @db.Text
   creditReviewedBy   String?
   creditReviewedAt   DateTime?
+  creditCharge       CreditCharge?
 
   @@unique([tenantId, tripSheetId, collectionNo])
   @@index([tenantId])
@@ -669,7 +679,8 @@ model CollectionLine {
   diffNote     String?   @db.Text
   /// Handed over but not on the sheet — added by the driver (qtyListed 0).
   isExtra      Boolean   @default(false)
-  /// The sheet's Reason cell, as printed (a code on the client's sheet).
+  /// The sheet's Reason cell, as printed: the office's typed reason for this
+  /// line (the client's sample sheet held the placeholders 1, 2, 3).
   reasonCode   String?
   /// Credit return or non-credit uplift. The sheet has no Type column: a sheet
   /// that names an invoice is a credit return against it; one with no invoice

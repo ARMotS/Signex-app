@@ -34,6 +34,8 @@ export interface FilterState {
   trip: string;
   /** The tab's one yes/no filter: has a collection / has variance or warnings. */
   flag: boolean;
+  /** Which status tab (Collections). Empty = every row, what a tab on an older bundle asks. */
+  tab: "" | "active" | "completed";
   sort: SortKey;
 }
 
@@ -50,6 +52,7 @@ export const EMPTY_FILTER: FilterState = {
   driver: "",
   trip: "",
   flag: false,
+  tab: "",
   sort: "date_desc",
 };
 
@@ -81,6 +84,7 @@ export function parseFilterState(params: URLSearchParams): FilterState {
     driver: text("driver"),
     trip: text("trip", 200),
     flag: params.get("flag") === "1",
+    tab: params.get("tab") === "active" || params.get("tab") === "completed" ? (params.get("tab") as "active" | "completed") : "",
     sort: SORTS.includes(sort) ? sort : "date_desc",
   };
 }
@@ -102,6 +106,7 @@ export function filterToParams(state: FilterState): URLSearchParams {
   if (state.driver) p.set("driver", state.driver);
   if (state.trip) p.set("trip", state.trip);
   if (state.flag) p.set("flag", "1");
+  if (state.tab) p.set("tab", state.tab);
   if (state.sort !== "date_desc") p.set("sort", state.sort);
   return p;
 }
@@ -190,6 +195,8 @@ export interface FilterAccessors<T> {
   driver?: (row: T) => string | null;
   trip?: (row: T) => string | null;
   flag?: (row: T) => boolean;
+  /** Which status tab a row belongs on. */
+  lifecycle?: (row: T) => "active" | "completed";
   /** The document number, for sorting. */
   number: (row: T) => string;
 }
@@ -228,6 +235,7 @@ export function applyFilter<T>(rows: T[], state: FilterState, acc: FilterAccesso
     if (state.driver && acc.driver && acc.driver(r) !== state.driver) return false;
     if (state.trip && acc.trip && acc.trip(r) !== state.trip) return false;
     if (state.flag && acc.flag && !acc.flag(r)) return false;
+    if (state.tab && acc.lifecycle && acc.lifecycle(r) !== state.tab) return false;
     return matchesTokens(tokens, acc.search(r));
   });
 

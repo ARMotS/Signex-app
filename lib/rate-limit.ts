@@ -134,6 +134,7 @@ const SHARED_LIMIT_ROUTES: RegExp[] = [
   /^\/api\/credit-notes\/sync$/,
   /^\/api\/credit-notes\/[^/]+$/,
   /^\/api\/collections\/[^/]+\/sheet$/,
+  /^\/api\/collections\/sheets$/,
   /^\/api\/import-templates\/preview$/,
 ];
 

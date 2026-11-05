@@ -137,6 +137,14 @@ describe("the URL", () => {
     expect(activeFilterCount(s)).toBe(3);
   });
 
+  it("carries the status tab, which is not a filter to count", () => {
+    const s = state({ tab: "completed" });
+    expect(filterToParams(s).toString()).toBe("tab=completed");
+    expect(parseFilterState(filterToParams(s)).tab).toBe("completed");
+    expect(activeFilterCount(s)).toBe(0);
+    expect(parseFilterState(new URLSearchParams("tab=nonsense")).tab).toBe("");
+  });
+
   it("ignores anything malformed", () => {
     const parsed = parseFilterState(new URLSearchParams("from=yesterday&sort=drop&preset=decade"));
     expect(parsed).toEqual(EMPTY_FILTER);

@@ -9,6 +9,7 @@
  */
 
 import { scopedPrisma } from "./db-scoped";
+import { collectionReasonLines, type ReasonLine } from "./collection-confirm";
 import { logAudit } from "./audit";
 import { Prisma, StopStatus as PrismaStopStatus } from "@prisma/client";
 import type {
@@ -1148,6 +1149,7 @@ async function liveCollectionFacts(
       creditReview: "APPROVED" | "REJECTED" | null;
       creditReviewReason: string | null;
       creditReviewedBy: string | null;
+      creditCharge: "CHARGED" | "NO_CHARGE" | "CUSTOMER_20" | null;
       invoiceId: string | null;
     }
   >
@@ -1156,7 +1158,7 @@ async function liveCollectionFacts(
   if (wanted.length === 0) return new Map();
   const rows = await scopedPrisma(tenantId).collection.findMany({
     where: { id: { in: wanted } },
-    select: { id: true, creditReview: true, creditReviewReason: true, creditReviewedBy: true, invoiceId: true },
+    select: { id: true, creditReview: true, creditReviewReason: true, creditReviewedBy: true, creditCharge: true, invoiceId: true },
   });
   return new Map(rows.map((r) => [r.id, r]));
 }
@@ -1530,6 +1532,19 @@ function mapCollection(collection: RawCollection): TripCollection {
  * Items listed on the office's sheet and items that came back. Null when the
  * sheet was never read, so readers fall back to the box count.
  */
+/** What the collections list reads of each sheet line: totals and the Reason. */
+const REASON_LINE_SELECT = {
+  lineNo: true,
+  itemCode: true,
+  description: true,
+  qtyListed: true,
+  qtyCollected: true,
+  isExtra: true,
+  diffReason: true,
+  diffNote: true,
+  reasonCode: true,
+} as const;
+
 function lineTotals(
   lines: { qtyListed: number; qtyCollected: number | null; isExtra: boolean }[]
 ): { itemsListed: number | null; itemsCollected: number | null } {
@@ -1595,6 +1610,10 @@ export interface CollectionRecord {
   /** The office's decision on a CR that came back; null when none (yet). */
   creditReview: "APPROVED" | "REJECTED" | null;
   creditReviewReason: string | null;
+  /** The handling charge ticked with the decision (the sheet's boxes); optional. */
+  creditCharge: "CHARGED" | "NO_CHARGE" | "CUSTOMER_20" | null;
+  /** The sheet lines with something to explain: the office's reason, what differed. */
+  reasonLines: ReasonLine[];
   /** The invoice registry row it is credited against — its chain page. */
   invoiceId: string | null;
   /**
@@ -1715,11 +1734,12 @@ export async function listCollections(
       creditReview: true,
       creditReviewReason: true,
       creditReviewedBy: true,
+      creditCharge: true,
       invoiceId: true,
       tripSheetId: true,
       stop: { select: { customerName: true, stopNumber: true } },
       tripSheet: { select: { driverId: true, date: true, sourceFilename: true, driver: { select: { name: true } } } },
-      lines: { select: { qtyListed: true, qtyCollected: true, isExtra: true } },
+      lines: { select: REASON_LINE_SELECT },
     },
     orderBy: { createdAt: "desc" },
     take: cap,
@@ -1752,6 +1772,8 @@ export async function listCollections(
     creditReview: c.creditReview,
     creditReviewReason: c.creditReviewReason,
     creditReviewedBy: c.creditReviewedBy,
+    creditCharge: c.creditCharge,
+    reasonLines: collectionReasonLines(c.lines),
     invoiceId: c.invoiceId,
     rowId: c.id,
     tripDate: c.tripSheet ? c.tripSheet.date.toISOString().slice(0, 10) : null,
@@ -1804,6 +1826,22 @@ export async function listCollections(
     )
   );
 
+  // The snapshot froze totals, not lines; the lines live on with the row, and
+  // the Reason column reads them so nobody has to open the signed receipt.
+  const frozenIds = [...frozenFacts.keys()];
+  const frozenLines = frozenIds.length
+    ? await db.collectionLine.findMany({
+        where: { collectionId: { in: frozenIds } },
+        select: { collectionId: true, ...REASON_LINE_SELECT },
+      })
+    : [];
+  const linesByCollection = new Map<string, typeof frozenLines>();
+  for (const line of frozenLines) {
+    const list = linesByCollection.get(line.collectionId);
+    if (list) list.push(line);
+    else linesByCollection.set(line.collectionId, [line]);
+  }
+
   for (const archive of archives) {
     const frozen = Array.isArray(archive.collections)
       ? (archive.collections as unknown as ArchivedCollection[])
@@ -1851,6 +1889,8 @@ export async function listCollections(
             creditReview: row ? row.creditReview : c.creditReview ?? null,
             creditReviewReason: row ? row.creditReviewReason : c.creditReviewReason ?? null,
             creditReviewedBy: row ? row.creditReviewedBy : c.creditReviewedBy ?? null,
+            creditCharge: row?.creditCharge ?? null,
+            reasonLines: collectionReasonLines(row ? linesByCollection.get(c.collectionId!) ?? [] : []),
             invoiceId: row?.invoiceId ?? null,
             rowId: row ? c.collectionId! : null,
           };

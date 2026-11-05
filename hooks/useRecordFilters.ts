@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { EMPTY_FILTER, PAGE_SIZE, filterToParams, filterToRequestParams, parseFilterState, type FilterState } from "@/lib/record-filter";
 
 /** Query keys the filter owns; anything else in the URL (e.g. ?note=) is left alone. */
-const OWN_KEYS = ["q", "from", "to", "preset", "tripFrom", "tripTo", "status", "type", "customer", "driver", "trip", "flag", "sort"];
+const OWN_KEYS = ["q", "from", "to", "preset", "tripFrom", "tripTo", "status", "type", "customer", "driver", "trip", "flag", "tab", "sort"];
 
 /**
  * A tab's filter state, kept in the URL (so a filtered view survives refresh,

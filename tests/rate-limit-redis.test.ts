@@ -203,6 +203,7 @@ describe("which requests keep the shared budget", () => {
       ["POST", "/api/credit-notes/sync"],
       ["PUT", "/api/credit-notes/abc"],
       ["POST", "/api/collections/abc/sheet"],
+      ["POST", "/api/collections/sheets"],
       ["PUT", "/api/collections/abc/sheet"],
       ["POST", "/api/import-templates/preview"],
     ]) {

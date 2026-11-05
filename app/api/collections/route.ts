@@ -6,7 +6,7 @@ import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
 import { readInvoiceNoPattern } from "@/lib/config";
-import { awaitingCreditReview } from "@/lib/collection-confirm";
+import { CREDIT_CHARGE_LABEL, awaitingCreditReview, collectionLifecycle, collectionReasonText } from "@/lib/collection-confirm";
 import { normalizeInvoiceNo, type InvoiceNoPattern } from "@/lib/invoice-number";
 import { applyFilter, dateWindowOf, facetsOf, pageOf, parseFilterState, parsePageSize, toCsv, type FilterAccessors } from "@/lib/record-filter";
 
@@ -50,25 +50,33 @@ const accessors = (pattern: InvoiceNoPattern): FilterAccessors<CollectionRecord>
     r.originalInvoiceNo,
     r.originalInvoiceNo ? normalizeInvoiceNo(r.originalInvoiceNo, pattern) : null,
     r.driverName,
-    r.exceptionReason,
+    collectionReasonText(r),
     r.signedByName,
   ],
   date: (r) => r.collectedAt?.toISOString() ?? null,
   tripDate: (r) => r.tripDate,
   status: (r) => r.status,
   // The office's decision, made on this tab before or after the trip closes.
-  tags: (r) => (awaitingCreditReview(r) ? ["AWAITING_APPROVAL"] : []),
+  tags: (r) =>
+    awaitingCreditReview(r)
+      ? ["AWAITING_APPROVAL"]
+      : r.creditReview === "APPROVED"
+        ? ["CREDIT_APPROVED"]
+        : r.creditReview === "REJECTED"
+          ? ["CREDIT_REJECTED"]
+          : [],
   type: (r) => r.type,
   customer: (r) => r.customerName,
   driver: (r) => r.driverId,
   trip: (r) => r.tripSheetId,
   flag: (r) => r.hasVariance,
+  lifecycle: (r) => collectionLifecycle(r),
   number: (r) => r.collectionNo,
 });
 
 const CSV_HEADERS = [
   "Collection No", "Type", "Subtype", "Original Invoice", "Customer", "Status", "Expected", "Collected",
-  "Not as listed", "Reason", "Approval", "Driver", "Trip date", "Trip sheet", "Signed By", "Collected At",
+  "Not as listed", "Reason", "Approval", "Charge", "Driver", "Trip date", "Trip sheet", "Signed By", "Collected At",
   "Signed Document", "Receipt Email",
 ];
 
@@ -83,8 +91,9 @@ function csvRow(r: CollectionRecord) {
     r.itemsListed ?? r.expectedQty ?? "",
     r.itemsCollected ?? r.collectedQty ?? "",
     r.hasVariance ? "Yes" : "",
-    r.exceptionReason ?? "",
+    collectionReasonText(r),
     r.creditReview ?? "",
+    r.creditCharge ? CREDIT_CHARGE_LABEL[r.creditCharge] : "",
     r.driverName ?? "",
     r.tripDate ?? "",
     r.tripName ?? "",
@@ -138,8 +147,32 @@ export const GET = withAuth(async (request: NextRequest) => {
 
     const page = pageOf(rows, searchParams.get("after"), parsePageSize(searchParams.get("size")));
     const count = (pred: (r: CollectionRecord) => boolean) => rows.filter(pred).length;
+    // The tabs and summary count what the search and dates let through, whichever
+    // tab and status are open (as Trip Sheets' tabs count their whole lists).
+    const beforeTab = applyFilter(
+      all,
+      { ...state, tab: "", status: [] },
+      acc,
+      new Date(),
+      parseTzOffset(searchParams.get("tzOffset"))
+    );
+    const tally = (pred: (r: CollectionRecord) => boolean) => beforeTab.filter(pred).length;
+    // Another collection on the same invoice: a credit could be doubled. Counted
+    // over the whole read, not this page. A rejected or failed one credits nothing.
+    const onInvoice = new Map<string, number>();
+    const invoiceKey = (r: CollectionRecord) =>
+      r.type === "CREDIT_RETURN" && r.originalInvoiceNo ? normalizeInvoiceNo(r.originalInvoiceNo, pattern) : null;
+    for (const r of all) {
+      const key = invoiceKey(r);
+      if (key && r.creditReview !== "REJECTED" && !["NOT_AVAILABLE", "REFUSED"].includes(r.status)) {
+        onInvoice.set(key, (onInvoice.get(key) ?? 0) + 1);
+      }
+    }
     return NextResponse.json({
-      collections: page.items,
+      collections: page.items.map((r) => {
+        const key = invoiceKey(r);
+        return { ...r, othersOnInvoice: key ? Math.max((onInvoice.get(key) ?? 1) - 1, 0) : 0 };
+      }),
       total: page.total,
       next: page.next,
       capped: report.capped,
@@ -153,6 +186,18 @@ export const GET = withAuth(async (request: NextRequest) => {
         exceptions: count((r) => EXCEPTION_STATUSES.has(r.status)),
         // Across the whole scope, not the filtered view: it is a to-do count.
         awaitingApproval: all.filter((r) => awaitingCreditReview(r)).length,
+        tabs: {
+          all: beforeTab.length,
+          active: tally((r) => collectionLifecycle(r) === "active"),
+          completed: tally((r) => collectionLifecycle(r) === "completed"),
+          awaiting: tally((r) => awaitingCreditReview(r)),
+          approved: tally((r) => r.creditReview === "APPROVED"),
+          rejected: tally((r) => r.creditReview === "REJECTED"),
+        },
+        itemsCollected: beforeTab.reduce((n, r) => n + (r.itemsCollected ?? r.collectedQty ?? 0), 0),
+        receiptNotEmailed: tally(
+          (r) => (r.status === "COLLECTED" || r.status === "PARTIAL") && r.emailStatus !== "SENT"
+        ),
       },
     });
   }

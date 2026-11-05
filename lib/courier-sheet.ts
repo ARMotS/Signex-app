@@ -11,6 +11,22 @@
 import { normalizeInvoiceNo, type InvoiceNoPattern } from "./invoice-number";
 import type { MappedSheet } from "./sheet-mapping";
 
+/**
+ * The Courier page's tabs. Active runs up to the customer's confirmation: a
+ * collected sheet can still need filing, its email or a phone call. Completed is
+ * a sheet the customer confirmed. Status strings, so the browser can use them.
+ */
+export const COURIER_ACTIVE_STATUSES = ["NEEDS_ATTENTION", "AWAITING_COLLECTION", "COLLECTED"] as const;
+export const COURIER_COMPLETED_STATUSES = ["DELIVERED"] as const;
+export type CourierTab = "active" | "completed";
+
+export function courierTabOf(status: string): CourierTab {
+  return (COURIER_COMPLETED_STATUSES as readonly string[]).includes(status) ? "completed" : "active";
+}
+
+/** Not yet signed for: only these can be changed or deleted. */
+export const COURIER_OPEN_STATUSES = ["NEEDS_ATTENTION", "AWAITING_COLLECTION"] as const;
+
 // ─── Customers ────────────────────────────────────────────────────────────
 
 /**

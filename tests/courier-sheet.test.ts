@@ -19,6 +19,7 @@ import {
   todayInJohannesburg,
   type LineFacts,
 } from "@/lib/courier-sheet";
+import { courierTabOf } from "@/lib/courier-sheet";
 
 const TODAY = "2026-10-22";
 const read = (grid: Grid, filename = "cts-200189-p5.xlsx", prompts: Record<string, string> = {}) =>
@@ -276,5 +277,12 @@ describe("todayInJohannesburg", () => {
     // 23:30 UTC is already the next day in Johannesburg (UTC+2).
     expect(todayInJohannesburg(new Date("2026-10-21T23:30:00Z"))).toBe("2026-10-22");
     expect(todayInJohannesburg(new Date("2026-10-21T21:30:00Z"))).toBe("2026-10-21");
+  });
+});
+
+describe("the Courier page's tabs", () => {
+  it("keeps a sheet Active until the customer confirms it", () => {
+    for (const s of ["NEEDS_ATTENTION", "AWAITING_COLLECTION", "COLLECTED"]) expect(courierTabOf(s)).toBe("active");
+    expect(courierTabOf("DELIVERED")).toBe("completed");
   });
 });

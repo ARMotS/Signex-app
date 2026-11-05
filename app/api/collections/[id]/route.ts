@@ -257,6 +257,18 @@ export const PUT = withAuth(async (
     return row;
   });
 
+  // For the receipt only: the load above is also what a driver is sent, and it
+  // has no need of this. On the sheet path, one read.
+  const sheetReasons = new Map(
+    confirmation
+      ? (
+          await ctx.db.collectionLine.findMany({
+            where: { collectionId: id, isExtra: false },
+            select: { lineNo: true, reasonCode: true },
+          })
+        ).map((l) => [l.lineNo, l.reasonCode] as const)
+      : []
+  );
   // The receipt's item table, straight from what was just recorded.
   const receiptLines: ReceiptLine[] | undefined = confirmation
     ? [
@@ -270,6 +282,7 @@ export const PUT = withAuth(async (
             diffReason: u.diffReason ? DIFF_REASON_LABEL[u.diffReason] : null,
             diffNote: u.diffNote,
             isExtra: false,
+            reasonCode: sheetReasons.get(l.lineNo) ?? null,
           };
         }),
         ...confirmation.extras.map((e) => ({

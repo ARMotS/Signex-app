@@ -10,11 +10,11 @@ import {
 } from "@/lib/record-filter";
 
 /**
- * The one filter bar the Invoices, Collections and Credits tabs share: a quick
- * search (debounced), filters (inline on a desktop, a collapsible panel on a
- * phone), the active filters as removable chips with "Clear all", the result
- * count, sort and CSV export. Filtering itself happens on the server
- * (lib/record-filter.ts); this only edits the state.
+ * The one filter bar the Invoices, Collections and Credits tabs share. One quiet
+ * row: a quick search (debounced), the date, a Filters button, sort, CSV and the
+ * result count. Everything else stays in a panel until asked for, and what is in
+ * force shows as removable chips only while something is. Filtering itself happens
+ * on the server (lib/record-filter.ts); this only edits the state.
  */
 
 export interface FilterBarConfig {
@@ -54,6 +54,7 @@ export default function RecordFilterBar({
   loading,
   exportHref,
   onExport,
+  embedded,
 }: {
   state: FilterState;
   onChange: (next: FilterState) => void;
@@ -64,6 +65,8 @@ export default function RecordFilterBar({
   exportHref?: string;
   /** Or, for a list filtered in the browser, build the CSV there. */
   onExport?: () => void;
+  /** Inside a list card, under its tabs, rather than a card of its own. */
+  embedded?: boolean;
 }) {
   const [panelOpen, setPanelOpen] = useState(false);
   const [custom, setCustom] = useState(!!(state.from || state.to));
@@ -91,15 +94,19 @@ export default function RecordFilterBar({
     return () => clearTimeout(t);
   }, [text, state, onChange]);
 
-  const activeCount = activeFilterCount(state);
+  // A status this bar does not offer belongs to the page's own tabs (Credits,
+  // Collections): not counted, not a chip, and left alone by Clear all.
+  const barStatuses = new Set(config.statusOptions.map((o) => o.value));
+  const statusChips = state.status.filter((s) => barStatuses.has(s));
+  const activeCount = activeFilterCount(state) - (state.status.length > 0 && statusChips.length === 0 ? 1 : 0);
+  const dateValue = state.preset || (custom || state.from || state.to ? "custom" : "");
   const chips: { key: string; text: string; clear: Partial<FilterState> }[] = [];
   if (state.preset) chips.push({ key: "preset", text: `${config.dateLabel}: ${PRESETS.find((p) => p.value === state.preset)?.label}`, clear: { preset: "" } });
   else if (state.from || state.to)
     chips.push({ key: "range", text: `${config.dateLabel}: ${state.from || "…"} – ${state.to || "…"}`, clear: { from: "", to: "" } });
   if (state.tripFrom || state.tripTo)
     chips.push({ key: "trip-range", text: `Trip date: ${state.tripFrom || "…"} – ${state.tripTo || "…"}`, clear: { tripFrom: "", tripTo: "" } });
-  // A tab whose status lives in its own tabs (Credits) has no status chips.
-  for (const s of config.statusOptions.length ? state.status : []) {
+  for (const s of statusChips) {
     chips.push({
       key: `status-${s}`,
       text: config.statusOptions.find((o) => o.value === s)?.label ?? s,
@@ -117,10 +124,10 @@ export default function RecordFilterBar({
   const plural = (n: number) => `${n} ${config.noun}${n === 1 ? "" : "s"}`;
 
   return (
-    <div className="bg-ink-card border border-ink-border rounded mb-4">
-      {/* Search, filters, sort, export */}
-      <div className="flex flex-wrap items-center gap-2 p-3">
-        <div className="relative flex-1 basis-full sm:basis-auto min-w-0 sm:min-w-[16rem]">
+    <div className={embedded ? "border-b border-ink-border bg-ink-surface/30" : "bg-ink-card border border-ink-border rounded mb-4"}>
+      {/* Search, date, filters, sort, export, count */}
+      <div className="flex flex-wrap items-center gap-2 p-2">
+        <div className="relative flex-1 basis-full sm:basis-40 min-w-0">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
             className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-muted">
             <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
@@ -131,28 +138,42 @@ export default function RecordFilterBar({
             onChange={(e) => setText(e.target.value)}
             placeholder={config.searchPlaceholder}
             aria-label="Search"
-            className="w-full h-9 pl-8 pr-3 text-sm bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-green"
+            className="w-full h-8 pl-8 pr-3 text-sm bg-ink-surface border border-ink-border rounded focus:outline-none focus:border-ink-green"
           />
         </div>
+        <select
+          value={dateValue}
+          aria-label={config.dateLabel}
+          title={config.dateLabel}
+          onChange={(e) => {
+            const v = e.target.value;
+            setCustom(v === "custom");
+            set({ preset: v === "custom" || v === "" ? "" : (v as DatePreset), from: "", to: "" });
+          }}
+          className={inputClass}
+        >
+          <option value="">Any date</option>
+          {PRESETS.map((p) => (
+            <option key={p.value} value={p.value}>{p.label}</option>
+          ))}
+          <option value="custom">Custom range…</option>
+        </select>
         <button
           type="button"
           onClick={() => setPanelOpen((o) => !o)}
           aria-expanded={panelOpen}
-          className={`act sm:hidden ${activeCount ? "act-green" : ""}`}
+          className={`act ${activeCount ? "act-green" : ""}`}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <line x1="4" y1="6" x2="20" y2="6" /><line x1="7" y1="12" x2="17" y2="12" /><line x1="10" y1="18" x2="14" y2="18" />
           </svg>
           Filters{activeCount ? ` · ${activeCount}` : ""}
         </button>
-        <label className="flex items-center gap-1.5">
-          <span className="sr-only">Sort by</span>
-          <select value={state.sort} onChange={(e) => set({ sort: e.target.value as SortKey })} className={inputClass} aria-label="Sort by">
-            {config.sortOptions.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </label>
+        <select value={state.sort} onChange={(e) => set({ sort: e.target.value as SortKey })} className={inputClass} aria-label="Sort by">
+          {config.sortOptions.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
         {exportHref && (
           <a href={exportHref} className="act" title="The current filtered results as CSV">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -169,40 +190,23 @@ export default function RecordFilterBar({
             CSV
           </button>
         )}
+        <span className="hidden lg:inline text-xs font-mono text-ink-muted whitespace-nowrap px-1">
+          {loading && total === null ? "Loading…" : total !== null ? plural(total) : ""}
+        </span>
       </div>
 
-      {/* Filters — always shown from tablet width up, a panel on a phone. */}
-      <div className={`${panelOpen ? "grid" : "hidden"} sm:grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 px-3 pb-3`}>
-        <div className="flex flex-col gap-1 sm:col-span-2">
+      {dateValue === "custom" && (
+        <div className="flex flex-wrap items-center gap-2 px-2 pb-2">
           <span className={label}>{config.dateLabel}</span>
-          <div className="flex flex-wrap gap-1.5">
-            {PRESETS.map((p) => (
-              <button
-                key={p.value}
-                type="button"
-                onClick={() => { setCustom(false); set({ preset: state.preset === p.value ? "" : p.value, from: "", to: "" }); }}
-                className={`act ${state.preset === p.value ? "!bg-ink-black !text-white !border-ink-black" : ""}`}
-              >
-                {p.label}
-              </button>
-            ))}
-            <button
-              type="button"
-              onClick={() => { setCustom((c) => !c); set({ preset: "" }); }}
-              className={`act ${custom && !state.preset ? "!bg-ink-black !text-white !border-ink-black" : ""}`}
-            >
-              Custom
-            </button>
-          </div>
-          {custom && !state.preset && (
-            <div className="flex items-center gap-2 mt-1">
-              <input type="date" value={state.from} max={state.to || undefined} onChange={(e) => set({ from: e.target.value })} className={inputClass} aria-label={`${config.dateLabel} from`} />
-              <span className="text-xs text-ink-muted">to</span>
-              <input type="date" value={state.to} min={state.from || undefined} onChange={(e) => set({ to: e.target.value })} className={inputClass} aria-label={`${config.dateLabel} to`} />
-            </div>
-          )}
+          <input type="date" value={state.from} max={state.to || undefined} onChange={(e) => set({ from: e.target.value })} className={inputClass} aria-label={`${config.dateLabel} from`} />
+          <span className="text-xs text-ink-muted">to</span>
+          <input type="date" value={state.to} min={state.from || undefined} onChange={(e) => set({ to: e.target.value })} className={inputClass} aria-label={`${config.dateLabel} to`} />
         </div>
+      )}
 
+      {/* The rest, only when asked for. */}
+      {panelOpen && (
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-3 border-t border-ink-border">
         {config.tripDate && (
           <div className="flex flex-col gap-1">
             <span className={label}>Trip date</span>
@@ -289,24 +293,30 @@ export default function RecordFilterBar({
           </label>
         )}
       </div>
+      )}
 
-      {/* What is in force, and how many it let through */}
-      <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-t border-ink-border bg-ink-surface/40">
-        <span className="text-xs font-mono text-ink-muted mr-1">
-          {loading && total === null ? "Loading…" : total !== null ? plural(total) : ""}
-        </span>
-        {chips.map((c) => (
-          <button key={c.key} type="button" onClick={() => set(c.clear)} className="act" aria-label={`Remove filter ${c.text}`}>
-            {c.text}
-            <span aria-hidden="true" className="text-ink-muted">×</span>
-          </button>
-        ))}
-        {(chips.length > 0 || state.q) && (
-          <button type="button" onClick={() => { setText(""); setCustom(false); onChange({ ...EMPTY_FILTER, sort: state.sort }); }} className="act act-danger">
+      {/* What is in force, only while something is */}
+      {(chips.length > 0 || state.q) && (
+        <div className="flex flex-wrap items-center gap-1.5 px-2 py-2 border-t border-ink-border">
+          {chips.map((c) => (
+            <button key={c.key} type="button" onClick={() => set(c.clear)} className="act" aria-label={`Remove filter ${c.text}`}>
+              {c.text}
+              <span aria-hidden="true" className="text-ink-muted">×</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => {
+              setText("");
+              setCustom(false);
+              onChange({ ...EMPTY_FILTER, sort: state.sort, tab: state.tab, status: state.status.filter((s) => !barStatuses.has(s)) });
+            }}
+            className="act act-danger"
+          >
             Clear all
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

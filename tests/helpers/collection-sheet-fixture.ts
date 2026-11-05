@@ -3,7 +3,9 @@
  * and font sizes copied from that PDF's text layer, including the quirks the
  * reader has to cope with — each line on two baselines in two sizes, the
  * raised Reason digit, the joint "Qty Returned" heading and the unlabelled
- * short-name column.
+ * short-name column. `currentLayout` is the sheet the client prints today, with
+ * positions from a live one (values invented): no short-name column, and the
+ * Reason as typed text starting right after Returned, far left of its heading.
  */
 
 import { PDFDocument, StandardFonts, type PDFFont, type PDFPage } from "pdf-lib";
@@ -16,6 +18,10 @@ export interface FixtureLine {
   description: string;
   qty: number;
   reason: string;
+  /** Where the Reason cell starts: by default just after Returned, as on the real sheet. */
+  reasonX?: number;
+  /** A second line of the same reason, printed under the first. */
+  reasonWrap?: string;
 }
 
 export const CRCOL_1797_LINES: FixtureLine[] = [
@@ -37,6 +43,7 @@ export async function collectionSheetPdf(
     pages?: FixtureLine[][];
     /** Print the number as its own run, well clear of the title (other generators do). */
     numberApart?: boolean;
+    currentLayout?: boolean;
   } = {}
 ): Promise<Buffer> {
   const doc = await PDFDocument.create();
@@ -71,6 +78,29 @@ export async function collectionSheetPdf(
     text(page, sans, "Page no:", 362, 244, 8);
     text(page, mono, String(pageIndex + 1), 422, 241, 10);
 
+    if (opts.currentLayout) {
+      text(page, bold, "Product No", 37, 281, 8);
+      text(page, bold, "Description", 184, 281, 8);
+      text(page, bold, "Qty", 308, 281, 8);
+      text(page, bold, "Returned", 334, 281, 8);
+      text(page, bold, "Reason", 424, 281, 8);
+      lines.forEach((line, i) => {
+        const top = 305.2 + i * 22.5;
+        text(page, sans, line.itemCode, 17, top, 12);
+        text(page, sans, line.description, 122, top + 1, 9);
+        text(page, sans, String(line.qty), 330, top, 12);
+        text(page, sans, "0", 362, top + 1, 9);
+        if (line.reason) text(page, sans, line.reason, 374, top + 0.4, 8);
+      });
+      const below = 305.2 + lines.length * 22.5 + 4;
+      text(page, sans, "All Goods remain the property of Electro City cc until paid for in full.", 23, below, 8);
+      text(page, sans, "All goods correctly supplied and then returned", 315, below - 1.5, 8);
+      text(page, sans, "Goods received in good order and condition.", 23, below + 10, 8);
+      text(page, sans, "for credit, a 20% handling charge will be charged", 315, below + 10, 8);
+      text(page, bold, "Driver Signature", 63, below + 55, 8);
+      return;
+    }
+
     text(page, bold, "Product no", 18, 270, 8);
     text(page, bold, "Description", 221, 270, 8);
     text(page, bold, "Qty", 340, 270, 8);
@@ -87,7 +117,8 @@ export async function collectionSheetPdf(
       text(page, sans, line.description, 180, top, 9);
       text(page, sans, String(line.qty), 361, top + 2, 12);
       text(page, sans, "0", 390, top, 9);
-      text(page, sans, line.reason, 397, top - 2.3, 8);
+      text(page, sans, line.reason, line.reasonX ?? 397, top - 2.3, 8);
+      if (line.reasonWrap) text(page, sans, line.reasonWrap, line.reasonX ?? 397, top + 7.7, 8);
     });
 
     const footer = 296 + lines.length * 22.5 + 3;
