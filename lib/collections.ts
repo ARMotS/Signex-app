@@ -682,6 +682,54 @@ export async function removeSettledOriginals(
   return { removed };
 }
 
+/**
+ * The office deletes an unsigned sheet from the collections folder (the
+ * Collections tab). Resolved by name in Pending/ then the folder root, never in
+ * Signed/, which nothing ever deletes from.
+ *
+ * Refused while a collection depends on it: anything still on a live trip (a
+ * driver may be reading it), or a signed one whose receipt could not embed the
+ * original, which makes this file the only copy of what was listed.
+ */
+export async function deleteCollectionDocument(
+  tenantId: string,
+  rawName: string
+): Promise<{ outcome: "deleted" | "not_found" } | { outcome: "in_use"; collectionNos: string[] }> {
+  // A name that sanitising would change never came from the folder listing.
+  const filename = sanitizeCollectionFilename(rawName);
+  if (!filename || filename !== rawName) return { outcome: "not_found" };
+
+  const needing = await scopedPrisma(tenantId).collection.findMany({
+    where: {
+      sourceFilePath: { equals: filename, mode: "insensitive" },
+      OR: [
+        { tripSheetId: { not: null } },
+        { status: { in: ["COLLECTED", "PARTIAL"] }, signedIncludesSource: false },
+      ],
+    },
+    select: { collectionNo: true },
+  });
+  if (needing.length > 0) {
+    return { outcome: "in_use", collectionNos: [...new Set(needing.map((c) => c.collectionNo))] };
+  }
+
+  const onedrive = await getOneDriveCollectionsSource(tenantId);
+  if (onedrive) {
+    const item = await getCollectionItemByName(tenantId, filename);
+    if (!item?.id) return { outcome: "not_found" };
+    await deleteFileById(tenantId, item.id);
+    return { outcome: "deleted" };
+  }
+  const folderPath = await getCollectionsFolderPath(tenantId);
+  const target = [
+    resolveWithinFolder(folderPath, PENDING_SUBFOLDER, filename),
+    resolveWithinFolder(folderPath, filename),
+  ].find((p) => fs.existsSync(p) && fs.statSync(p).isFile());
+  if (!target) return { outcome: "not_found" };
+  fs.unlinkSync(target);
+  return { outcome: "deleted" };
+}
+
 // ─── Outcome validation ───────────────────────────────────────────────────
 
 /** Statuses that close a collection out. Everything else is still outstanding. */
@@ -841,6 +889,8 @@ export interface ReceiptLine {
   diffReason: string | null;
   diffNote: string | null;
   isExtra: boolean;
+  /** The sheet's Reason cell: why the office is bringing it back. */
+  reasonCode?: string | null;
 }
 
 export const COLLECTION_TYPE_LABEL: Record<CollectionType, string> = {
@@ -1003,10 +1053,15 @@ export async function buildSignedCollectionPdf(
   if (sheetLines.length > 0) {
     y -= 6;
     const cols = { item: margin, desc: margin + 78, listed: PAGE_WIDTH - margin - 118, got: PAGE_WIDTH - margin - 58 };
+    // A Reason column only when a line has one, so a sheet without any keeps the
+    // description's full width.
+    const hasReasons = sheetLines.some((l) => l.reasonCode?.trim());
+    const reasonX = hasReasons ? cols.desc + (cols.listed - cols.desc) * 0.52 : cols.listed;
     const header = () => {
       for (const [label, x] of [
         ["ITEM", cols.item],
         ["DESCRIPTION", cols.desc],
+        ...(hasReasons ? [["REASON", reasonX] as const] : []),
         ["LISTED", cols.listed],
         ["COLLECTED", cols.got],
       ] as const) {
@@ -1020,8 +1075,10 @@ export async function buildSignedCollectionPdf(
 
     for (const line of sheetLines) {
       const differs = line.isExtra || line.diffReason !== null || (line.qtyCollected ?? 0) !== line.qtyListed;
-      const descLines = wrapText(pdfText(line.description), font, 9, cols.listed - cols.desc - 10);
-      const needed = descLines.length * 11 + (differs ? 12 : 0) + 6;
+      const descLines = wrapText(pdfText(line.description), font, 9, reasonX - cols.desc - 10);
+      const reasonLines = hasReasons && line.reasonCode?.trim() ? wrapText(pdfText(line.reasonCode), font, 9, cols.listed - reasonX - 10) : [];
+      const textLines = Math.max(descLines.length, reasonLines.length);
+      const needed = textLines * 11 + (differs ? 12 : 0) + 6;
       if (y - needed < margin + 200) {
         page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
         y = PAGE_HEIGHT - margin;
@@ -1030,9 +1087,10 @@ export async function buildSignedCollectionPdf(
       const weight = differs ? bold : font;
       page.drawText(pdfText(line.itemCode ?? "—").slice(0, 14) || "—", { x: cols.item, y, size: 9, font: weight, color: ink });
       descLines.forEach((t, i) => page.drawText(t, { x: cols.desc, y: y - i * 11, size: 9, font, color: ink }));
+      reasonLines.forEach((t, i) => page.drawText(t, { x: reasonX, y: y - i * 11, size: 9, font, color: ink }));
       page.drawText(line.isExtra ? "—" : String(line.qtyListed), { x: cols.listed, y, size: 9, font, color: ink });
       page.drawText(String(line.qtyCollected ?? "—"), { x: cols.got, y, size: 9, font: weight, color: ink });
-      y -= descLines.length * 11;
+      y -= textLines * 11;
       if (differs) {
         const why = line.isExtra
           ? `Extra — not on the sheet · Collected ${line.qtyCollected ?? 0}`

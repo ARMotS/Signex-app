@@ -259,6 +259,30 @@ export function awaitingCreditReview(c: ReviewableCollection): boolean {
   return creditReviewRequired(c) && !c.creditReview;
 }
 
+/**
+ * Which tab of the Collections page it belongs on. Active: someone still has to
+ * act — the driver (pending), or the office (a credit return awaiting its
+ * decision). Completed: everything else. So a row moves by itself when its
+ * status does, and a decision changed back cannot strand one.
+ */
+export function collectionLifecycle(c: ReviewableCollection): "active" | "completed" {
+  return c.status === "PENDING" || awaitingCreditReview(c) ? "active" : "completed";
+}
+
+/**
+ * The boxes beside "Credit Authorized by" on the office's sheet, ticked with
+ * the approval or rejection. Optional, and one at a time (client decision).
+ */
+export const CREDIT_CHARGES = ["CHARGED", "NO_CHARGE", "CUSTOMER_20"] as const;
+export type CreditCharge = (typeof CREDIT_CHARGES)[number];
+
+/** As the sheet prints them. */
+export const CREDIT_CHARGE_LABEL: Record<CreditCharge, string> = {
+  CHARGED: "Charged",
+  NO_CHARGE: "NO Charge",
+  CUSTOMER_20: "20% to Customer",
+};
+
 /** Quick reasons offered when rejecting; any other reason can be typed. */
 export const CREDIT_REJECT_REASONS = [
   "Goods damaged by the customer",
@@ -266,3 +290,85 @@ export const CREDIT_REJECT_REASONS = [
   "Not our stock",
   "Outside the return period",
 ];
+
+// ─── Why, for the office's list ──────────────────────────────────────────
+
+export interface ReasonLineInput {
+  lineNo?: number | null;
+  itemCode: string | null;
+  description: string;
+  qtyListed: number;
+  qtyCollected: number | null;
+  isExtra: boolean;
+  diffReason: string | null;
+  diffNote: string | null;
+  /** The sheet's Reason cell: what the office typed for this line. */
+  reasonCode: string | null;
+}
+
+/**
+ * A line the old reader misfiled: a typed Reason starts left of where it looked,
+ * so it read as a third text column — product description in shortName, reason in
+ * description, no reasonCode. A number inside the reason ("CANCELLED 15 TOOK 60
+ * ONLY") was also taken as the code, so reasonCode "15" is no proof it was read
+ * right; a bare number that is not a word of the description is a real cell. Returns
+ * the line put right, or null when it is fine (a line with no reason on such a sheet
+ * has description === shortName). See prisma/backfill-collection-reasons.ts.
+ */
+export function misreadSheetLine(line: {
+  description: string;
+  shortName: string | null;
+  reasonCode: string | null;
+}): { description: string; shortName: null; reasonCode: string } | null {
+  const product = line.shortName?.trim();
+  const reason = line.description.trim();
+  const code = line.reasonCode?.trim();
+  const codeFromReason = !!code && /^\d+$/.test(code) && reason.split(/\s+/).includes(code) && reason !== code;
+  if ((code && !codeFromReason) || !product || !reason || product === reason) return null;
+  return { description: product, shortName: null, reasonCode: reason };
+}
+
+/** One sheet line with something to explain — readable without the signed receipt. */
+export interface ReasonLine {
+  item: string;
+  description: string;
+  /** The office's typed reason, as the sheet prints it. */
+  sheetReason: string | null;
+  /** What differed at the door, worded as on the receipt. */
+  difference: string | null;
+}
+
+export function collectionReasonLines(lines: ReasonLineInput[]): ReasonLine[] {
+  const out: ReasonLine[] = [];
+  for (const line of [...lines].sort((a, b) => (a.lineNo ?? 0) - (b.lineNo ?? 0))) {
+    const sheetReason = line.reasonCode?.trim() || null;
+    const collected = line.qtyCollected;
+    const why = line.diffReason ? DIFF_REASON_LABEL[line.diffReason as DiffReason] ?? line.diffReason : null;
+    let difference: string | null = null;
+    if (line.isExtra) {
+      difference = `Extra, not on the sheet · Collected ${collected ?? 0}`;
+    } else if (collected !== null && (why || collected !== line.qtyListed)) {
+      difference = `Listed ${line.qtyListed} · Collected ${collected}${why ? ` · ${why}` : ""}${line.diffNote ? ` — ${line.diffNote}` : ""}`;
+    }
+    if (sheetReason || difference) {
+      out.push({ item: line.itemCode || line.description, description: line.description, sheetReason, difference });
+    }
+  }
+  return out;
+}
+
+/** The Reason as one line of text, for the CSV and the quick search. */
+export function collectionReasonText(c: {
+  exceptionReason?: string | null;
+  reasonLines?: ReasonLine[];
+  creditReview?: string | null;
+  creditReviewReason?: string | null;
+}): string {
+  const parts: string[] = [];
+  if (c.exceptionReason) parts.push(c.exceptionReason);
+  for (const l of c.reasonLines ?? []) {
+    parts.push(`${l.item}: ${[l.sheetReason, l.difference].filter(Boolean).join(" — ")}`);
+  }
+  if (c.creditReview === "REJECTED" && c.creditReviewReason) parts.push(`Rejected: ${c.creditReviewReason}`);
+  return parts.join("; ");
+}

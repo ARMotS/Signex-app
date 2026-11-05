@@ -5004,6 +5004,112 @@ suite("cross-ADMIN isolation", () => {
       return form;
     };
 
+    describe("uploading and deleting on the Collections tab", () => {
+      const upload = async (file: File, overwrite = false) => {
+        const { POST } = await import("@/app/api/collections/sheets/route");
+        const form = new FormData();
+        form.append("file", file);
+        if (overwrite) form.append("overwrite", "true");
+        return POST(formReq("/api/collections/sheets", form));
+      };
+      const removeSheet = async (name: string) => {
+        const { DELETE } = await import("@/app/api/collections/sheets/[name]/route");
+        return DELETE(
+          req(`/api/collections/sheets/${encodeURIComponent(name)}`, { method: "DELETE" }),
+          params({ name: encodeURIComponent(name) })
+        );
+      };
+      const printedSheet = async (number: string) => {
+        const { collectionSheetPdf } = await import("./helpers/collection-sheet-fixture");
+        return new File([new Uint8Array(await collectionSheetPdf({ number }))], "camera-scan.pdf", { type: "application/pdf" });
+      };
+
+      it("goes by the number printed on it, and attaches only in the caller's own scope", async () => {
+        const mine = await liveCollection(f.a, "77001");
+        const theirs = await liveCollection(f.b, "77001");
+        useSession(adminSession(f.a));
+
+        const res = await withSheetOnGraph(async () => upload(await printedSheet("077001")));
+        expect(res.status).toBe(201);
+        const body = await res.json();
+        expect(body).toMatchObject({ outcome: "saved", filename: "77001.pdf", fromFilename: false });
+        expect(body.attached.map((a: any) => [a.id, a.read])).toEqual([[mine.id, true]]);
+
+        // Stored under the printed number, through ADMIN 1's connection only.
+        const stored = graphCalls.filter((c) => c.url.includes("77001.pdf"));
+        expect(stored.length).toBeGreaterThan(0);
+        expect(graphCalls.every((c) => c.token === "access-token-A" || c.token === null)).toBe(true);
+        expect(await db().collection.findUniqueOrThrow({ where: { id: mine.id } })).toMatchObject({ sourceFilePath: "77001.pdf", sheetStatus: expect.any(String) });
+        expect(await db().collectionLine.count({ where: { collectionId: mine.id } })).toBe(3);
+
+        // ADMIN 2's collection with the same number is another scope's business.
+        expect(await db().collection.findUniqueOrThrow({ where: { id: theirs.id } })).toMatchObject({ sourceFilePath: null });
+        expect(await db().collectionLine.count({ where: { collectionId: theirs.id } })).toBe(0);
+      });
+
+      it("waits in the folder when no pending collection has that number, and creates none", async () => {
+        const before = await db().collection.count({ where: { tenantId: f.a.tenantId } });
+        useSession(adminSession(f.a));
+        const res = await withSheetOnGraph(async () => upload(await printedSheet("88002")));
+        expect(res.status).toBe(201);
+        expect(await res.json()).toMatchObject({ filename: "88002.pdf", attached: [] });
+        expect(await db().collection.count({ where: { tenantId: f.a.tenantId } })).toBe(before);
+      });
+
+      it("refuses what is not a PDF, and a PDF with no number to go by", async () => {
+        useSession(adminSession(f.a));
+        const notPdf = await upload(new File([Buffer.from("hello")], "77001.pdf", { type: "application/pdf" }));
+        expect(notPdf.status).toBe(400);
+        const noNumber = await upload(pdfFile("holiday photos.pdf"));
+        expect(noNumber.status).toBe(422);
+      });
+
+      it("a driver can neither upload nor delete", async () => {
+        useSession(driverSession(f.a));
+        await expect(upload(pdfFile("77001.pdf")).then((r) => r.status)).resolves.toBe(403);
+        await expect(removeSheet("77001.pdf").then((r) => r.status)).resolves.toBe(403);
+      });
+
+      it("deletes through the caller's own connection, and refuses a sheet a live collection needs", async () => {
+        const live = await liveCollection(f.a, "77003");
+        await db().collection.update({ where: { id: live.id }, data: { sourceFilePath: "77003.pdf" } });
+        useSession(adminSession(f.a));
+        const needed = await removeSheet("77003.pdf");
+        expect(needed.status).toBe(409);
+        expect((await needed.json()).collectionNos).toEqual(["77003"]);
+
+        const fetchMock = vi.mocked(fetch);
+        const original = fetchMock.getMockImplementation()!;
+        const deleted: { url: string; token: string | undefined }[] = [];
+        fetchMock.mockImplementation(async (url: any, init: any) => {
+          const u = String(url);
+          if (init?.method === "DELETE") {
+            deleted.push({ url: u, token: init?.headers?.Authorization });
+            return new Response(null, { status: 204 });
+          }
+          if (u.includes("Pending") && u.includes("spare.pdf")) {
+            return new Response(JSON.stringify({ id: "spare-item", name: "spare.pdf" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return original(url, init);
+        });
+        try {
+          expect((await removeSheet("spare.pdf")).status).toBe(200);
+          // Nothing is reachable outside the folder's own name.
+          for (const name of ["../Signed/x.pdf", "Signed/x.pdf", "..\\x.pdf"]) {
+            expect((await removeSheet(name)).status, name).toBe(404);
+          }
+        } finally {
+          fetchMock.mockImplementation(original);
+        }
+        expect(deleted).toHaveLength(1);
+        expect(deleted[0].url).toContain("spare-item");
+        expect(deleted[0].token).toBe("Bearer access-token-A");
+      });
+    });
+
     it("an attached sheet is stored through the caller's own connection and read into the caller's scope", async () => {
       const collection = await liveCollection(f.a);
       const { POST } = await import("@/app/api/collections/[id]/sheet/route");
@@ -5703,6 +5809,53 @@ suite("cross-ADMIN isolation", () => {
       expect(register).not.toContain("Someone In B");
     });
   });
+  // ── Courier: Active / Completed, and delete from the list ──────
+  describe("the Courier tabs", () => {
+    const sheet = (fx: typeof f.a, no: string, status: "AWAITING_COLLECTION" | "COLLECTED" | "DELIVERED") =>
+      db().courierTripSheet.create({
+        data: {
+          tenantId: fx.tenantId,
+          courierSheetNo: no,
+          sheetDate: new Date("2026-11-03"),
+          customerName: "TAB MOTORS",
+          status,
+          sourceFileName: `cts-${no}.xlsx`,
+          importedById: fx.admin.id,
+        },
+      });
+
+    it("sorts by status, moves a sheet when its status changes, and deletes only before the handover", async () => {
+      const open = await sheet(f.a, "TAB-1", "AWAITING_COLLECTION");
+      const signed = await sheet(f.a, "TAB-2", "COLLECTED");
+      const done = await sheet(f.a, "TAB-3", "DELIVERED");
+      const other = await sheet(f.b, "TAB-4", "DELIVERED");
+      const { GET } = await import("@/app/api/courier/route");
+      const { DELETE } = await import("@/app/api/courier/[id]/route");
+      useSession(adminSession(f.a));
+      const list = async (tab: string) => {
+        const body = await (await GET(req(`/api/courier?view=page&q=TAB-&tab=${tab}`))).json();
+        return body.sheets.map((s: { courierSheetNo: string }) => s.courierSheetNo).sort();
+      };
+      try {
+        expect(await list("active")).toEqual(["TAB-1", "TAB-2"]);
+        expect(await list("completed")).toEqual(["TAB-3"]);
+
+        await db().courierTripSheet.update({ where: { id: signed.id }, data: { status: "DELIVERED" } });
+        expect(await list("active")).toEqual(["TAB-1"]);
+        expect(await list("completed")).toEqual(["TAB-2", "TAB-3"]);
+
+        const del = (id: string) => DELETE(req(`/api/courier/${id}`, { method: "DELETE" }), params({ id }));
+        expect((await del(done.id)).status).toBe(409);
+        expect((await del(other.id)).status).toBe(404);
+        expect((await del(open.id)).status).toBe(200);
+        expect(await list("active")).toEqual([]);
+        expect(await db().courierTripSheet.count({ where: { id: { in: [done.id, other.id] } } })).toBe(2);
+      } finally {
+        await db().courierTripSheet.deleteMany({ where: { courierSheetNo: { startsWith: "TAB-" } } });
+      }
+    });
+  });
+
   // ── The office's decision on a credit return ─────────────────────────
   describe("approving or rejecting a credit collection", () => {
     /** A one-stop run whose CR collection the driver has just brought back. */
@@ -5775,6 +5928,93 @@ suite("cross-ADMIN isolation", () => {
       // Another scope cannot decide it, closed trip or not.
       useSession(adminSession(f.b));
       expect((await review(collection.id, { decision: "REJECT", reason: "Not ours" })).status).toBe(404);
+    });
+
+    it("the charge box goes with the decision: optional, one known value, and kept unless changed", async () => {
+      const { collection } = await collectedCR(f.a, "RV-CHARGE");
+      useSession(adminSession(f.a));
+      const charge = async () => (await db().collection.findUniqueOrThrow({ where: { id: collection.id } })).creditCharge;
+
+      expect((await review(collection.id, { decision: "APPROVE", charge: "FREE" })).status).toBe(400);
+      expect(await db().collection.findUniqueOrThrow({ where: { id: collection.id } })).toMatchObject({ creditReview: null, creditCharge: null });
+
+      expect((await review(collection.id, { decision: "APPROVE" })).status).toBe(200);
+      expect(await charge()).toBeNull();
+      expect((await review(collection.id, { decision: "APPROVE", charge: "CUSTOMER_20" })).status).toBe(200);
+      expect(await charge()).toBe("CUSTOMER_20");
+      // A tab on the previous bundle sends no charge, and must not wipe it.
+      expect((await review(collection.id, { decision: "REJECT", reason: "Not our stock" })).status).toBe(200);
+      expect(await charge()).toBe("CUSTOMER_20");
+      expect((await review(collection.id, { decision: "REJECT", reason: "Not our stock", charge: null })).status).toBe(200);
+      expect(await charge()).toBeNull();
+
+      useSession(adminSession(f.b));
+      expect((await review(collection.id, { decision: "APPROVE", charge: "CHARGED" })).status).toBe(404);
+      expect(await charge()).toBeNull();
+    });
+
+    it("the list carries each line's reason, live and archived, in the caller's scope only", async () => {
+      const { trip, collection } = await collectedCR(f.a, "RV-REASON");
+      await db().collectionLine.create({
+        data: {
+          tenantId: f.a.tenantId,
+          collectionId: collection.id,
+          lineNo: 1,
+          itemCode: "REG",
+          description: "12V REG",
+          qtyListed: 2,
+          qtyCollected: 1,
+          diffReason: "DAMAGED",
+          reasonCode: "ORDERED IN ERROR",
+        },
+      });
+      const { GET } = await import("@/app/api/collections/route");
+      const { completeTripSheet } = await import("@/lib/trip-data");
+      const find = async () => {
+        const body = await (await GET(req("/api/collections?view=page&q=RV-REASON"))).json();
+        return body.collections.filter((c: any) => c.rowId === collection.id);
+      };
+      const expected = { item: "REG", sheetReason: "ORDERED IN ERROR", difference: "Listed 2 · Collected 1 · Damaged" };
+
+      useSession(adminSession(f.a));
+      expect((await find())[0]).toMatchObject({ archived: false, reasonLines: [expected] });
+      expect((await completeTripSheet(f.a.tenantId, trip.id, "Admin")).success).toBe(true);
+      expect((await find())[0]).toMatchObject({ archived: true, reasonLines: [expected] });
+      // The reason is searchable, and the CSV spells it out.
+      const byReason = await (await GET(req("/api/collections?view=page&q=ORDERED"))).json();
+      expect(byReason.collections.map((c: any) => c.rowId)).toContain(collection.id);
+      const csv = await (await GET(req("/api/collections?view=page&q=RV-REASON&format=csv"))).text();
+      expect(csv).toContain("ORDERED IN ERROR");
+
+      useSession(adminSession(f.b));
+      expect(await find()).toEqual([]);
+    });
+
+    it("a collection moves from Active to Completed when it is decided, and back if undone", async () => {
+      const { collection: yes } = await collectedCR(f.a, "RV-TAB-A");
+      const { collection: no } = await collectedCR(f.a, "RV-TAB-B");
+      useSession(adminSession(f.a));
+      const { GET } = await import("@/app/api/collections/route");
+      const rows = async (tab: string) =>
+        (await (await GET(req(`/api/collections?view=page&q=RV-TAB&tab=${tab}`))).json()).collections.map((c: any) => c.rowId).sort();
+
+      expect(await rows("active")).toEqual([yes.id, no.id].sort());
+      expect(await rows("completed")).toEqual([]);
+
+      expect((await review(yes.id, { decision: "APPROVE" })).status).toBe(200);
+      expect((await review(no.id, { decision: "REJECT", reason: "Not our stock" })).status).toBe(200);
+      expect(await rows("active")).toEqual([]);
+      expect(await rows("completed")).toEqual([yes.id, no.id].sort());
+      // Without a tab, every row: what a tab on the previous bundle asks for.
+      const every = await (await GET(req("/api/collections?view=page&q=RV-TAB"))).json();
+      expect(every.total).toBe(2);
+
+      const approved = await (await GET(req("/api/collections?view=page&q=RV-TAB&status=CREDIT_APPROVED"))).json();
+      expect(approved.collections.map((c: any) => c.rowId)).toEqual([yes.id]);
+      // The same counts on every tab: the open tab does not narrow them.
+      expect(approved.counts.tabs).toMatchObject({ all: 2, active: 0, completed: 2, awaiting: 0, approved: 1, rejected: 1 });
+      const rejected = await (await GET(req("/api/collections?view=page&q=RV-TAB&status=CREDIT_REJECTED"))).json();
+      expect(rejected.collections.map((c: any) => c.rowId)).toEqual([no.id]);
     });
 
     it("rejecting needs a reason, also lets the trip close, and the decision can change while live", async () => {

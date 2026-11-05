@@ -11,7 +11,8 @@ import { describe, it, expect } from "vitest";
 import { extractPageItems } from "@/lib/invoice-header";
 import { assessSheet, readSheetFromPages, type ParsedSheet } from "@/lib/collection-sheet";
 import { collectionMatchKeys, sameCollectionNumber } from "@/lib/collections";
-import { collectionSheetPdf, CRCOL_1797_LINES } from "./helpers/collection-sheet-fixture";
+import { sheetNumberFrom } from "@/lib/collection-sheet-upload";
+import { collectionSheetPdf, CRCOL_1797_LINES, type FixtureLine } from "./helpers/collection-sheet-fixture";
 
 const read = async (pdf: Buffer) => readSheetFromPages(await extractPageItems(pdf));
 
@@ -39,6 +40,84 @@ describe("reading the client's credit collection sheet", () => {
       { lineNo: 2, itemCode: "REG", shortName: "REG", description: "12V HYBRID REG (MONARK)", qtyListed: 1, qtyReturnedPrinted: 0, reasonCode: "2" },
       { lineNo: 3, itemCode: "RELAY", shortName: "RELAY", description: "12V 5PIN 30A BOSCH RELAY", qtyListed: 2, qtyReturnedPrinted: 0, reasonCode: "3" },
     ]);
+  });
+
+  it("reads the sheet the client prints today: the reason is its own column, not the description", async () => {
+    const line = { itemCode: "REG 24", shortName: "", description: "12V HYBRID REG (MONARK)", reason: "ORDERED ON THE WRONG ACCOUNT" };
+    const sheet = await read(
+      await collectionSheetPdf({
+        currentLayout: true,
+        pages: [[{ ...line, qty: 2 }, { ...line, qty: 6 }, { ...line, qty: 1, reason: "" }]],
+      })
+    );
+    const printed = { itemCode: "REG 24", shortName: null, description: "12V HYBRID REG (MONARK)", qtyReturnedPrinted: 0 };
+    expect(sheet.lines).toEqual([
+      { ...printed, lineNo: 1, qtyListed: 2, reasonCode: "ORDERED ON THE WRONG ACCOUNT" },
+      { ...printed, lineNo: 2, qtyListed: 6, reasonCode: "ORDERED ON THE WRONG ACCOUNT" },
+      { ...printed, lineNo: 3, qtyListed: 1, reasonCode: null },
+    ]);
+  });
+
+  it("reads a typed reason wherever the Reason cell starts, and keeps it out of the description", async () => {
+    const typed = (over: Partial<FixtureLine>, i: number) => ({ ...CRCOL_1797_LINES[i], ...over });
+    const sheet = await read(
+      await collectionSheetPdf({
+        pages: [
+          [
+            // Just after Returned, where the sample's placeholder digit sits — left of the heading's zone.
+            typed({ reason: "DAMAGED IN TRANSIT" }, 0),
+            // Under the heading.
+            typed({ reason: "ORDERED IN ERROR", reasonX: 479 }, 1),
+            typed({ reason: "WRONG PART SUPPLIED" }, 2),
+          ],
+        ],
+      })
+    );
+    expect(sheet.lines.map((l) => [l.description, l.qtyListed, l.qtyReturnedPrinted, l.reasonCode])).toEqual([
+      ["0.75MM 7COR CABLE P/30MR", 1, 0, "DAMAGED IN TRANSIT"],
+      ["12V HYBRID REG (MONARK)", 1, 0, "ORDERED IN ERROR"],
+      ["12V 5PIN 30A BOSCH RELAY", 2, 0, "WRONG PART SUPPLIED"],
+    ]);
+  });
+
+  it("keeps numbers inside a typed reason as part of it, not as a figure", async () => {
+    const line = { itemCode: "REG 24", shortName: "", description: "12V HYBRID REG (MONARK)" };
+    const sheet = await read(
+      await collectionSheetPdf({
+        currentLayout: true,
+        pages: [
+          [
+            { ...line, qty: 100, reason: "CANCELLED 15 TOOK 60 ONLY" },
+            { ...line, qty: 3, reason: "20 ITEMS OVERSTOCKED" },
+          ],
+        ],
+      })
+    );
+    expect(sheet.lines.map((l) => [l.description, l.qtyListed, l.qtyReturnedPrinted, l.reasonCode])).toEqual([
+      ["12V HYBRID REG (MONARK)", 100, 0, "CANCELLED 15 TOOK 60 ONLY"],
+      ["12V HYBRID REG (MONARK)", 3, 0, "20 ITEMS OVERSTOCKED"],
+    ]);
+  });
+
+  it("joins a typed reason that wraps, and reads on to the next line", async () => {
+    const [first, second] = CRCOL_1797_LINES;
+    const sheet = await read(
+      await collectionSheetPdf({
+        pages: [
+          [
+            { ...first, reason: "CUSTOMER ORDERED THE", reasonWrap: "WRONG VOLTAGE" },
+            { ...second, reason: "FAULTY" },
+          ],
+        ],
+      })
+    );
+    expect(sheet.lines.map((l) => l.reasonCode)).toEqual(["CUSTOMER ORDERED THE WRONG VOLTAGE", "FAULTY"]);
+    expect(sheet.lines[0].description).toBe("0.75MM 7COR CABLE P/30MR");
+  });
+
+  it("leaves a line with no reason blank", async () => {
+    const sheet = await read(await collectionSheetPdf({ pages: [[{ ...CRCOL_1797_LINES[0], reason: "" }]] }));
+    expect(sheet.lines[0]).toMatchObject({ qtyListed: 1, qtyReturnedPrinted: 0, reasonCode: null });
   });
 
   it("stops at the end of the table — the terms below are not lines", async () => {
@@ -142,5 +221,21 @@ describe("checking the sheet against the trip sheet row", () => {
       ["CUSTOMER_MISMATCH", "warning"],
       ["READ_FROM_SCAN", "warning"],
     ]);
+  });
+});
+
+describe("the number an uploaded sheet goes by", () => {
+  it("is the one printed on it, whatever the scan was called", () => {
+    expect(sheetNumberFrom("900328", true, "camera 2026-11-05.pdf")).toEqual({ number: "900328", fromFilename: false });
+  });
+
+  it("refuses a PDF that read but prints no number: an invoice in the wrong box reads too", () => {
+    expect(sheetNumberFrom(null, true, "IV-634573.pdf")).toBeNull();
+    expect(sheetNumberFrom("  ", true, "23328.pdf")).toBeNull();
+  });
+
+  it("falls back to the file name only when the PDF could not be read at all", () => {
+    expect(sheetNumberFrom(null, false, "CRCOL-1797.PDF")).toEqual({ number: "CRCOL-1797", fromFilename: true });
+    expect(sheetNumberFrom(null, false, "holiday photos.pdf")).toBeNull();
   });
 });

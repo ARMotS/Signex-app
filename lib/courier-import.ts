@@ -28,6 +28,9 @@ import {
   blocksHandover,
   companyKey,
   confirmationState,
+  COURIER_ACTIVE_STATUSES,
+  COURIER_COMPLETED_STATUSES,
+  COURIER_OPEN_STATUSES,
   originalFileName,
   originalFolder,
   readCourierSheet,
@@ -39,7 +42,7 @@ import {
 } from "./courier-sheet";
 
 /** Statuses in which the sheet is still the office's to change. */
-const OPEN: CourierStatus[] = ["NEEDS_ATTENTION", "AWAITING_COLLECTION"];
+const OPEN: CourierStatus[] = [...COURIER_OPEN_STATUSES];
 
 /** Codes found while reading the file — kept across re-checks, which cannot see the file. */
 const READ_CODES = new Set<CourierIssue["code"]>(["DUPLICATE_INVOICE", "COURIER_CONFLICT"]);
@@ -697,6 +700,8 @@ export async function listCourierSheets(tenantId: string, limit = 500): Promise<
 export interface CourierListQuery {
   q?: string;
   status?: string;
+  /** "active" | "completed"; empty = every sheet. A status, when set, wins. */
+  tab?: string;
   /** YYYY-MM-DD, inclusive, on the sheet's own date. */
   from?: string;
   to?: string;
@@ -719,6 +724,7 @@ export function readCourierListQuery(params: URLSearchParams): Required<CourierL
   return {
     q: (params.get("q") ?? "").trim().slice(0, 100),
     status: (Object.values(CourierStatus) as string[]).includes(status) ? status : "",
+    tab: params.get("tab") === "active" || params.get("tab") === "completed" ? params.get("tab")! : "",
     from: day("from"),
     to: day("to"),
     page: page > 0 ? page : 1,
@@ -762,7 +768,15 @@ export async function listCourierSheetsPage(
       ],
     }),
   };
-  const filtered: Prisma.CourierTripSheetWhereInput = { ...where, ...(query.status && { status: query.status as CourierStatus }) };
+  const inTab = query.tab === "completed" ? COURIER_COMPLETED_STATUSES : COURIER_ACTIVE_STATUSES;
+  const filtered: Prisma.CourierTripSheetWhereInput = {
+    ...where,
+    ...(query.status
+      ? { status: query.status as CourierStatus }
+      : query.tab
+        ? { status: { in: [...inTab] as CourierStatus[] } }
+        : {}),
+  };
 
   const [total, grouped] = await Promise.all([
     db.courierTripSheet.count({ where: filtered }),

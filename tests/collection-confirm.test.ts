@@ -11,6 +11,7 @@ import {
   resolveConfirmation,
   type ListedLine,
 } from "@/lib/collection-confirm";
+import { collectionLifecycle, collectionReasonLines, collectionReasonText, misreadSheetLine, type ReasonLineInput } from "@/lib/collection-confirm";
 import { buildSignedCollectionPdf } from "@/lib/collections";
 import { extractPageItems } from "@/lib/invoice-header";
 
@@ -149,6 +150,44 @@ describe("the signed receipt", () => {
     expect(page).toContain("approval by Electro City");
   });
 
+  it("gives the office's typed reason its own column, kept clear of the quantities", async () => {
+    const line = { itemCode: "REG 24", description: "12V HYBRID REG (MONARK)", qtyListed: 2, qtyCollected: 2, diffReason: null, diffNote: null, isExtra: false };
+    const pdf = await buildSignedCollectionPdf(null, {
+      collectionNo: "900328",
+      type: "CREDIT_RETURN",
+      status: "COLLECTED",
+      customerName: "A CUSTOMER",
+      collectedAt: new Date("2026-11-05T10:39:00Z"),
+      lines: [
+        { ...line, reasonCode: "ORDERED ON THE WRONG ACCOUNT AND THE CUSTOMER ASKED FOR IT TO BE COLLECTED" },
+        { ...line, reasonCode: null },
+      ],
+    });
+    const [items] = await extractPageItems(pdf);
+    const at = (s: string) => items.find((i) => i.str === s)!;
+    const listed = at("LISTED").x;
+    const reasonX = at("REASON").x;
+    expect(reasonX).toBeLessThan(listed);
+    const reasonRuns = items.filter((i) => i.x === reasonX && i.str.trim() && i.str !== "REASON");
+    // Wrapped, not run into the quantities.
+    expect(reasonRuns.length).toBeGreaterThan(1);
+    expect(reasonRuns.map((i) => i.str.trim()).join(" ")).toContain("ORDERED ON THE WRONG");
+    for (const run of reasonRuns) expect(run.x + run.width).toBeLessThan(listed);
+    expect((await text(pdf))[0]).toContain("12V HYBRID REG");
+  });
+
+  it("has no Reason column when no line has one", async () => {
+    const pdf = await buildSignedCollectionPdf(null, {
+      collectionNo: "900329",
+      type: "CREDIT_RETURN",
+      status: "COLLECTED",
+      customerName: "A CUSTOMER",
+      collectedAt: new Date("2026-11-05T10:39:00Z"),
+      lines: [{ itemCode: "REG", description: "12V REG", qtyListed: 1, qtyCollected: 1, diffReason: null, diffNote: null, isExtra: false }],
+    });
+    expect((await extractPageItems(pdf))[0].some((i) => i.str === "REASON")).toBe(false);
+  });
+
   it("carries a long sheet onto further pages instead of off the bottom", async () => {
     const lines = Array.from({ length: 45 }, (_, i) => ({
       itemCode: `IT${i}`,
@@ -222,5 +261,123 @@ describe("the office's decision on a credit return", () => {
     expect(creditReviewRequired({ ...cr, status: "NOT_AVAILABLE" })).toBe(false);
     expect(creditReviewRequired({ ...cr, status: "REFUSED" })).toBe(false);
     expect(creditReviewRequired({ ...cr, status: "PENDING" })).toBe(false);
+  });
+});
+
+describe("the Reason, readable without the signed receipt", () => {
+  const line = (over: Partial<ReasonLineInput> = {}): ReasonLineInput => ({
+    lineNo: 1,
+    itemCode: "REG",
+    description: "12V HYBRID REG",
+    qtyListed: 2,
+    qtyCollected: 2,
+    isExtra: false,
+    diffReason: null,
+    diffNote: null,
+    reasonCode: null,
+    ...over,
+  });
+
+  it("leaves out a line with nothing to explain", () => {
+    expect(collectionReasonLines([line()])).toEqual([]);
+  });
+
+  it("keeps the office's typed reason as printed", () => {
+    expect(collectionReasonLines([line({ reasonCode: " FAULTY UNIT " })])[0]).toMatchObject({
+      item: "REG",
+      sheetReason: "FAULTY UNIT",
+      difference: null,
+    });
+  });
+
+  it("words what differed as the receipt does, with the reason's label and the note", () => {
+    const [l] = collectionReasonLines([line({ qtyCollected: 1, diffReason: "DAMAGED", diffNote: "Box crushed" })]);
+    expect(l.difference).toBe("Listed 2 · Collected 1 · Damaged — Box crushed");
+  });
+
+  it("explains goods back in full but damaged, and an extra", () => {
+    expect(collectionReasonLines([line({ diffReason: "DAMAGED" })])[0].difference).toBe("Listed 2 · Collected 2 · Damaged");
+    expect(collectionReasonLines([line({ isExtra: true, qtyListed: 0, qtyCollected: 3 })])[0].difference).toBe(
+      "Extra, not on the sheet · Collected 3"
+    );
+  });
+
+  it("says nothing differed before the driver has counted", () => {
+    expect(collectionReasonLines([line({ qtyCollected: null })])).toEqual([]);
+  });
+
+  it("follows the sheet's order, and falls back to the description when no product no", () => {
+    const out = collectionReasonLines([
+      line({ lineNo: 2, itemCode: "B", reasonCode: "SECOND" }),
+      line({ lineNo: 1, itemCode: null, description: "CRATE", reasonCode: "FIRST" }),
+    ]);
+    expect(out.map((l) => l.item)).toEqual(["CRATE", "B"]);
+  });
+
+  it("reads as one line for the CSV and the search", () => {
+    expect(
+      collectionReasonText({
+        exceptionReason: "Customer kept one",
+        reasonLines: collectionReasonLines([line({ reasonCode: "FAULTY", qtyCollected: 1, diffReason: "SHORT" })]),
+        creditReview: "REJECTED",
+        creditReviewReason: "Not our stock",
+      })
+    ).toBe("Customer kept one; REG: FAULTY — Listed 2 · Collected 1 · Short; Rejected: Not our stock");
+    expect(collectionReasonText({})).toBe("");
+  });
+});
+
+describe("lines the old reader misfiled", () => {
+  it("puts the product back and the typed reason in its own field", () => {
+    expect(
+      misreadSheetLine({ description: "ORDERED ON THE WRONG ACCOUNT", shortName: "12V HYBRID REG", reasonCode: null })
+    ).toEqual({ description: "12V HYBRID REG", shortName: null, reasonCode: "ORDERED ON THE WRONG ACCOUNT" });
+  });
+
+  it("also repairs a line whose code is a number taken from inside the reason", () => {
+    expect(
+      misreadSheetLine({ description: "CANCELLED 15 TOOK 60 ONLY", shortName: "12V HYBRID REG", reasonCode: "15" })
+    ).toEqual({ description: "12V HYBRID REG", shortName: null, reasonCode: "CANCELLED 15 TOOK 60 ONLY" });
+  });
+
+  it("leaves a bare number alone when it is not in the description: a real cell on the sample sheet", () => {
+    expect(misreadSheetLine({ description: "12V HYBRID REG (MONARK)", shortName: "REG", reasonCode: "2" })).toBeNull();
+    expect(misreadSheetLine({ description: "0.75MM 7COR CABLE P/30MR", shortName: "CABLE 7COR", reasonCode: "1" })).toBeNull();
+    // A product whose own description holds that number, and is the whole of it, is no reason.
+    expect(misreadSheetLine({ description: "20", shortName: "20", reasonCode: "20" })).toBeNull();
+  });
+
+  it("leaves a line alone once it has a reason, so a second run does nothing", () => {
+    expect(misreadSheetLine({ description: "12V REG", shortName: "REG", reasonCode: "1" })).toBeNull();
+    const fixed = misreadSheetLine({ description: "WRONG ACCOUNT", shortName: "12V REG", reasonCode: null })!;
+    expect(misreadSheetLine(fixed)).toBeNull();
+  });
+
+  it("leaves a line with no reason alone: the reader copies the product into both fields", () => {
+    expect(misreadSheetLine({ description: "12V REG", shortName: "12V REG", reasonCode: null })).toBeNull();
+    expect(misreadSheetLine({ description: "12V REG", shortName: null, reasonCode: null })).toBeNull();
+  });
+});
+
+describe("which tab a collection belongs on", () => {
+  const cr = { type: "CREDIT_RETURN", originalInvoiceNo: "555001" };
+
+  it("is Active while the driver or the office still has to act", () => {
+    expect(collectionLifecycle({ ...cr, status: "PENDING" })).toBe("active");
+    expect(collectionLifecycle({ ...cr, status: "COLLECTED" })).toBe("active");
+    expect(collectionLifecycle({ ...cr, status: "PARTIAL" })).toBe("active");
+  });
+
+  it("is Completed once decided, and goes back if the row is re-recorded as pending", () => {
+    expect(collectionLifecycle({ ...cr, status: "COLLECTED", creditReview: "APPROVED" })).toBe("completed");
+    expect(collectionLifecycle({ ...cr, status: "PARTIAL", creditReview: "REJECTED" })).toBe("completed");
+    expect(collectionLifecycle({ ...cr, status: "PENDING", creditReview: "APPROVED" })).toBe("active");
+  });
+
+  it("is Completed for what needs no decision", () => {
+    expect(collectionLifecycle({ ...cr, status: "REFUSED" })).toBe("completed");
+    expect(collectionLifecycle({ ...cr, status: "NOT_AVAILABLE" })).toBe("completed");
+    expect(collectionLifecycle({ type: "NON_CREDIT_UPLIFT", status: "COLLECTED" })).toBe("completed");
+    expect(collectionLifecycle({ type: "CREDIT_RETURN", originalInvoiceNo: null, status: "COLLECTED" })).toBe("completed");
   });
 });

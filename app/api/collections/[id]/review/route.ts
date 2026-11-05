@@ -4,7 +4,7 @@ import { withAuth } from "@/lib/api-handler";
 import { reviewCreditCollection } from "@/lib/collection-review";
 
 /**
- * PUT /api/collections/[id]/review  { decision: "APPROVE" | "REJECT", reason? }
+ * PUT /api/collections/[id]/review  { decision: "APPROVE" | "REJECT", reason?, charge? }
  *
  * The office approves a credit return that came back for credit, or rejects
  * it (reason required), from the Collections tab — while its trip is live or
@@ -22,7 +22,7 @@ export const PUT = withAuth(async (
   const { id } = await params;
   const body = await request.json().catch(() => ({}));
 
-  const result = await reviewCreditCollection(ctx.tenantId, id, body.decision, body.reason, ctx.name);
+  const result = await reviewCreditCollection(ctx.tenantId, id, body.decision, body.reason, ctx.name, body.charge);
   switch (result.outcome) {
     case "not_found":
       return NextResponse.json({ error: "Collection not found" }, { status: 404 });
