@@ -1398,6 +1398,9 @@ model CreditNote {
   invoiceNoNormalized String?
   /// The registry row for that invoice. Null when Signex has never seen it.
   invoiceId           String?
+  /// The collection sheet the note names, as printed ("CRC-23328"). Null on
+  /// the notes that name none: those reach collections through the invoice.
+  collectionRef       String?
   /// The note's own date — its "Invoice date" box, not the Order date.
   creditDate          DateTime? @db.Date
   accountNo           String?

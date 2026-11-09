@@ -21,9 +21,11 @@
  *                                                 TOTAL VAT   108.00
  *                                                 TOTAL     R 828.00
  *
- * The note never prints a collection number: it names the INVOICE it
- * credits, and the collections are found through that invoice. Matching is on
- * QUANTITIES only — a return carries a handling charge, so a credit never
+ * Some notes carry no labelled invoice at all and name what they credit in a
+ * free-text line instead — "RFC INV 639568 CRC-23328" beside the totals. That
+ * gives the invoice and, there, the collection sheet (readReferences). A note
+ * that names no collection reaches its collections through the invoice.
+ * Matching is on QUANTITIES only — a return carries a handling charge, so a credit never
  * equals the invoice's price. The amounts are checked against the note's own
  * totals, which is what proves every line was read.
  *
@@ -63,6 +65,8 @@ export interface ParsedCreditNote {
   creditNo: string | null;
   /** The invoice credited, as printed. */
   invoiceNo: string | null;
+  /** The collection sheet the note itself names ("CRC-23328"), as printed. Most notes name none. */
+  collectionRef: string | null;
   /** YYYY-MM-DD — the note's own date, never the Order date beside it. */
   creditDate: string | null;
   accountNo: string | null;
@@ -165,6 +169,61 @@ function readInvoiceRef(items: TextItem[]): string | null {
   return ref(textBeside(lines, INVOICE_REF_LABELS)) ?? ref(valueUnder(lines, INVOICE_REF_LABELS));
 }
 
+// ─── References in free text ──────────────────────────────────────────────
+
+const SEP = String.raw`[\s.:#/\-]*`;
+const NUMBER_WORD = String.raw`(?:NO|NUM|NUMBER|REF)(?![A-Z])`;
+const FIGURES = String.raw`(\d[\d/\-]*\d)(?![A-Z0-9/])`;
+
+/**
+ * INV 639568, INV-639568, INV639568, IV 639568, Invoice No: 639568, Inv # 639568.
+ * The number must follow the label, so "Invoice date 16/10/2026" and "Invoice
+ * to:" are not references. Figures only: in "RFC INV CRC-23328" the invoice is
+ * missing, and the collection's number must not be taken for it.
+ */
+const INVOICE_IN_TEXT = new RegExp(
+  `(?<![A-Z0-9])(?:INV(?:OICE)?|SINV|IV)(?![A-Z])${SEP}(?:${NUMBER_WORD}${SEP})?${FIGURES}`,
+  "gi"
+);
+
+/**
+ * CRC-23328, CRC 23328, CRCOL-1797, CR COL 1797, Col 1797, Collection No 1797,
+ * Credit Collection Sheet 001797. A bare CR is deliberately not one: CR-407712
+ * is the credit note's own number.
+ */
+const COLLECTION_IN_TEXT = new RegExp(
+  `(?<![A-Z0-9])(?:CRC|CR${SEP}COLL?(?:ECT(?:ION)?)?|COLL?(?:ECT(?:ION)?)?)(?![A-Z])` +
+    `(?:${SEP}(?:SHEET|SHHET|SHT|NO|NUM|NUMBER|REF)(?![A-Z]))*${SEP}${FIGURES}`,
+  "gi"
+);
+
+/**
+ * The one number these lines give, or null. Two different numbers is no
+ * answer: a guess here would link the note to the wrong goods, where null
+ * sends it to the office. The same number repeated (a footer on every page)
+ * is still one.
+ */
+function soleReference(lines: string[], pattern: RegExp, printed: (m: RegExpMatchArray) => string): string | null {
+  const found = new Map<string, string>();
+  for (const line of lines) {
+    for (const m of line.matchAll(pattern)) {
+      const digits = m[1].replace(/\D/g, "");
+      if (digits.length < 3 || parseInvoiceDate(m[1])) continue;
+      const key = digits.replace(/^0+(?=\d)/, "");
+      if (!found.has(key)) found.set(key, printed(m));
+    }
+  }
+  return found.size === 1 ? [...found.values()][0] : null;
+}
+
+/** The invoice and collection a note names in running text. Pure. */
+export function readReferences(lines: string[]): { invoiceNo: string | null; collectionRef: string | null } {
+  return {
+    invoiceNo: soleReference(lines, INVOICE_IN_TEXT, (m) => m[1]),
+    collectionRef: soleReference(lines, COLLECTION_IN_TEXT, (m) => m[0].trim()),
+  };
+}
+
 // ─── Table ────────────────────────────────────────────────────────────────
 
 /** The follow-on row under each line on the client's note — not a line of its own. */
@@ -206,6 +265,39 @@ function findColumns(rows: Cell[][]): Columns | null {
   return null;
 }
 
+/** The table's cells, and the Nett figure of each row in it. */
+function tableBody(cells: Cell[], cols: Columns): { body: Cell[]; anchors: Cell[]; nettFrom: number } {
+  const nettFrom = cols.nettX - 15;
+  const below = cells.filter((c) => c.cy > cols.headerCy + 3);
+  // The table ends at the totals block.
+  const totalsCy = Math.min(...below.filter((c) => isTotalsLabel(c.text)).map((c) => c.cy), Infinity);
+  const body = below.filter((c) => c.cy < totalsCy - 3 && !FOLLOW_ON.test(c.text));
+  const anchors = body.filter((c) => c.x >= nettFrom && parseAmount(c.text) !== null).sort((a, b) => a.cy - b.cy);
+  return { body, anchors, nettFrom };
+}
+
+/** How far above and below its Nett figure a product line and its follow-on row reach. */
+const LINE_REACH_UP = 9;
+const LINE_REACH_DOWN = 20;
+
+/**
+ * Every line of text on the pages except the product lines. A description is
+ * no reference, however much it looks like one: "INV 1000 PURE SINE" is an
+ * inverter.
+ */
+function freeTextLines(pages: TextItem[][]): string[] {
+  return pages.flatMap((items) => {
+    const cells = toCells(items);
+    const cols = findColumns(toRows(cells));
+    const lineCys = cols ? tableBody(cells, cols).anchors.map((a) => a.cy) : [];
+    const outside = items.filter((item) => {
+      const cy = item.y + item.height / 2;
+      return !lineCys.some((line) => cy >= line - LINE_REACH_UP && cy <= line + LINE_REACH_DOWN);
+    });
+    return segmentLines(outside).map((row) => row.map((s) => s.text).join(" "));
+  });
+}
+
 /**
  * The lines on one page. Each line is anchored on its Nett figure: every
  * other cell within a few points of it vertically belongs to it (the product
@@ -219,10 +311,10 @@ function readTable(items: TextItem[]): CreditLineRead[] {
 
   // Figures are right-aligned under their headings, so each zone opens a
   // little before its heading.
+  const { body, anchors, nettFrom } = tableBody(cells, cols);
   const figuresFrom = cols.qtyX - 25;
   const priceFrom = cols.priceX !== null ? cols.priceX - 5 : null;
   const discFrom = cols.discX !== null ? cols.discX - 5 : null;
-  const nettFrom = cols.nettX - 15;
   const zoneOf = (x: number): "text" | "qty" | "price" | "disc" | "nett" => {
     if (x < figuresFrom) return "text";
     if (x >= nettFrom) return "nett";
@@ -231,14 +323,6 @@ function readTable(items: TextItem[]): CreditLineRead[] {
     return "qty";
   };
 
-  const below = cells.filter((c) => c.cy > cols.headerCy + 3);
-  // The table ends at the totals block.
-  const totalsCy = Math.min(...below.filter((c) => isTotalsLabel(c.text)).map((c) => c.cy), Infinity);
-  const body = below.filter((c) => c.cy < totalsCy - 3 && !FOLLOW_ON.test(c.text));
-
-  const anchors = body
-    .filter((c) => zoneOf(c.x) === "nett" && parseAmount(c.text) !== null)
-    .sort((a, b) => a.cy - b.cy);
   if (anchors.length === 0) return [];
 
   // On the client's note the Qty sits ~4pt from its line's Nett and the
@@ -339,9 +423,13 @@ export function readCreditNoteFromPages(pages: TextItem[][]): ParsedCreditNote {
     }
   }
 
+  // A labelled invoice is the stronger reading; free text fills in for it.
+  const references = readReferences(freeTextLines(pages));
+
   return {
     creditNo: readCreditNumber(first),
-    invoiceNo: readInvoiceRef(first),
+    invoiceNo: readInvoiceRef(first) ?? references.invoiceNo,
+    collectionRef: references.collectionRef,
     creditDate: header.invoiceDate ? header.invoiceDate.toISOString().slice(0, 10) : null,
     accountNo: blank(firstLineUnder(segmentLines(first), ACCOUNT_LABELS, HEADER_LABELS)),
     deliverToName: blank(header.deliverToName),
@@ -357,7 +445,14 @@ const NOTE_SCHEMA = {
   type: "object",
   properties: {
     creditNo: { type: "string", description: 'The credit note number, or "".' },
-    invoiceNo: { type: "string", description: 'The invoice number the credit is against, or "".' },
+    invoiceNo: {
+      type: "string",
+      description: 'The invoice number the credit is against, wherever it is printed — including a free-text line such as "RFC INV 639568 CRC-23328" — or "".',
+    },
+    collectionRef: {
+      type: "string",
+      description: 'The collection sheet the note names, as printed (e.g. "CRC-23328"), or "". Never the credit note\'s own number.',
+    },
     creditDate: { type: "string", description: 'The credit note\'s own date as YYYY-MM-DD (not the order date), or "".' },
     accountNo: { type: "string", description: 'The customer account number, or "".' },
     deliverToName: { type: "string", description: 'First line of the "Deliver to" block, or "".' },
@@ -382,7 +477,7 @@ const NOTE_SCHEMA = {
     vatAmount: { type: "number", description: "The VAT amount, or -1 if not printed." },
     total: { type: "number", description: "The total including VAT, or -1 if not printed." },
   },
-  required: ["creditNo", "invoiceNo", "creditDate", "accountNo", "deliverToName", "billToName", "lines", "subtotal", "vatAmount", "total"],
+  required: ["creditNo", "invoiceNo", "collectionRef", "creditDate", "accountNo", "deliverToName", "billToName", "lines", "subtotal", "vatAmount", "total"],
   additionalProperties: false,
 } as const;
 
@@ -429,6 +524,7 @@ export async function readCreditNoteWithClaude(pdf: Buffer): Promise<ParsedCredi
   return {
     creditNo: blank(out.creditNo),
     invoiceNo: blank(out.invoiceNo),
+    collectionRef: blank(out.collectionRef),
     creditDate: parseInvoiceDate(out.creditDate)?.toISOString().slice(0, 10) ?? null,
     accountNo: blank(out.accountNo),
     deliverToName: blank(out.deliverToName),
@@ -638,6 +734,8 @@ export interface CreditContext {
   rejectedCollections?: { collectionNo: string; reason: string | null }[];
   /** Linked collections the office has not approved yet. */
   unapprovedCollectionNos?: string[];
+  /** What the collection the note names turned out to be. Absent when it names none. */
+  collectionRefState?: "FOUND" | "UNKNOWN" | "OTHER_INVOICE";
 }
 
 /**
@@ -683,6 +781,12 @@ export function assessCreditNote(
       "CUSTOMER_MISMATCH",
       `The note is for ${note.deliverToName ?? note.billToName}; invoice ${ctx.invoice.invoiceNo} is for ${ctx.invoice.customerName}.`
     );
+  }
+
+  if (ctx.collectionRefState === "UNKNOWN") {
+    review("COLLECTION_REF_UNKNOWN", `The note names collection ${note.collectionRef}, but Signex has no credit return with that number.`);
+  } else if (ctx.collectionRefState === "OTHER_INVOICE") {
+    review("COLLECTION_REF_OTHER_INVOICE", `The note names collection ${note.collectionRef}, which was collected against a different invoice from ${note.invoiceNo}.`);
   }
 
   let matches: LineMatch[] = [];

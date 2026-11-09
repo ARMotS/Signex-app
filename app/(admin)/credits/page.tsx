@@ -70,6 +70,7 @@ interface CreditDetail {
   id: string;
   creditNo: string | null;
   invoiceNo: string | null;
+  collectionRef: string | null;
   creditDate: string | null;
   accountNo: string | null;
   deliverToName: string | null;
@@ -637,6 +638,7 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
               <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">
                 {[
                   ["Credits invoice", note.invoiceNo ?? "—"],
+                  ...(note.collectionRef ? [["Names collection", note.collectionRef]] : []),
                   [
                     "Invoice on record",
                     note.invoice
