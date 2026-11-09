@@ -120,6 +120,8 @@ export async function creditNotePdf(
     vat?: number;
     total?: number;
     layout?: keyof typeof LAYOUTS;
+    /** The free-text footer line ("RFC INV 639568 CRC-23328"), with a name beside it as printed. */
+    reference?: string;
   } = {}
 ): Promise<Buffer> {
   const layout = opts.layout ?? "CR-407712";
@@ -235,7 +237,8 @@ export async function creditNotePdf(
     if (pageIndex === pages.length - 1) {
       text(page, bold, "SUB TOTAL", 443.3, 674.2, 10);
       right(page, mono, money(subtotal), 579, 674.2, 10);
-      text(page, sans, "DELIVERY", 27, 687, 10);
+      text(page, sans, opts.reference ?? "DELIVERY", 27, 687, 10);
+      if (opts.reference) text(page, mono, "BTS NATASHA", 282.8, 687, 9);
       text(page, bold, "TOTAL VAT", 442.5, 692.2, 10);
       right(page, mono, money(vat), 579, 690.7, 10);
       text(page, sans, "NEDBANK BR128405 ACC1043332081", 26.3, 718.5, 10);

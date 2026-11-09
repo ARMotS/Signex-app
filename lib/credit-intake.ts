@@ -8,8 +8,8 @@
  *     folder is checked while the Credits page is open (throttled per scope)
  *     and on "Check folder".
  *   • Each new PDF is read (lib/credit-note.ts), and the note is matched to its
- *     invoice by the invoice number it prints — it never prints a collection
- *     number — then to that invoice's collected collections, on quantities.
+ *     invoice by the invoice number it prints, then to the collection it names
+ *     or, naming none, that invoice's collected collections, on quantities.
  *   • A second note with a credit number already received is REJECTED and its
  *     file moved to Rejected/. The unique claim on creditNoClaim makes that
  *     hold even when two copies are picked up at the same moment.
@@ -33,6 +33,7 @@ import {
   type LineMatch,
   type ParsedCreditNote,
 } from "./credit-note";
+import { collectionMatchKeys, sameCollectionNumber } from "./collections";
 import { readInvoiceNoPattern, readVatRate } from "./config";
 import { normalizeInvoiceNo, normalizedInvoiceNoOrNull } from "./invoice-number";
 import {
@@ -104,6 +105,7 @@ export async function ingestCreditNote(
     creditNoNormalized,
     invoiceNo: note?.invoiceNo ?? null,
     invoiceNoNormalized: normalizedInvoiceNoOrNull(note?.invoiceNo, pattern),
+    collectionRef: note?.collectionRef ?? null,
     creditDate: note?.creditDate ? new Date(`${note.creditDate}T00:00:00Z`) : null,
     accountNo: note?.accountNo ?? null,
     deliverToName: note?.deliverToName ?? null,
@@ -274,15 +276,53 @@ export async function reassessCreditNote(tenantId: string, creditNoteId: string)
       })
     : null;
 
-  const against = note.invoiceNoNormalized
-    ? await db.collection.findMany({
-        where: {
-          type: "CREDIT_RETURN",
-          OR: [{ invoiceNoNormalized: note.invoiceNoNormalized }, ...(invoice ? [{ invoiceId: invoice.id }] : [])],
-        },
-        select: { id: true, collectionNo: true, status: true, creditReview: true, creditReviewReason: true },
-      })
+  const candidateSelect = {
+    id: true,
+    collectionNo: true,
+    status: true,
+    creditReview: true,
+    creditReviewReason: true,
+    invoiceId: true,
+    invoiceNoNormalized: true,
+  } as const;
+
+  // The collection the note names outranks the invoice's: an invoice can have
+  // several returns against it, and the note says which one it pays for. The
+  // number may recur on a later trip (a rebooked collection), hence a list.
+  const [exactRef, , unpaddedRef] = note.collectionRef ? collectionMatchKeys(note.collectionRef) : [];
+  const refKey = unpaddedRef ?? exactRef;
+  const named = refKey
+    ? (
+        await db.collection.findMany({
+          where: { type: "CREDIT_RETURN", collectionNo: { endsWith: refKey, mode: "insensitive" } },
+          select: candidateSelect,
+        })
+      ).filter((c) => sameCollectionNumber(c.collectionNo, note.collectionRef!))
     : [];
+
+  const against =
+    named.length > 0
+      ? named
+      : note.invoiceNoNormalized
+      ? await db.collection.findMany({
+          where: {
+            type: "CREDIT_RETURN",
+            OR: [{ invoiceNoNormalized: note.invoiceNoNormalized }, ...(invoice ? [{ invoiceId: invoice.id }] : [])],
+          },
+          select: candidateSelect,
+        })
+      : [];
+
+  const collectionRefState = !note.collectionRef
+    ? undefined
+    : named.length === 0
+    ? ("UNKNOWN" as const)
+    : note.invoiceNoNormalized &&
+      named.every(
+        (c) => c.invoiceNoNormalized && c.invoiceNoNormalized !== note.invoiceNoNormalized && c.invoiceId !== invoice?.id
+      )
+    ? ("OTHER_INVOICE" as const)
+    : ("FOUND" as const);
 
   // A collection the office rejected for credit is never linked: it stays on
   // record, but nothing is credited against it.
@@ -382,6 +422,7 @@ export async function reassessCreditNote(tenantId: string, creditNoteId: string)
   const parsed: ParsedCreditNote = {
     creditNo: note.creditNo,
     invoiceNo: note.invoiceNo,
+    collectionRef: note.collectionRef,
     creditDate: note.creditDate ? note.creditDate.toISOString().slice(0, 10) : null,
     accountNo: note.accountNo,
     deliverToName: note.deliverToName,
@@ -414,6 +455,7 @@ export async function reassessCreditNote(tenantId: string, creditNoteId: string)
       rejectedCollections: [...rejected.values()],
       // Decided on the Collections tab, before or after the trip closes.
       unapprovedCollectionNos: linked.filter((c) => !c.creditReview).map((c) => c.collectionNo),
+      collectionRefState,
     },
     note.readSource === "AI" ? "AI" : "TEXT"
   );

@@ -81,6 +81,7 @@ async function detail(ctx: Ctx, id: string) {
     id: note.id,
     creditNo: note.creditNo,
     invoiceNo: note.invoiceNo,
+    collectionRef: note.collectionRef,
     creditDate: note.creditDate?.toISOString().slice(0, 10) ?? null,
     accountNo: note.accountNo,
     deliverToName: note.deliverToName,

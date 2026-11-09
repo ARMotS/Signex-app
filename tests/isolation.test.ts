@@ -5810,6 +5810,32 @@ suite("cross-ADMIN isolation", () => {
     });
   });
   // ── Courier: Active / Completed, and delete from the list ──────
+  describe("who a collection receipt names", () => {
+    it("the branch's company, then the branch; never the installation's COMPANY_NAME", async () => {
+      const { readCollectionDeclaration } = await import("@/lib/config");
+      const tenant = await db().tenant.findUniqueOrThrow({ where: { id: f.a.tenantId } });
+      const before = process.env.COMPANY_NAME;
+      process.env.COMPANY_NAME = "Signex";
+      const company = await db().company.create({ data: { name: "Receipt Holdings" } });
+      try {
+        await db().tenant.update({ where: { id: f.a.tenantId }, data: { companyName: "Receipt Branch" } });
+        expect(await readCollectionDeclaration(f.a.tenantId)).toContain("approval by Receipt Branch.");
+
+        await db().tenant.update({ where: { id: f.a.tenantId }, data: { companyId: company.id } });
+        const text = await readCollectionDeclaration(f.a.tenantId);
+        expect(text).toContain("approval by Receipt Holdings.");
+        expect(text).not.toContain("Signex");
+        // Scope B has no company: its own name, not scope A's company.
+        expect(await readCollectionDeclaration(f.b.tenantId)).not.toContain("Receipt Holdings");
+      } finally {
+        await db().tenant.update({ where: { id: f.a.tenantId }, data: { companyId: tenant.companyId, companyName: tenant.companyName } });
+        await db().company.delete({ where: { id: company.id } });
+        if (before === undefined) delete process.env.COMPANY_NAME;
+        else process.env.COMPANY_NAME = before;
+      }
+    });
+  });
+
   describe("the Courier tabs", () => {
     const sheet = (fx: typeof f.a, no: string, status: "AWAITING_COLLECTION" | "COLLECTED" | "DELIVERED") =>
       db().courierTripSheet.create({
@@ -6095,6 +6121,37 @@ suite("cross-ADMIN isolation", () => {
         { name: "Admin", userId: f.a.admin.id }
       );
       expect(refused.outcome).toBe("invalid");
+    });
+
+    it("a note naming its collection links that one, not the invoice's other return, and never another scope's", async () => {
+      const named = (await collectedCR(f.a, "23328", "639568")).collection;
+      const sibling = (await collectedCR(f.a, "23329", "639568")).collection;
+      const theirs = (await collectedCR(f.b, "23328", "639568")).collection;
+      const { ingestCreditNote } = await import("@/lib/credit-intake");
+      const { creditNotePdf } = await import("./helpers/credit-note-fixture");
+      const read = async (creditNo: string, reference: string) => {
+        await ingestCreditNote(
+          f.a.tenantId,
+          { itemId: `item-${creditNo}`, filename: `CR-${creditNo}.pdf`, subfolder: "Originals", lastModified: new Date().toISOString() },
+          await creditNotePdf({ creditNo, invoiceNo: null, reference })
+        );
+        return db().creditNote.findFirstOrThrow({ where: { sourceItemId: `item-${creditNo}` }, include: { collections: true } });
+      };
+
+      const found = await read("408001", "RFC INV 639568 CRC-23328");
+      expect(found).toMatchObject({ invoiceNo: "639568", invoiceNoNormalized: "639568", collectionRef: "CRC-23328" });
+      expect(found.collections.map((l) => l.collectionId)).toEqual([named.id]);
+      expect(await db().creditNoteCollection.count({ where: { collectionId: { in: [sibling.id, theirs.id] } } })).toBe(0);
+
+      // A number Signex does not hold: the invoice still leads to its returns, and the office is told.
+      const unknown = await read("408002", "RFC INV 639568 CRC-99999");
+      expect(unknown.collections.map((l) => l.collectionId).sort()).toEqual([named.id, sibling.id].sort());
+      expect(unknown.status).toBe("NEEDS_REVIEW");
+      expect(JSON.stringify(unknown.issues)).toContain("COLLECTION_REF_UNKNOWN");
+
+      const elsewhere = await read("408003", "RFC INV 111222 CRC-23328");
+      expect(elsewhere.status).toBe("NEEDS_REVIEW");
+      expect(JSON.stringify(elsewhere.issues)).toContain("COLLECTION_REF_OTHER_INVOICE");
     });
 
     it("a credit note is not ready to sign until its collection is approved, and is the moment it is", async () => {

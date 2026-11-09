@@ -7,6 +7,7 @@ import {
   matchCreditLines,
   parseAmount,
   readCreditNoteFromPages,
+  readReferences,
   type CollectedLine,
   type CreditContext,
   type ParsedCreditNote,
@@ -25,6 +26,50 @@ const line = (n: number, over: Partial<CreditFixtureLine> = {}): CreditFixtureLi
   disc: 0,
   nett: 10 * n,
   ...over,
+});
+
+describe("references in free text", () => {
+  it.each([
+    ["RFC INV 639568 CRC-23328", "639568", "CRC-23328"],
+    ["INV-639568 / CRC 23328", "639568", "CRC 23328"],
+    ["INV639568 CRC23328", "639568", "CRC23328"],
+    ["Invoice No: 639568  Collection No: 1797", "639568", "Collection No: 1797"],
+    ["inv # 639568 crcol-1797", "639568", "crcol-1797"],
+    ["IV-639568 CR COL 1797", "639568", "CR COL 1797"],
+    ["Against Invoice 639568", "639568", null],
+    ["Credit Collection Sheet 001797", null, "Collection Sheet 001797"],
+    ["CREDIT COLLECTION SHHET 001797", null, "COLLECTION SHHET 001797"],
+    ["INV 2026-1047", "2026-1047", null],
+  ])("%s", (line, invoiceNo, collectionRef) => {
+    expect(readReferences([line])).toEqual({ invoiceNo, collectionRef });
+  });
+
+  it.each([
+    "BANK ACCOUNT WILL NEVER CHANGE",
+    "NEDBANK LTD 164826 ACC:1045733326",
+    "CR NOTE 407712",
+    "CR-407712",
+    "Invoice date 16/10/2026",
+    "Invoice to: 24 FABRIK STREET",
+    "Invoice 16/10/2026",
+    "Collection date 16/10/2026",
+    "Collection 2026-10-16",
+    "INVERTER 1000",
+    "INV 12V",
+    "INV 1 of 2",
+  ])("is not a reference: %s", (line) => {
+    expect(readReferences([line])).toEqual({ invoiceNo: null, collectionRef: null });
+  });
+
+  it("does not take a collection number for a missing invoice", () => {
+    expect(readReferences(["RFC INV CRC-23328"])).toEqual({ invoiceNo: null, collectionRef: "CRC-23328" });
+  });
+
+  it("two different numbers is no answer; the same one repeated is still one", () => {
+    expect(readReferences(["INV 639568", "INV 639569"]).invoiceNo).toBeNull();
+    expect(readReferences(["CRC-23328 CRC-23329"]).collectionRef).toBeNull();
+    expect(readReferences(["INV 639568", "INV 639568"]).invoiceNo).toBe("639568");
+  });
 });
 
 describe("reading the client's credit note", () => {
@@ -93,6 +138,27 @@ describe("reading the client's credit note", () => {
     expect((await read(await creditNotePdf({ invoiceNo: null }))).invoiceNo).toBeNull();
     expect((await read(await creditNotePdf({ layout: "CR-407710", invoiceNo: null }))).invoiceNo).toBeNull();
   });
+
+  it("reads the invoice and collection from the free-text footer line", async () => {
+    const note = await read(await creditNotePdf({ invoiceNo: null, reference: "RFC INV 639568 CRC-23328" }));
+    expect(note).toMatchObject({ invoiceNo: "639568", collectionRef: "CRC-23328" });
+  });
+
+  it("prefers a labelled invoice to the footer, and still takes the footer's collection", async () => {
+    const note = await read(await creditNotePdf({ invoiceNo: "384281", reference: "RFC INV 639568 CRC-23328" }));
+    expect(note).toMatchObject({ invoiceNo: "384281", collectionRef: "CRC-23328" });
+  });
+
+  it("never takes a reference from a product line", async () => {
+    const inverter = line(1, { description: "INV 1000 COL 2000 PURE SINE" });
+    const note = await read(await creditNotePdf({ invoiceNo: null, pages: [[inverter]] }));
+    expect(note).toMatchObject({ invoiceNo: null, collectionRef: null });
+  });
+
+  it("names no collection on the client's existing layouts", async () => {
+    expect((await read(await creditNotePdf())).collectionRef).toBeNull();
+    expect((await read(await creditNotePdf({ layout: "CR-407710" }))).collectionRef).toBeNull();
+  });
 });
 
 describe("the later layout: the invoice as a column of the heading row (CR-407710)", () => {
@@ -152,6 +218,7 @@ describe("parseAmount", () => {
 const parsed = (over: Partial<ParsedCreditNote> = {}): ParsedCreditNote => ({
   creditNo: "407712",
   invoiceNo: "384281",
+  collectionRef: null,
   creditDate: "2026-10-16",
   accountNo: "C007H014",
   deliverToName: "HELDERBERG MOTOR SPARES",
@@ -291,6 +358,20 @@ describe("assessCreditNote", () => {
     const result = assessCreditNote(parsed(), context({ invoice: null, collections: [], collectedLines: [] }), "TEXT");
     expect(result.status).toBe("NEEDS_REVIEW");
     expect(codes(result.issues)).toEqual(["INVOICE_UNKNOWN"]);
+  });
+
+  it("a named collection Signex can find adds nothing to look at", () => {
+    const result = assessCreditNote(parsed({ collectionRef: "CRC-1797" }), context({ collectionRefState: "FOUND" }), "TEXT");
+    expect(result).toMatchObject({ status: "RECEIVED", issues: [] });
+  });
+
+  it("a named collection that is unknown, or against another invoice, needs review", () => {
+    const unknown = assessCreditNote(parsed({ collectionRef: "CRC-9" }), context({ collectionRefState: "UNKNOWN" }), "TEXT");
+    expect(unknown.status).toBe("NEEDS_REVIEW");
+    expect(codes(unknown.issues)).toEqual(["COLLECTION_REF_UNKNOWN"]);
+    const other = assessCreditNote(parsed({ collectionRef: "CRC-9" }), context({ collectionRefState: "OTHER_INVOICE" }), "TEXT");
+    expect(other.status).toBe("NEEDS_REVIEW");
+    expect(codes(other.issues)).toEqual(["COLLECTION_REF_OTHER_INVOICE"]);
   });
 
   it("says when the collection has not been collected yet, or there is none", () => {
