@@ -9,7 +9,7 @@ import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 import CollectionSheetPanel, { type SheetCollection } from "@/components/admin/CollectionSheetPanel";
 import RemoveCollectionButton from "@/components/admin/RemoveCollectionButton";
 import { DocChip, StatusBadge, collectionKind, collectionTone, invoiceTone } from "@/components/ui/Chips";
-import { awaitingCreditReview, creditReviewRequired } from "@/lib/collection-confirm";
+import { awaitingCreditReview, creditReviewRequired, officeSheetDiscarded } from "@/lib/collection-confirm";
 import MappingWizard from "@/components/admin/import-mapping/MappingWizard";
 import ReadWithBar from "@/components/admin/import-mapping/ReadWithBar";
 import type { TemplateRef, TemplateSummary } from "@/components/admin/import-mapping/types";
@@ -99,6 +99,7 @@ interface TripCollection {
   collectedQty?: number | null;
   sourceFilePath?: string | null;
   signedFilePath?: string | null;
+  signedIncludesSource?: boolean;
   /** The office's decision on a CR that came back (lib/collection-confirm.ts). */
   creditReview?: "APPROVED" | "REJECTED" | null;
   creditReviewReason?: string | null;
@@ -128,6 +129,7 @@ interface ArchivedCollection {
   sourceFilePath: string | null;
   signedFileId: string | null;
   signedFilePath: string | null;
+  signedIncludesSource?: boolean;
   /** The office's decision, frozen at completion. Absent before approvals. */
   creditReview?: "APPROVED" | "REJECTED" | null;
   creditReviewReason?: string | null;
@@ -3457,7 +3459,7 @@ export default function TripSheetPage() {
                                       {/* Only when there is one to open. By id, not
                                           filename: finds a document the office
                                           added after this sheet was imported. */}
-                                      {c.sourceFilePath && (
+                                      {c.sourceFilePath && !officeSheetDiscarded(c) && (
                                         <a
                                           href={`/api/collections/${c.id}/source`}
                                           target="_blank"
@@ -4132,7 +4134,7 @@ export default function TripSheetPage() {
                                             No receipt
                                           </StatusBadge>
                                         )}
-                                        {c.sourceFilePath && (
+                                        {c.sourceFilePath && !officeSheetDiscarded(c) && (
                                           <a
                                             href={`/api/collections/document/${encodeURIComponent(c.sourceFilePath)}`}
                                             target="_blank"

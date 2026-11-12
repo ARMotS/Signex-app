@@ -63,9 +63,15 @@ vi.mock("@/lib/session", async (importOriginal) => ({
  */
 const sentEmails: { to: string; invoiceNumber: string }[] = [];
 /** Courier emails: who they went to, which link they carried, what was attached. */
-const courierEmails: { to: string; reminder: boolean; confirmUrl: string; invoiceNos: string[]; attachments: Buffer[] }[] = [];
+const courierEmails: { to: string; confirmUrl: string; invoiceNos: string[]; attachments: Buffer[] }[] = [];
 const courierMail = { fail: false };
+/** Signed credit notes emailed to customers: who, which note, what was attached. */
+const creditEmails: { to: string; creditNo: string; attachment: Buffer | null }[] = [];
 vi.mock("@/lib/email", () => ({
+  sendCreditNoteSigned: vi.fn(async (p: { customerEmail: string; creditNo: string; attachment?: { content: Buffer } }) => {
+    creditEmails.push({ to: p.customerEmail, creditNo: p.creditNo, attachment: p.attachment?.content ?? null });
+    return { success: true, emailId: `credit-${creditEmails.length}` };
+  }),
   sendDeliveryConfirmation: vi.fn(
     async (p: { customerEmail: string; invoiceNumber: string }) => {
       sentEmails.push({ to: p.customerEmail, invoiceNumber: p.invoiceNumber });
@@ -73,11 +79,10 @@ vi.mock("@/lib/email", () => ({
     }
   ),
   sendCourierDispatch: vi.fn(
-    async (p: { customerEmail: string; reminder?: boolean; confirmUrl: string; invoiceNos: string[]; attachments: { content: Buffer }[] }) => {
+    async (p: { customerEmail: string; confirmUrl: string; invoiceNos: string[]; attachments: { content: Buffer }[] }) => {
       if (courierMail.fail) return { success: false, error: "550 mailbox unavailable" };
       courierEmails.push({
         to: p.customerEmail,
-        reminder: !!p.reminder,
         confirmUrl: p.confirmUrl,
         invoiceNos: p.invoiceNos,
         attachments: p.attachments.map((a) => a.content),
@@ -1419,7 +1424,7 @@ suite("cross-ADMIN isolation", () => {
         // Once filed, the customer's email went to A's own contact, carrying
         // the stamped copy and a link to this sheet.
         expect(courierEmails).toHaveLength(1);
-        expect(courierEmails[0]).toMatchObject({ to: "acme-a@example.test", reminder: false, invoiceNos: ["7105"] });
+        expect(courierEmails[0]).toMatchObject({ to: "acme-a@example.test", invoiceNos: ["7105"] });
         expect(courierEmails[0].attachments.map((b) => b.equals(uploads[0].body))).toEqual([true]);
         const token = courierEmails[0].confirmUrl.split("/delivery/")[1];
         const { hashConfirmToken } = await import("@/lib/courier-confirm");
@@ -1620,7 +1625,7 @@ suite("cross-ADMIN isolation", () => {
         expect(afterB).toMatchObject({ emailStatus: "NO_EMAIL", contactId: null });
       });
 
-      it("the daily job answers only Vercel's call, and reminds each customer once from their own scope", async () => {
+      it("the daily job answers only Vercel's call, and sends no reminders", async () => {
         const { GET } = await import("@/app/api/cron/courier-confirmations/route");
         const call = (auth?: string) => {
           const r = req("/api/cron/courier-confirmations");
@@ -1636,50 +1641,22 @@ suite("cross-ADMIN isolation", () => {
 
           const a = await collectedSheet(f.a, "720005");
           const b = await collectedSheet(f.b, "720005");
-          const fresh = await collectedSheet(f.a, "720006");
-          for (const [fx, s] of [[f.a, a], [f.b, b], [f.a, fresh]] as const) await notify(fx, s.id);
-          const links = new Map(courierEmails.map((e) => [e.invoiceNos[0] + e.to, e.confirmUrl]));
-          const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
-          await db().courierTripSheet.updateMany({ where: { id: { in: [a.id, b.id] } }, data: { emailSentAt: threeDaysAgo } });
+          for (const [fx, s] of [[f.a, a], [f.b, b]] as const) await notify(fx, s.id);
+          // Long past the day a reminder used to go.
+          const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+          await db().courierTripSheet.updateMany({ where: { id: { in: [a.id, b.id] } }, data: { emailSentAt: fiveDaysAgo } });
           courierEmails.length = 0;
 
           const res = await call("Bearer test-cron-secret");
           expect(res.status).toBe(200);
-          const reminders = courierEmails.filter((e) => e.reminder);
-          expect(reminders.map((e) => [e.to, e.invoiceNos[0]]).sort()).toEqual([
-            ["acme-a@example.test", "720005"],
-            ["acme-b@example.test", "720005"],
-          ]);
-          // The same link each customer already has — never another scope's.
-          for (const r of reminders) expect(r.confirmUrl).toBe(links.get(r.invoiceNos[0] + r.to));
-          expect(reminders.every((r) => r.attachments.length === 0)).toBe(true);
-
-          const rows = await db().courierTripSheet.findMany({ where: { id: { in: [a.id, b.id, fresh.id] } } });
-          const reminded = Object.fromEntries(rows.map((r) => [r.id, !!r.reminderSentAt]));
-          expect(reminded).toEqual({ [a.id]: true, [b.id]: true, [fresh.id]: false });
-
-          // One reminder only.
-          courierEmails.length = 0;
-          await call("Bearer test-cron-secret");
-          expect(courierEmails.filter((e) => e.reminder && e.invoiceNos[0] === "720005")).toHaveLength(0);
+          // The reminder email was removed: an unconfirmed sheet is emailed once.
+          expect(courierEmails.filter((e) => e.invoiceNos[0] === "720005")).toHaveLength(0);
+          const rows = await db().courierTripSheet.findMany({ where: { id: { in: [a.id, b.id] } } });
+          expect(rows.every((r) => r.reminderSentAt === null && r.emailStatus === "SENT")).toBe(true);
         } finally {
           if (before === undefined) delete process.env.CRON_SECRET;
           else process.env.CRON_SECRET = before;
         }
-      });
-
-      it("a failed reminder is tried again the next day", async () => {
-        const { sendCourierReminder } = await import("@/lib/courier-confirm");
-        const a = await collectedSheet(f.a, "720007");
-        await notify(f.a, a.id);
-        await db().courierTripSheet.update({ where: { id: a.id }, data: { emailSentAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) } });
-        courierMail.fail = true;
-        expect((await sendCourierReminder(f.a.tenantId, a.id)).outcome).toBe("failed");
-        expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } })).reminderSentAt).toBeNull();
-        courierMail.fail = false;
-        expect((await sendCourierReminder(f.a.tenantId, a.id)).outcome).toBe("sent");
-        // Another scope's id is simply not found.
-        expect((await sendCourierReminder(f.b.tenantId, a.id)).outcome).toBe("not_found");
       });
 
       it("the badge and the dashboard count only the caller's own courier sheets", async () => {
@@ -5674,6 +5651,14 @@ suite("cross-ADMIN isolation", () => {
 
     it("signs under the caller's login, files with the caller's connection, and freezes what it paid for", async () => {
       const note = await db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-a-407712" } });
+      // The customer is a contact in both scopes; only the caller's own is emailed.
+      await db().contact.createMany({
+        data: [
+          { tenantId: f.a.tenantId, companyName: "Helderberg Motor Spares", email: "helderberg-a@example.test", contactPerson: "Pieter" },
+          { tenantId: f.b.tenantId, companyName: "Helderberg Motor Spares", email: "helderberg-b@example.test" },
+        ],
+      });
+      creditEmails.length = 0;
       useSession(adminSession(f.a));
       expect((await sign(note.id, { signedByName: "T", signatureImage: SIGNATURE_PNG })).status).toBe(400);
 
@@ -5699,8 +5684,30 @@ suite("cross-ADMIN isolation", () => {
       expect([...tokens]).toEqual(["access-token-A"]);
       expect(graphCalls.some((c) => c.url.startsWith("DELETE") && c.url.includes("item-a-407712"))).toBe(true);
 
+      // The customer was emailed the signed copy, from the caller's own contacts.
+      expect(creditEmails).toHaveLength(1);
+      expect(creditEmails[0]).toMatchObject({ to: "helderberg-a@example.test", creditNo: "407712" });
+      expect(creditEmails[0].attachment?.subarray(0, 5).toString()).toBe("%PDF-");
+      expect(await db().creditNote.findUniqueOrThrow({ where: { id: note.id } })).toMatchObject({
+        emailStatus: "SENT",
+        emailRecipient: "helderberg-a@example.test",
+        emailAttempts: 1,
+      });
+
       // Signed is settled: a second signature is refused.
       expect((await sign(note.id, { signedByName: "Thabo Mokoena", signatureImage: SIGNATURE_PNG })).status).toBe(409);
+
+      // The office's Send: another scope's note is 404, a driver 403; a resend needs force.
+      const { POST: notify } = await import("@/app/api/credit-notes/[id]/notify/route");
+      const send = (body: object) => notify(req(`/api/credit-notes/${note.id}/notify`, { method: "POST", body }), params({ id: note.id }));
+      useSession(adminSession(f.b));
+      expect((await withCreditGraph(() => send({ force: true }))).status).toBe(404);
+      useSession(driverSession(f.a));
+      expect((await withCreditGraph(() => send({ force: true }))).status).toBe(403);
+      useSession(adminSession(f.a));
+      expect(await (await withCreditGraph(() => send({}))).json()).toMatchObject({ outcome: "already_sent" });
+      expect(await (await withCreditGraph(() => send({ force: true }))).json()).toMatchObject({ outcome: "sent", recipient: "helderberg-a@example.test" });
+      expect(creditEmails.map((e) => e.to)).toEqual(["helderberg-a@example.test", "helderberg-a@example.test"]);
     });
 
     it("a second note for goods already credited needs a reason before it can be signed", async () => {
@@ -6123,6 +6130,65 @@ suite("cross-ADMIN isolation", () => {
       expect(refused.outcome).toBe("invalid");
     });
 
+    it("approving needs no charge box, tells the office what became of the note, and undoes a rejection at once", async () => {
+      const { collection } = await collectedCR(f.a, "RV-8", "384320");
+      await db().collectionLine.create({
+        data: {
+          tenantId: f.a.tenantId,
+          collectionId: collection.id,
+          lineNo: 1,
+          itemCode: "618ABG",
+          description: "BATT BM-618B41LB1 41AH 360CCA",
+          qtyListed: 1,
+          qtyCollected: 1,
+        },
+      });
+      const { ingestCreditNote } = await import("@/lib/credit-intake");
+      const { creditNotePdf } = await import("./helpers/credit-note-fixture");
+      await ingestCreditNote(
+        f.a.tenantId,
+        { itemId: "item-rv8", filename: "CR-407960.pdf", subfolder: "Originals", lastModified: new Date().toISOString() },
+        await creditNotePdf({ creditNo: "407960", invoiceNo: "384320" })
+      );
+      const noteRow = () => db().creditNote.findFirstOrThrow({ where: { sourceItemId: "item-rv8" }, include: { collections: true } });
+      const before = await noteRow();
+      expect(JSON.stringify(before.issues)).toContain("COLLECTION_NOT_APPROVED");
+
+      useSession(adminSession(f.a));
+      const approved = await review(collection.id, { decision: "APPROVE", charge: null });
+      expect(approved.status).toBe(200);
+      expect((await approved.json()).creditNotes).toEqual([{ id: before.id, creditNo: "407960", signable: true }]);
+      expect(JSON.stringify((await noteRow()).issues)).not.toContain("COLLECTION_NOT_APPROVED");
+
+      const rejected = await review(collection.id, { decision: "REJECT", reason: "Not our stock" });
+      expect((await rejected.json()).creditNotes).toEqual([{ id: before.id, creditNo: "407960", signable: false }]);
+      expect((await noteRow()).collections).toHaveLength(0);
+
+      // Rejecting dropped the link, so approving must find the note another way.
+      const again = await review(collection.id, { decision: "APPROVE" });
+      expect((await again.json()).creditNotes).toEqual([{ id: before.id, creditNo: "407960", signable: true }]);
+      const after = await noteRow();
+      expect(after.collections.map((l) => l.collectionId)).toEqual([collection.id]);
+      expect(JSON.stringify(after.issues)).not.toContain("COLLECTION_REJECTED");
+    });
+
+    it("the signed receipt's flag reaches the list, the trip card and the archive", async () => {
+      const { trip, collection } = await collectedCR(f.a, "RV-9", "384321");
+      await db().collection.update({
+        where: { id: collection.id },
+        data: { signedIncludesSource: true, signedFilePath: "RV-9-signed.pdf", sourceFilePath: "RV-9.pdf" },
+      });
+      const { listCollections, completeTripSheet, getCompletedTripSheets } = await import("@/lib/trip-data");
+      const flagOf = async () =>
+        (await listCollections(f.a.tenantId, {})).find((c) => c.collectionNo === "RV-9")?.signedIncludesSource;
+
+      expect(await flagOf()).toBe(true);
+      expect((await completeTripSheet(f.a.tenantId, trip.id, "Admin")).success).toBe(true);
+      expect(await flagOf()).toBe(true);
+      const archived = (await getCompletedTripSheets(f.a.tenantId)).flatMap((t) => t.collections).find((c) => c.collectionNo === "RV-9");
+      expect(archived?.signedIncludesSource).toBe(true);
+    });
+
     it("a note naming its collection links that one, not the invoice's other return, and never another scope's", async () => {
       const named = (await collectedCR(f.a, "23328", "639568")).collection;
       const sibling = (await collectedCR(f.a, "23329", "639568")).collection;
@@ -6152,6 +6218,14 @@ suite("cross-ADMIN isolation", () => {
       const elsewhere = await read("408003", "RFC INV 111222 CRC-23328");
       expect(elsewhere.status).toBe("NEEDS_REVIEW");
       expect(JSON.stringify(elsewhere.issues)).toContain("COLLECTION_REF_OTHER_INVOICE");
+
+      // A decision reaches the note that names that very number, never one
+      // whose number merely ends the same way (CRC-23328 is not collection 3328).
+      const lookalike = (await collectedCR(f.a, "3328", "639991")).collection;
+      useSession(adminSession(f.a));
+      expect((await (await review(lookalike.id, { decision: "APPROVE" })).json()).creditNotes).toEqual([]);
+      const reached = (await (await review(named.id, { decision: "APPROVE" })).json()).creditNotes;
+      expect(reached.map((n: { creditNo: string }) => n.creditNo).sort()).toEqual(expect.arrayContaining(["408001", "408003"]));
     });
 
     it("a credit note is not ready to sign until its collection is approved, and is the moment it is", async () => {

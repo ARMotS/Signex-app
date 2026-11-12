@@ -77,6 +77,7 @@ export const GET = withAuth(async (
       live: !!c.tripSheetId,
       signedFilePath: c.signedFilePath,
       sourceFilePath: c.sourceFilePath,
+      signedIncludesSource: c.signedIncludesSource,
       itemsListed: c.lines.filter((l) => !l.isExtra).reduce((n, l) => n + l.qtyListed, 0),
       itemsCollected: c.lines.reduce((n, l) => n + (l.qtyCollected ?? 0), 0),
       hasLines: c.lines.length > 0,

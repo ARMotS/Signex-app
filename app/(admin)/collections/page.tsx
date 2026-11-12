@@ -8,14 +8,17 @@ import {
   CREDIT_CHARGE_LABEL,
   awaitingCreditReview,
   creditReviewRequired,
+  officeSheetDiscarded,
   type CreditCharge,
   type ReasonLine,
 } from "@/lib/collection-confirm";
 import CreditReviewControl, {
+  ButtonSpinner,
   ChargeBoxes,
   CreditBadge,
   RejectCreditDialog,
   submitCreditDecision,
+  type DecisionNote,
 } from "@/components/admin/CreditReviewControl";
 import RecordFilterBar, { Highlight, type FilterBarConfig } from "@/components/admin/RecordFilterBar";
 import CollectionSheetUpload from "@/components/admin/CollectionSheetUpload";
@@ -52,6 +55,8 @@ interface CollectionRecord {
   sourceFilePath: string | null;
   signedFileId: string | null;
   signedFilePath: string | null;
+  /** The signed receipt contains the office's sheet. */
+  signedIncludesSource?: boolean;
   driverId: string | null;
   driverName: string | null;
   emailStatus: "NOT_SENT" | "SENDING" | "SENT" | "FAILED" | "NO_EMAIL" | null;
@@ -368,8 +373,10 @@ export default function CollectionsPage() {
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkCharge, setBulkCharge] = useState<CreditCharge | null>(null);
-  const [bulkBusy, setBulkBusy] = useState(false);
-  const [bulkNote, setBulkNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [bulkProgress, setBulkProgress] = useState<{ at: number; of: number } | null>(null);
+  const bulkBusy = bulkProgress !== null;
+  const [bulkDeciding, setBulkDeciding] = useState<"APPROVE" | "REJECT" | null>(null);
+  const [decisionMessage, setDecisionMessage] = useState<(DecisionNote & { ok: boolean }) | null>(null);
   const [bulkRejecting, setBulkRejecting] = useState(false);
   const [bulkReason, setBulkReason] = useState("");
   const [folderKey, setFolderKey] = useState(0);
@@ -458,26 +465,40 @@ export default function CollectionsPage() {
   // One at a time through the same route as a single decision, so each keeps
   // its own conditional update and audit entry; one failing stops none of the rest.
   const decideChosen = async (decision: "APPROVE" | "REJECT") => {
-    setBulkBusy(true);
-    setBulkNote(null);
+    setBulkDeciding(decision);
+    setDecisionMessage(null);
     const failures: string[] = [];
     let done = 0;
-    for (const r of chosen) {
-      const error = await submitCreditDecision(r.rowId!, decision, bulkReason, bulkCharge);
-      if (error) failures.push(`${r.collectionNo}: ${error}`);
-      else done += 1;
+    const signable = new Set<string>();
+    for (const [i, r] of chosen.entries()) {
+      setBulkProgress({ at: i + 1, of: chosen.length });
+      const result = await submitCreditDecision(r.rowId!, decision, bulkReason, bulkCharge);
+      if (!result.ok) {
+        failures.push(`${r.collectionNo}: ${result.error}`);
+        continue;
+      }
+      done += 1;
+      for (const n of result.creditNotes) if (n.signable) signable.add(n.id);
     }
-    setBulkBusy(false);
+    setBulkProgress(null);
+    setBulkDeciding(null);
     setBulkRejecting(false);
     setBulkReason("");
     setBulkCharge(null);
     setSelected(new Set());
     const verb = decision === "APPROVE" ? "Approved" : "Rejected";
-    setBulkNote(
+    const ready = decision === "APPROVE" && signable.size > 0 ? ` ${signable.size} credit note${signable.size === 1 ? "" : "s"} can now be signed.` : "";
+    setDecisionMessage(
       failures.length
-        ? { ok: false, text: `${verb} ${done}. Not done: ${failures.join("; ")}` }
-        : { ok: true, text: `${verb} ${done} for credit.` }
+        ? { ok: false, text: `${verb} ${done}.${ready} Not done: ${failures.join("; ")}` }
+        : { ok: true, text: `${verb} ${done} for credit.${ready}` }
     );
+    list.reload();
+  };
+
+  // One decision has gone through: say what it did, and move the row.
+  const afterDecision = (note: DecisionNote) => {
+    setDecisionMessage({ ok: true, ...note });
     list.reload();
   };
 
@@ -595,8 +616,9 @@ export default function CollectionsPage() {
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2 bg-ink-black text-white">
           <span className="text-xs font-medium">{chosen.length} selected</span>
           <ChargeBoxes value={bulkCharge} onChange={setBulkCharge} disabled={bulkBusy} />
-          <button type="button" onClick={() => decideChosen("APPROVE")} disabled={bulkBusy} className="act act-primary">
-            {bulkBusy ? "Working…" : "Approve credits"}
+          <button type="button" onClick={() => decideChosen("APPROVE")} disabled={bulkBusy} aria-busy={bulkDeciding === "APPROVE"} className={`act act-primary ${bulkDeciding === "APPROVE" ? "!opacity-100" : ""}`}>
+            {bulkDeciding === "APPROVE" && <ButtonSpinner />}
+            {bulkDeciding === "APPROVE" && bulkProgress ? `Approving ${bulkProgress.at} of ${bulkProgress.of}…` : "Approve credits"}
           </button>
           <button type="button" onClick={() => setBulkRejecting(true)} disabled={bulkBusy} className="act !text-ink-black">
             Reject…
@@ -606,8 +628,15 @@ export default function CollectionsPage() {
           </button>
         </div>
       )}
-      {bulkNote && (
-        <p className={`px-4 py-2 border-b border-ink-border text-xs font-mono ${bulkNote.ok ? "text-ink-green" : "text-ink-red"}`}>{bulkNote.text}</p>
+      {decisionMessage && (
+        <p role="status" className={`animate-fade-in px-4 py-2 border-b border-ink-border text-xs font-mono ${decisionMessage.ok ? "text-ink-green" : "text-ink-red"}`}>
+          {decisionMessage.text}
+          {decisionMessage.creditNoteId && (
+            <Link href={`/credits?note=${decisionMessage.creditNoteId}`} className="ml-2 underline text-ink-black">
+              Open credit note
+            </Link>
+          )}
+        </p>
       )}
       {bulkRejecting && (
         <RejectCreditDialog
@@ -681,7 +710,7 @@ export default function CollectionsPage() {
                   checked={!!r.rowId && selected.has(r.rowId)}
                   onToggle={toggle}
                   onOpen={() => setOpenKey(recordKey(r))}
-                  onChanged={list.reload}
+                  onChanged={afterDecision}
                   onDelete={() => askRemove(r)}
                 />
               ))}
@@ -738,7 +767,7 @@ export default function CollectionsPage() {
         <CollectionDetail
           r={opened}
           onClose={() => setOpenKey(null)}
-          onChanged={list.reload}
+          onChanged={afterDecision}
           onDelete={() => askRemove(opened)}
           onSend={sendReceipt}
           sending={sendingId === opened.id}
@@ -811,7 +840,7 @@ function CollectionRow({
   checked: boolean;
   onToggle: (rowId: string) => void;
   onOpen: () => void;
-  onChanged: () => void;
+  onChanged: (note: DecisionNote) => void;
   onDelete: () => void;
 }) {
   const awaiting = !!r.rowId && awaitingCreditReview(r);
@@ -960,7 +989,7 @@ function CollectionDetail({
 }: {
   r: CollectionRecord;
   onClose: () => void;
-  onChanged: () => void;
+  onChanged: (note: DecisionNote) => void;
   onDelete: () => void;
   onSend: (id: string) => void;
   sending: boolean;
@@ -1088,8 +1117,9 @@ function CollectionDetail({
             )}
             {/* Only when there is a sheet to open (as on the trip card). A live
                 one is fetched by id; an archived one has no row left, so it
-                needs the filename frozen with it. */}
-            {r.sourceFilePath && (
+                needs the filename frozen with it. Once collected, the signed
+                receipt holds its pages and the original is discarded. */}
+            {r.sourceFilePath && !officeSheetDiscarded(r) && (
               <a
                 href={r.id ? `/api/collections/${r.id}/source` : `/api/collections/document/${encodeURIComponent(r.sourceFilePath)}`}
                 target="_blank"

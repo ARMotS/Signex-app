@@ -264,6 +264,25 @@ describe("the office's decision on a credit return", () => {
   });
 });
 
+describe("the office's sheet once it has come back", () => {
+  it("is gone once collected in full with its pages in the signed receipt", async () => {
+    const { officeSheetDiscarded } = await import("@/lib/collection-confirm");
+    expect(officeSheetDiscarded({ status: "COLLECTED", signedIncludesSource: true })).toBe(true);
+  });
+
+  it("stays while it is still needed or may still exist", async () => {
+    const { officeSheetDiscarded } = await import("@/lib/collection-confirm");
+    // Not signed yet, or may be rebooked against the same sheet.
+    for (const status of ["PENDING", "PARTIAL", "NOT_AVAILABLE", "REFUSED"]) {
+      expect(officeSheetDiscarded({ status, signedIncludesSource: true })).toBe(false);
+    }
+    // The receipt could not embed it: the original is the only copy.
+    expect(officeSheetDiscarded({ status: "COLLECTED", signedIncludesSource: false })).toBe(false);
+    // An archive entry with no row left to say.
+    expect(officeSheetDiscarded({ status: "COLLECTED" })).toBe(false);
+  });
+});
+
 describe("the Reason, readable without the signed receipt", () => {
   const line = (over: Partial<ReasonLineInput> = {}): ReasonLineInput => ({
     lineNo: 1,

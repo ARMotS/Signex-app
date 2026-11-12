@@ -58,6 +58,8 @@ export interface TripCollection {
   /** The stamped output in Collections/Signed, once the driver has closed it */
   signedFileId?: string | null;
   signedFilePath?: string | null;
+  /** The signed receipt contains the office's sheet (officeSheetDiscarded). */
+  signedIncludesSource?: boolean;
   signedByName?: string | null;
   collectedAt?: Date | null;
   driverId?: string | null;
@@ -247,6 +249,8 @@ export interface ArchivedCollection {
   sourceFilePath: string | null;
   signedFileId: string | null;
   signedFilePath: string | null;
+  /** Added when read, from the row: not frozen, and absent on very old snapshots. */
+  signedIncludesSource?: boolean;
   /** Absent on snapshots taken before receipts were emailed. */
   emailStatus?: string | null;
   /** The driver recorded "Not as listed". Absent before confirm-by-exception. */
@@ -486,6 +490,7 @@ const TRIP_COLLECTION_SELECT = {
   sourceFilePath: true,
   signedFileId: true,
   signedFilePath: true,
+  signedIncludesSource: true,
   signedByName: true,
   collectedAt: true,
   driverId: true,
@@ -1151,6 +1156,7 @@ async function liveCollectionFacts(
       creditReviewedBy: string | null;
       creditCharge: "CHARGED" | "NO_CHARGE" | "CUSTOMER_20" | null;
       invoiceId: string | null;
+      signedIncludesSource: boolean;
     }
   >
 > {
@@ -1158,7 +1164,7 @@ async function liveCollectionFacts(
   if (wanted.length === 0) return new Map();
   const rows = await scopedPrisma(tenantId).collection.findMany({
     where: { id: { in: wanted } },
-    select: { id: true, creditReview: true, creditReviewReason: true, creditReviewedBy: true, creditCharge: true, invoiceId: true },
+    select: { id: true, creditReview: true, creditReviewReason: true, creditReviewedBy: true, creditCharge: true, invoiceId: true, signedIncludesSource: true },
   });
   return new Map(rows.map((r) => [r.id, r]));
 }
@@ -1251,7 +1257,7 @@ export async function getCompletedTripSheets(
     collections: (Array.isArray(r.collections) ? (r.collections as unknown as ArchivedCollection[]) : []).map((c) => {
       const row = c.collectionId ? decisions.get(c.collectionId) : undefined;
       return row
-        ? { ...c, creditReview: row.creditReview, creditReviewReason: row.creditReviewReason, creditReviewedBy: row.creditReviewedBy }
+        ? { ...c, creditReview: row.creditReview, creditReviewReason: row.creditReviewReason, creditReviewedBy: row.creditReviewedBy, signedIncludesSource: row.signedIncludesSource }
         : c;
     }),
     removedStops: removedByTrip.get(r.tripSheetId) ?? [],
@@ -1462,6 +1468,7 @@ interface RawCollection {
   sourceFilePath: string | null;
   signedFileId: string | null;
   signedFilePath: string | null;
+  signedIncludesSource?: boolean;
   signedByName: string | null;
   collectedAt: Date | null;
   driverId: string | null;
@@ -1498,6 +1505,7 @@ function mapCollection(collection: RawCollection): TripCollection {
     sourceFilePath: collection.sourceFilePath,
     signedFileId: collection.signedFileId,
     signedFilePath: collection.signedFilePath,
+    signedIncludesSource: collection.signedIncludesSource,
     signedByName: collection.signedByName,
     collectedAt: collection.collectedAt,
     driverId: collection.driverId,
@@ -1587,6 +1595,8 @@ export interface CollectionRecord {
   sourceFilePath: string | null;
   signedFileId: string | null;
   signedFilePath: string | null;
+  /** The signed receipt contains the office's sheet. Undefined when no row is left to say. */
+  signedIncludesSource?: boolean;
   driverId: string | null;
   driverName: string | null;
   /** Whether the customer's receipt went out. Null on old archive snapshots. */
@@ -1727,6 +1737,7 @@ export async function listCollections(
       sourceFilePath: true,
       signedFileId: true,
       signedFilePath: true,
+      signedIncludesSource: true,
       driverId: true,
       hasVariance: true,
       emailStatus: true,
@@ -1763,6 +1774,7 @@ export async function listCollections(
     sourceFilePath: c.sourceFilePath,
     signedFileId: c.signedFileId,
     signedFilePath: c.signedFilePath,
+    signedIncludesSource: c.signedIncludesSource,
     driverId: c.tripSheet?.driverId ?? c.driverId,
     driverName: c.tripSheet?.driver?.name ?? null,
     hasVariance: c.hasVariance,
@@ -1892,6 +1904,7 @@ export async function listCollections(
             creditCharge: row?.creditCharge ?? null,
             reasonLines: collectionReasonLines(row ? linesByCollection.get(c.collectionId!) ?? [] : []),
             invoiceId: row?.invoiceId ?? null,
+            signedIncludesSource: row?.signedIncludesSource,
             rowId: row ? c.collectionId! : null,
           };
         })(),

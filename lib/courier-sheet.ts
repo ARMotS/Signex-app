@@ -359,8 +359,10 @@ export function todayInJohannesburg(now = new Date()): string {
  * - email_problem: no address on file, or the email failed
  * - sending: the email is due or going out now
  * - awaiting: sent, not confirmed yet
- * - reminded: the one reminder went, not confirmed yet
+ * - reminded: a reminder went, not confirmed yet
  * - no_answer: two days after the reminder and still nothing — phone them
+ *   (reminded / no_answer are only reached by sheets reminded before the
+ *   reminder email was removed on 2026-11-12; nothing sets reminderSentAt now)
  * - confirmed: the customer confirmed the parcels arrived
  */
 export type ConfirmationState = "filing" | "email_problem" | "sending" | "awaiting" | "reminded" | "no_answer" | "confirmed";

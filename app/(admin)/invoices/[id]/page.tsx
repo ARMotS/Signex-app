@@ -3,6 +3,7 @@
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { DocChip, StatusBadge, collectionKind, collectionTone, creditNoteTone, type Tone } from "@/components/ui/Chips";
+import { officeSheetDiscarded } from "@/lib/collection-confirm";
 
 /**
  * One invoice's chain: its delivery, the collections credited against it,
@@ -41,6 +42,7 @@ interface Chain {
     live: boolean;
     signedFilePath: string | null;
     sourceFilePath: string | null;
+    signedIncludesSource: boolean;
     itemsListed: number;
     itemsCollected: number;
     hasLines: boolean;
@@ -219,7 +221,7 @@ export default function InvoiceChainPage({ params }: { params: Promise<{ id: str
               {c.collectedAt ? ` · ${formatWhen(c.collectedAt)}` : ""}
             </span>
             <span className="ml-auto flex items-center gap-2 flex-wrap">
-              {c.sourceFilePath && (
+              {c.sourceFilePath && !officeSheetDiscarded(c) && (
                 <a
                   href={c.live ? `/api/collections/${c.id}/source` : `/api/collections/document/${encodeURIComponent(c.sourceFilePath)}`}
                   target="_blank"

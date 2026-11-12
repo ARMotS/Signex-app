@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { officeSheetDiscarded } from "@/lib/collection-confirm";
 
 /**
  * The office's collection sheet for one collection, on the trip card: a badge
@@ -32,6 +33,7 @@ export interface SheetCollection {
   id: string;
   collectionNo: string;
   status: string;
+  signedIncludesSource?: boolean;
   sheetStatus?: "MISSING" | "READY" | "NEEDS_REVIEW";
   sheetIssues?: { code: string; level: "review" | "warning"; message: string }[] | null;
   /** Why the last attempt to read the sheet failed — shown, never swallowed. */
@@ -256,14 +258,16 @@ export default function CollectionSheetPanel({
             </div>
 
             <div className="shrink-0 flex flex-wrap justify-end gap-2 px-6 py-4 border-t border-ink-border bg-ink-surface/50">
-              <a
-                href={`/api/collections/${collection.id}/source`}
-                target="_blank"
-                rel="noreferrer"
-                className="px-3 py-2 text-xs font-mono text-ink-muted hover:text-ink-black transition-colors"
-              >
-                Open sheet
-              </a>
+              {!officeSheetDiscarded(collection) && (
+                <a
+                  href={`/api/collections/${collection.id}/source`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3 py-2 text-xs font-mono text-ink-muted hover:text-ink-black transition-colors"
+                >
+                  Open sheet
+                </a>
+              )}
               {editable && (
                 <>
                   <input

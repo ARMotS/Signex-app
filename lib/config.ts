@@ -207,15 +207,21 @@ export async function readInvoiceNoPattern(tenantId: string): Promise<InvoiceNoP
  * comes last, or every client's receipt would read "approval by Signex".
  */
 export async function readCollectionDeclaration(tenantId: string): Promise<string> {
-  const [config, tenant] = await Promise.all([
-    readConfig(tenantId),
-    scopedPrisma(tenantId).tenant.findUnique({
-      where: { id: tenantId },
-      select: { name: true, companyName: true, company: { select: { name: true } } },
-    }),
-  ]);
-  const company = tenant?.company?.name || tenant?.companyName || tenant?.name || process.env.COMPANY_NAME || "";
+  const [config, company] = await Promise.all([readConfig(tenantId), readCustomerFacingCompany(tenantId)]);
   return collectionDeclaration(config.collectionDeclarationText, company);
+}
+
+/**
+ * The name a customer knows this branch by: the Company it belongs to, then
+ * this scope's company name, then its name. COMPANY_NAME (the installation's,
+ * which is Signex) comes last.
+ */
+export async function readCustomerFacingCompany(tenantId: string): Promise<string> {
+  const tenant = await scopedPrisma(tenantId).tenant.findUnique({
+    where: { id: tenantId },
+    select: { name: true, companyName: true, company: { select: { name: true } } },
+  });
+  return tenant?.company?.name || tenant?.companyName || tenant?.name || process.env.COMPANY_NAME || "";
 }
 
 /**

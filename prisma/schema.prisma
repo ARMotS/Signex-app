@@ -1457,6 +1457,17 @@ model CreditNote {
   signedIncludesSource Boolean @default(false)
   /// The unsigned original was removed from Originals/ after filing.
   originalRemoved     Boolean  @default(false)
+
+  // ── The customer's email (lib/credit-note-email.ts) ──
+  /// Sent when the note is signed, with the signed copy attached. Same lease
+  /// semantics as Stop.emailStatus: SENDING is a claim, re-claimable once
+  /// stale; NO_EMAIL waits for a contact with an address.
+  emailStatus         EmailStatus @default(NOT_SENT)
+  emailRecipient      String?
+  emailSentAt         DateTime?
+  emailError          String?  @db.Text
+  emailAttempts       Int      @default(0)
+  emailLastAttemptAt  DateTime?
   rejectedBy          String?
   rejectedAt          DateTime?
   createdAt           DateTime @default(now())
