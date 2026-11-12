@@ -19,17 +19,29 @@
  *   • The decision can be changed — a dispatcher who approves by mistake
  *     rejects again — and is recorded each time. Readers of the archive take
  *     it from the row, not the frozen snapshot.
+ *   • Every live credit note the decision touches is checked again before the
+ *     answer goes back, so the Credits page is already right when the office
+ *     gets there, and the office is told what became of those notes.
  */
 
 import { scopedPrisma } from "./db-scoped";
 import { CREDIT_CHARGES, creditReviewRequired, type CreditCharge } from "./collection-confirm";
+import { collectionMatchKeys, sameCollectionNumber } from "./collections";
 import { reassessCreditNote } from "./credit-intake";
+import { signBlocker } from "./credit-note";
 import { logAudit } from "./audit";
 
 export type ReviewDecision = "APPROVE" | "REJECT";
 
+/** A live credit note the decision reached, and whether it can now be signed. */
+export interface CreditNoteEffect {
+  id: string;
+  creditNo: string | null;
+  signable: boolean;
+}
+
 export type ReviewResult =
-  | { outcome: "decided"; creditReview: "APPROVED" | "REJECTED" }
+  | { outcome: "decided"; creditReview: "APPROVED" | "REJECTED"; creditNotes: CreditNoteEffect[] }
   | { outcome: "not_found" }
   | { outcome: "not_reviewable" | "conflict" | "invalid"; error: string };
 
@@ -64,6 +76,8 @@ export async function reviewCreditCollection(
       status: true,
       creditReview: true,
       creditCharge: true,
+      invoiceId: true,
+      invoiceNoNormalized: true,
     },
   });
   if (!collection) return { outcome: "not_found" };
@@ -106,13 +120,55 @@ export async function reviewCreditCollection(
     tenantId,
   });
 
-  // Credit notes already linked to it are checked again now, not on the next
-  // look at the folder: a rejected collection must stop counting at once.
-  const links = await db.creditNoteCollection.findMany({
-    where: { collectionId },
-    select: { creditNoteId: true },
+  // Checked again now, not on the next look at the folder: a rejected
+  // collection must stop counting at once. By invoice and by the number a note
+  // names as well as by link, because rejecting a collection drops its AUTO
+  // links — approving it again has to find those notes without them.
+  const [exactNo, , unpaddedNo] = collectionMatchKeys(collection.collectionNo);
+  const numberKey = unpaddedNo ?? exactNo;
+  const affected = await db.creditNote.findMany({
+    where: {
+      status: { in: ["RECEIVED", "NEEDS_REVIEW"] },
+      OR: [
+        { collections: { some: { collectionId } } },
+        ...(collection.invoiceNoNormalized ? [{ invoiceNoNormalized: collection.invoiceNoNormalized }] : []),
+        ...(collection.invoiceId ? [{ invoiceId: collection.invoiceId }] : []),
+        ...(numberKey ? [{ collectionRef: { endsWith: numberKey, mode: "insensitive" as const } }] : []),
+      ],
+    },
+    select: {
+      id: true,
+      creditNo: true,
+      readError: true,
+      invoiceId: true,
+      invoiceNoNormalized: true,
+      collectionRef: true,
+      collections: { where: { collectionId }, select: { id: true } },
+    },
+    // One at a time, oldest first: a later note yields to what earlier ones
+    // already pay for, so each must see the links the one before it wrote.
+    orderBy: { createdAt: "asc" },
   });
-  for (const l of links) await reassessCreditNote(tenantId, l.creditNoteId);
 
-  return { outcome: "decided", creditReview };
+  // endsWith only narrows the read: CRC-23328 ends in 8, and is not collection 8.
+  const reached = affected.filter(
+    (n) =>
+      n.collections.length > 0 ||
+      (!!n.invoiceNoNormalized && n.invoiceNoNormalized === collection.invoiceNoNormalized) ||
+      (!!n.invoiceId && n.invoiceId === collection.invoiceId) ||
+      (!!n.collectionRef && sameCollectionNumber(n.collectionRef, collection.collectionNo))
+  );
+
+  const creditNotes: CreditNoteEffect[] = [];
+  for (const note of reached) {
+    const evaluation = await reassessCreditNote(tenantId, note.id);
+    if (!evaluation) continue;
+    creditNotes.push({
+      id: note.id,
+      creditNo: note.creditNo,
+      signable: !!note.creditNo && !note.readError && !signBlocker(evaluation.issues),
+    });
+  }
+
+  return { outcome: "decided", creditReview, creditNotes };
 }

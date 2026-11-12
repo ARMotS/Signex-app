@@ -1,6 +1,6 @@
 /**
  * The customer's side of a courier delivery, without a database: the link's
- * token, when the reminder is due, where links point, what state a sheet is
+ * token, where links point, what state a sheet is
  * in, and what the email says.
  */
 
@@ -12,7 +12,6 @@ import {
   formatDay,
   hashConfirmToken,
   newConfirmToken,
-  reminderDue,
 } from "@/lib/courier-confirm";
 import { appBaseUrl } from "@/lib/app-url";
 import { confirmationState } from "@/lib/courier-sheet";
@@ -35,24 +34,6 @@ describe("the link's token", () => {
 
   it("goes in a /delivery link", () => {
     expect(confirmUrl("abc", "https://signex-app.vercel.app")).toBe("https://signex-app.vercel.app/delivery/abc");
-  });
-});
-
-describe("reminderDue", () => {
-  // Monday 10:00 SAST = 08:00 UTC.
-  const sent = new Date("2026-10-19T08:00:00Z");
-
-  it("is due on the second South African calendar day, whatever the hour", () => {
-    expect(reminderDue(sent, new Date("2026-10-20T06:00:00Z"))).toBe(false); // Tue 08:00
-    expect(reminderDue(sent, new Date("2026-10-21T06:00:00Z"))).toBe(true); // Wed 08:00
-    expect(reminderDue(sent, new Date("2026-10-21T04:00:00Z"))).toBe(true); // Wed 06:00, before the send's hour
-  });
-
-  it("counts days in Johannesburg, not UTC", () => {
-    // Monday 23:30 UTC is already Tuesday 01:30 in Johannesburg.
-    const late = new Date("2026-10-19T23:30:00Z");
-    expect(reminderDue(late, new Date("2026-10-21T06:00:00Z"))).toBe(false); // Wed — one day after Tue
-    expect(reminderDue(late, new Date("2026-10-22T06:00:00Z"))).toBe(true); // Thu
   });
 });
 
@@ -120,12 +101,6 @@ describe("the email", () => {
       expect(html).toContain(s);
     }
     expect(html).toContain("copies of your 2 invoices are");
-  });
-
-  it("the reminder asks again, with no attachments mentioned", async () => {
-    const html = await render(CourierDispatch({ ...props, reminder: true, attached: 0 }));
-    expect(html).toContain("We have not yet heard");
-    expect(html).not.toContain("attached");
   });
 
   it("says which copies could not be attached", async () => {

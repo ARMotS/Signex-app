@@ -50,8 +50,12 @@ interface CreditRow {
   signedByName: string | null;
   signedAt: string | null;
   filingError: string | null;
+  emailStatus?: EmailStatus;
+  emailError?: string | null;
   receivedAt: string;
 }
+
+type EmailStatus = "NOT_SENT" | "SENDING" | "SENT" | "FAILED" | "NO_EMAIL";
 
 interface Folder {
   connected: boolean;
@@ -125,6 +129,10 @@ interface CreditDetail {
   filedAt: string | null;
   filingError: string | null;
   originalRemoved: boolean;
+  emailStatus?: EmailStatus;
+  emailRecipient?: string | null;
+  emailSentAt?: string | null;
+  emailError?: string | null;
   rejectedBy: string | null;
   rejectedAt: string | null;
   allocations: { lineNo: number; collectionNo: string; qty: number }[];
@@ -455,6 +463,11 @@ export default function CreditsPage() {
                     )}
                     {r.status === "SIGNED" && r.filingError && (
                       <Badge tone="amber" title={r.filingError} className="ml-2">Filing pending</Badge>
+                    )}
+                    {r.status === "SIGNED" && (r.emailStatus === "FAILED" || r.emailStatus === "NO_EMAIL") && (
+                      <Badge tone="amber" title={r.emailError ?? undefined} className="ml-2">
+                        {r.emailStatus === "NO_EMAIL" ? "No email address" : "Email failed"}
+                      </Badge>
                     )}
                     {r.status !== "SIGNED" && r.status !== "REJECTED" && (r.reviewCount > 0 || r.warningCount > 0) && (
                       <span className="ml-2 text-[11px] font-mono text-ink-muted">
@@ -873,6 +886,14 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
                       </button>
                     </div>
                   )}
+                  <CustomerEmail
+                    id={id}
+                    note={note}
+                    onSent={() => {
+                      setVersion((v) => v + 1);
+                      onChanged();
+                    }}
+                  />
                 </div>
               )}
               {note.status === "REJECTED" && note.rejectedBy && (
@@ -885,6 +906,76 @@ function CreditDetailPanel({ id, onClose, onChanged }: { id: string; onClose: ()
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── The customer's email ───────────────────────────────────────────────
+
+/**
+ * Where the customer's copy of a signed note stands, and the office's Send /
+ * Resend. The email goes by itself when the note is signed; this is the
+ * fallback for one that failed or had no address.
+ */
+function CustomerEmail({ id, note, onSent }: { id: string; note: CreditDetail; onSent: () => void }) {
+  const [sending, setSending] = useState(false);
+  const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  const status = note.emailStatus ?? "NOT_SENT";
+
+  const send = async () => {
+    setSending(true);
+    setMessage(null);
+    try {
+      const res = await fetch(`/api/credit-notes/${id}/notify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: status === "SENT" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.outcome === "sent") setMessage({ tone: "ok", text: `Emailed to ${data.recipient}.` });
+      else setMessage({ tone: "error", text: data.error || "The email could not be sent" });
+      onSent();
+    } catch {
+      setMessage({ tone: "error", text: "Network error" });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  // Nothing to send until the signed copy it carries is filed.
+  if (!note.signedFilename) {
+    return <p className="text-xs text-ink-muted">The customer is emailed the signed copy once it is filed.</p>;
+  }
+
+  const problem = status === "FAILED" || status === "NO_EMAIL";
+  return (
+    <div
+      className={`px-3 py-2 rounded border text-xs flex flex-wrap items-center gap-2 ${
+        problem ? "bg-ink-amber-dim border-ink-amber/20 text-ink-black" : "border-ink-border text-ink-muted"
+      }`}
+    >
+      <span className="flex-1 min-w-[12rem]">
+        {status === "SENT"
+          ? `Emailed to ${note.emailRecipient}${note.emailSentAt ? ` · ${ago(note.emailSentAt)}` : ""}`
+          : status === "SENDING"
+            ? "Emailing the customer…"
+            : status === "NO_EMAIL"
+              ? `Not emailed: ${note.emailError || "no contact with an email address"}. Add the address to the customer's contact, then send.`
+              : status === "FAILED"
+                ? `The email to the customer failed: ${note.emailError || "the mail server rejected it"}`
+                : "Not emailed to the customer yet."}
+        {message && (
+          <span className={`block mt-0.5 font-mono ${message.tone === "ok" ? "text-ink-green" : "text-ink-red"}`}>{message.text}</span>
+        )}
+      </span>
+      {/* Shown while SENDING too: a stale claim is re-claimable, a live one answers "being sent". */}
+      <button onClick={send} disabled={sending} className={`act ${problem ? "act-amber" : ""}`}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="2" y="4" width="20" height="16" rx="2" />
+          <path d="m22 7-10 5L2 7" />
+        </svg>
+        {sending ? "Sending…" : status === "SENT" ? "Resend email" : "Send email"}
+      </button>
     </div>
   );
 }
@@ -996,7 +1087,7 @@ function SignOffForm({
           </div>
           <p className="text-[11px] text-ink-muted">
             Signed under your office login. A sign-off page is added to the credit note, the signed copy is filed in
-            Signed/ and the original is removed from Originals/.
+            Signed/, the original is removed from Originals/ and the customer is emailed the signed copy.
           </p>
           {error && <p className="text-xs font-mono text-ink-red">{error}</p>}
         </>

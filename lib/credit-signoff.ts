@@ -14,7 +14,11 @@
  *      CREDIT NOTE REFERENCE page. Each part is recorded as it completes, so a
  *      retry does only what is left. Nothing here can undo a signature — a
  *      failure is a filingError for the office, retried on the next look.
- *   3. Reject: a note the office will not sign (wrong customer, raised in
+ *   3. Email: once the signed copy is filed, the customer is sent it
+ *      (lib/credit-note-email.ts) — in the signing request, so the dispatcher
+ *      is told the result. If filing the copy failed, the email goes when a
+ *      retry files it. Like filing, it can never undo the signature.
+ *   4. Reject: a note the office will not sign (wrong customer, raised in
  *      error) leaves the queue with a reason and moves to Rejected/.
  */
 
@@ -32,12 +36,19 @@ import {
 import { deleteFileById, downloadFileById, uploadSignedCreditNote } from "./microsoft-graph";
 import { readSignedCollectionDocument, saveSignedCollection } from "./collections";
 import { logAudit } from "./audit";
+import { sendCreditNoteEmail, type CreditEmailResult } from "./credit-note-email";
 import { after } from "next/server";
 
 const LIVE: CreditNoteStatus[] = ["RECEIVED", "NEEDS_REVIEW"];
 
 export type SignResult =
-  | { outcome: "signed"; filed: boolean; filingError: string | null }
+  | {
+      outcome: "signed";
+      filed: boolean;
+      filingError: string | null;
+      /** The customer's email; null when it waits for the signed copy to be filed. */
+      email: CreditEmailResult | null;
+    }
   | { outcome: "not_found" | "closed" }
   | { outcome: "invalid"; error: string; issues?: CreditIssue[] };
 
@@ -134,18 +145,39 @@ export async function signCreditNote(
     tenantId,
   });
 
+  const { filing, email } = await finishSignedCreditNote(tenantId, creditNoteId, by.name);
+  return { outcome: "signed", filed: filing.done, filingError: filing.error, email };
+}
+
+/**
+ * File what is left of a signed note and, when this filed its signed copy,
+ * email the customer that copy. Every path that files (signing, Retry
+ * filing, the page's background look) comes through here, so the email goes
+ * exactly when the copy it carries first exists — never twice from filing.
+ */
+export async function finishSignedCreditNote(
+  tenantId: string,
+  creditNoteId: string,
+  userName?: string | null
+): Promise<{ filing: FilingResult; email: CreditEmailResult | null }> {
   const filing = await fileSignedCreditNote(tenantId, creditNoteId);
-  return { outcome: "signed", filed: filing.done, filingError: filing.error };
+  const email = filing.signedCopyFiledNow ? await sendCreditNoteEmail(tenantId, creditNoteId, { userName }) : null;
+  if (email?.outcome === "failed") console.warn(`[credit-signoff] Email for note ${creditNoteId} failed (${email.error}); the office can resend`);
+  return { filing, email };
+}
+
+export interface FilingResult {
+  done: boolean;
+  error: string | null;
+  /** This call filed the signed copy in Signed/ (it did not exist before). */
+  signedCopyFiledNow: boolean;
 }
 
 /**
  * Do whatever filing is left for a signed note: the signed copy, removing the
  * original, the reference page on each collection receipt. Safe to run again.
  */
-export async function fileSignedCreditNote(
-  tenantId: string,
-  creditNoteId: string
-): Promise<{ done: boolean; error: string | null }> {
+export async function fileSignedCreditNote(tenantId: string, creditNoteId: string): Promise<FilingResult> {
   const db = scopedPrisma(tenantId);
   const note = await db.creditNote.findFirst({
     where: { id: creditNoteId },
@@ -159,7 +191,7 @@ export async function fileSignedCreditNote(
     },
   });
   if (!note || note.status !== "SIGNED" || !note.signedAt || !note.creditNo) {
-    return { done: false, error: "Not a signed credit note" };
+    return { done: false, error: "Not a signed credit note", signedCopyFiledNow: false };
   }
   const errors: string[] = [];
   const say = (what: string, err: unknown) => errors.push(`${what}: ${err instanceof Error ? err.message : String(err)}`);
@@ -168,6 +200,7 @@ export async function fileSignedCreditNote(
   // 1. The signed copy.
   let signedFileId = note.signedFileId;
   let includesSource = note.signedIncludesSource;
+  let signedCopyFiledNow = false;
   if (!signedFileId) {
     if (!note.signature) {
       errors.push("The signature is no longer held, so the signed copy cannot be built");
@@ -215,6 +248,7 @@ export async function fileSignedCreditNote(
         const item = await uploadSignedCreditNote(tenantId, filename, pdf);
         signedFileId = item.id;
         includesSource = included;
+        signedCopyFiledNow = true;
         // The PDF is the record now; the signature PNG goes.
         await db.creditNote.update({
           where: { id: note.id },
@@ -268,7 +302,7 @@ export async function fileSignedCreditNote(
 
   const error = errors.length ? errors.join(" · ") : null;
   await db.creditNote.update({ where: { id: note.id }, data: { filingError: error } });
-  return { done: !error, error };
+  return { done: !error, error, signedCopyFiledNow };
 }
 
 export type RejectResult = { outcome: "rejected" } | { outcome: "not_found" | "closed" } | { outcome: "invalid"; error: string };
@@ -335,7 +369,7 @@ export async function retryPendingFilings(tenantId: string, limit = 5): Promise<
   });
   let done = 0;
   for (const p of pending) {
-    if ((await fileSignedCreditNote(tenantId, p.id)).done) done++;
+    if ((await finishSignedCreditNote(tenantId, p.id, "Retry filing")).filing.done) done++;
   }
   return done;
 }

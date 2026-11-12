@@ -4,6 +4,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 import { StatusBadge } from "@/components/ui/Chips";
 import { CREDIT_CHARGES, CREDIT_CHARGE_LABEL, CREDIT_REJECT_REASONS, type CreditCharge } from "@/lib/collection-confirm";
+import type { CreditNoteEffect } from "@/lib/collection-review";
 
 /**
  * The dispatcher's decision on a credit return that came back: approve it for
@@ -12,27 +13,68 @@ import { CREDIT_CHARGES, CREDIT_CHARGE_LABEL, CREDIT_REJECT_REASONS, type Credit
  * once it is approved, so a note waits on it. The decision can be changed.
  *
  * The sheet's handling-charge boxes are ticked with it: optional, one at a time.
+ *
+ * A click answers at once (a spinner on the button pressed), and a decision the
+ * server has accepted shows as made while the list catches up. Without that the
+ * buttons came back to life between the answer and the reload, and it looked as
+ * if the click had done nothing.
  */
 
-/** Sends one decision; the error to show, or null when it went through. */
+export type { CreditNoteEffect };
+
+export type DecisionResult = { ok: true; creditNotes: CreditNoteEffect[] } | { ok: false; error: string };
+
+/** What the page says once a decision has gone through. */
+export interface DecisionNote {
+  text: string;
+  /** Set when one credit note was affected: the page links to it. */
+  creditNoteId?: string;
+}
+
+/** Sends one decision; what it did to the credit notes, or the error to show. */
 export async function submitCreditDecision(
   id: string,
   decision: "APPROVE" | "REJECT",
   reason: string,
   charge: CreditCharge | null
-): Promise<string | null> {
+): Promise<DecisionResult> {
   try {
     const res = await fetch(`/api/collections/${id}/review`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ decision, reason: decision === "REJECT" ? reason.trim() : undefined, charge }),
     });
-    if (res.ok) return null;
     const data = await res.json().catch(() => ({}));
-    return data.error || "That did not work";
+    if (res.ok) return { ok: true, creditNotes: data.creditNotes ?? [] };
+    return { ok: false, error: data.error || "That did not work" };
   } catch {
-    return "Network error";
+    return { ok: false, error: "Network error" };
   }
+}
+
+const noteNumbers = (notes: CreditNoteEffect[]) =>
+  `Credit note${notes.length === 1 ? "" : "s"} ${notes.map((n) => n.creditNo ?? "without a number").join(", ")}`;
+
+/** "Collection 1797 approved for credit. Credit note 407712 can now be signed." */
+export function decisionNote(collectionNo: string, decision: "APPROVE" | "REJECT", notes: CreditNoteEffect[]): DecisionNote {
+  const creditNoteId = notes.length === 1 ? notes[0].id : undefined;
+  if (decision === "REJECT") {
+    const lead = `Collection ${collectionNo} rejected for credit.`;
+    return { text: notes.length ? `${lead} ${noteNumbers(notes)} flagged on the Credits page.` : lead, creditNoteId };
+  }
+  const lead = `Collection ${collectionNo} approved for credit.`;
+  if (notes.length === 0) return { text: `${lead} Accounts can raise the credit note.` };
+  const signable = notes.filter((n) => n.signable);
+  const waiting = notes.filter((n) => !n.signable);
+  const parts = [lead];
+  if (signable.length) parts.push(`${noteNumbers(signable)} can now be signed.`);
+  if (waiting.length) parts.push(`${noteNumbers(waiting)} still waiting on the Credits page.`);
+  return { text: parts.join(" "), creditNoteId };
+}
+
+/** Inside a button that is working. */
+export function ButtonSpinner() {
+  return <span className="w-3 h-3 border-2 border-current border-r-transparent rounded-full animate-spin shrink-0" aria-hidden="true" />;
 }
 
 /**
@@ -113,7 +155,7 @@ export default function CreditReviewControl({
     creditReviewedBy?: string | null;
     creditCharge?: CreditCharge | null;
   };
-  onChanged: () => void;
+  onChanged: (note: DecisionNote) => void;
   /** The row already shows where the credit stands. */
   hideBadge?: boolean;
 }) {
@@ -121,25 +163,47 @@ export default function CreditReviewControl({
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
   const [charge, setCharge] = useState<CreditCharge | null>(collection.creditCharge ?? null);
-  const [busy, setBusy] = useState(false);
+  const [pressed, setPressed] = useState<"APPROVE" | "REJECT" | "CHARGE" | null>(null);
+  const [made, setMade] = useState<{ to: "APPROVED" | "REJECTED"; from: "APPROVED" | "REJECTED" | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const busy = pressed !== null;
 
-  const decide = async (decision: "APPROVE" | "REJECT", why = reason) => {
-    setBusy(true);
+  const decided = collection.creditReview;
+
+  const decide = async (decision: "APPROVE" | "REJECT", why = reason, chargeOnly = false) => {
+    setPressed(chargeOnly ? "CHARGE" : decision);
     setError(null);
-    const failed = await submitCreditDecision(collection.id, decision, why, charge);
-    setBusy(false);
-    if (failed) {
-      setError(failed);
+    const result = await submitCreditDecision(collection.id, decision, why, charge);
+    setPressed(null);
+    if (!result.ok) {
+      setError(result.error);
       return;
     }
     setRejecting(false);
     setChanging(false);
     setReason("");
-    onChanged();
+    if (!chargeOnly) {
+      setMade({ to: decision === "APPROVE" ? "APPROVED" : "REJECTED", from: decided ?? null });
+      // Only a backstop for a reload that never lands: the row normally moves first.
+      setTimeout(() => setMade(null), 10_000);
+    }
+    onChanged(
+      chargeOnly
+        ? { text: `Handling charge saved on collection ${collection.collectionNo}.` }
+        : decisionNote(collection.collectionNo, decision, result.creditNotes)
+    );
   };
 
-  const decided = collection.creditReview;
+  // Accepted by the server; the list has not caught up yet.
+  if (made && (decided ?? null) === made.from) {
+    return (
+      <span role="status">
+        <StatusBadge tone={made.to === "APPROVED" ? "green" : "red"} dot className="animate-scale-in">
+          {made.to === "APPROVED" ? "Approved for credit" : "Rejected for credit"}
+        </StatusBadge>
+      </span>
+    );
+  }
 
   return (
     <>
@@ -153,12 +217,14 @@ export default function CreditReviewControl({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                decide(decided === "APPROVED" ? "APPROVE" : "REJECT", collection.creditReviewReason ?? "");
+                decide(decided === "APPROVED" ? "APPROVE" : "REJECT", collection.creditReviewReason ?? "", true);
               }}
               disabled={busy}
-              className="act"
+              aria-busy={pressed === "CHARGE"}
+              className={`act ${pressed === "CHARGE" ? "!opacity-100" : ""}`}
             >
-              Save charge
+              {pressed === "CHARGE" && <ButtonSpinner />}
+              {pressed === "CHARGE" ? "Saving…" : "Save charge"}
             </button>
           )}
           {decided !== "APPROVED" && (
@@ -168,13 +234,18 @@ export default function CreditReviewControl({
                 decide("APPROVE");
               }}
               disabled={busy}
-              className="act act-green"
+              aria-busy={pressed === "APPROVE"}
+              className={`act act-green ${pressed === "APPROVE" ? "!opacity-100" : ""}`}
               title="The goods are fine — clear this collection for credit"
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M20 6 9 17l-5-5" />
-              </svg>
-              Approve
+              {pressed === "APPROVE" ? (
+                <ButtonSpinner />
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M20 6 9 17l-5-5" />
+                </svg>
+              )}
+              {pressed === "APPROVE" ? "Approving…" : "Approve"}
             </button>
           )}
           {decided !== "REJECTED" && (
@@ -312,7 +383,13 @@ export function RejectCreditDialog({
           <button onClick={onCancel} disabled={busy} className="act">
             Cancel
           </button>
-          <button onClick={onConfirm} disabled={busy || reason.trim().length < 3} className="act act-red">
+          <button
+            onClick={onConfirm}
+            disabled={busy || reason.trim().length < 3}
+            aria-busy={busy}
+            className={`act act-red ${busy ? "!opacity-100" : ""}`}
+          >
+            {busy && <ButtonSpinner />}
             {busy ? "Rejecting…" : "Reject for credit"}
           </button>
         </div>

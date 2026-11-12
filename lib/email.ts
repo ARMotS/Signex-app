@@ -9,6 +9,7 @@ import { render } from "@react-email/render";
 import { DeliveryConfirmation } from "@/emails/DeliveryConfirmation";
 import { CollectionReceipt } from "@/emails/CollectionReceipt";
 import { CourierDispatch, type CourierDispatchProps } from "@/emails/CourierDispatch";
+import { CreditNoteSigned, type CreditNoteSignedProps } from "@/emails/CreditNoteSigned";
 import { format } from "date-fns";
 
 const transporter = nodemailer.createTransport({
@@ -162,8 +163,8 @@ export interface CourierDispatchParams extends Omit<CourierDispatchProps, "attac
 }
 
 /**
- * A courier delivery: the first email (signed copies attached) or the one
- * reminder. Same transport, sender and error reporting as the delivery
+ * A courier delivery: the customer is told it left with a courier (signed
+ * copies attached) and asked to confirm it arrived. Same transport, sender and error reporting as the delivery
  * confirmation — see sendDeliveryConfirmation.
  */
 export async function sendCourierDispatch(
@@ -180,9 +181,7 @@ export async function sendCourierDispatch(
     const info = await transporter.sendMail({
       from: `${fromName} <${fromEmail}>`,
       to: customerEmail,
-      subject: params.reminder
-        ? `Reminder: please confirm your delivery arrived${waybills ? ` — waybill ${waybills}` : ""}`
-        : `Your order is on its way with ${params.courierCompany}${waybills ? ` — waybill ${waybills}` : ""}`,
+      subject: `Your order is on its way with ${params.courierCompany}${waybills ? ` — waybill ${waybills}` : ""}`,
       html,
       ...(attachments.length && {
         attachments: attachments.map((a) => ({ filename: a.filename, content: a.content, contentType: "application/pdf" })),
@@ -192,6 +191,43 @@ export async function sendCourierDispatch(
     return { success: true, emailId: info.messageId };
   } catch (err) {
     console.error("[email] Error sending courier dispatch email:", err);
+    return { success: false, error: describeMailError(err) };
+  }
+}
+
+export interface CreditNoteSignedParams extends Omit<CreditNoteSignedProps, "attached"> {
+  customerEmail: string;
+  attachment?: { filename: string; content: Buffer };
+}
+
+/**
+ * A signed credit note: the customer's copy, signed copy attached. Same
+ * transport, sender and error reporting as the delivery confirmation — see
+ * sendDeliveryConfirmation.
+ */
+export async function sendCreditNoteSigned(
+  params: CreditNoteSignedParams
+): Promise<{ success: boolean; emailId?: string; error?: string }> {
+  try {
+    const { customerEmail, attachment, ...props } = params;
+    const html = await render(CreditNoteSigned({ ...props, attached: !!attachment }));
+
+    const fromName = process.env.EMAIL_FROM_NAME || "Signex Deliveries";
+    const fromEmail = process.env.EMAIL_FROM || "signexapp@gmail.com";
+
+    const info = await transporter.sendMail({
+      from: `${fromName} <${fromEmail}>`,
+      to: customerEmail,
+      subject: `Credit note ${params.creditNo}${params.invoiceNo ? ` — invoice ${params.invoiceNo}` : ""}`,
+      html,
+      ...(attachment && {
+        attachments: [{ filename: attachment.filename, content: attachment.content, contentType: "application/pdf" }],
+      }),
+    });
+
+    return { success: true, emailId: info.messageId };
+  } catch (err) {
+    console.error("[email] Error sending credit note email:", err);
     return { success: false, error: describeMailError(err) };
   }
 }

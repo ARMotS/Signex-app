@@ -1,8 +1,10 @@
 /**
  * courier-confirm.ts
  * The customer's side of a courier delivery: the email telling them their
- * invoices left with a courier, the one reminder, and the link they press
- * once the parcels arrive.
+ * invoices left with a courier, and the link they press once the parcels
+ * arrive. There is no reminder email (removed 2026-11-12 — customers did not
+ * answer them, and they ran up the Brevo bill); the office's Resend is the
+ * only way a second email goes.
  *
  * The first email goes out by itself once every signed copy is filed (it
  * carries them). Like the delivery confirmation, nothing here throws and
@@ -14,7 +16,7 @@
  * ── The link ──────────────────────────────────────────────────────────────
  * /delivery/<token>: 32 random bytes, no login, one per sheet, 30 days. It is
  * looked up by its SHA-256 (`confirmTokenHash`), so the database alone holds
- * no working link; the reminder re-sends the SAME link from an encrypted copy
+ * no working link; a resend carries the SAME link from an encrypted copy
  * (`confirmTokenEnc`, TOKEN_ENCRYPTION_KEY). Opening the link only shows the
  * delivery — confirming is a POST — because mail scanners open links.
  *
@@ -35,7 +37,6 @@ import { formatStampTime, STAMP_TIME_ZONE } from "./courier-stamp-text";
 import { appBaseUrl } from "./app-url";
 
 export const LINK_DAYS = 30;
-export const REMINDER_AFTER_DAYS = 2;
 /** Failed first emails the daily job retries by itself; past this, the office's Send. */
 export const MAX_AUTO_ATTEMPTS = 5;
 const STALE_CLAIM_MS = 2 * 60 * 1000;
@@ -59,18 +60,6 @@ export function hashConfirmToken(token: string): string | null {
 
 export function confirmUrl(token: string, base = appBaseUrl()): string {
   return `${base}/delivery/${token}`;
-}
-
-/** YYYY-MM-DD in Johannesburg. */
-const sastDay = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: STAMP_TIME_ZONE }).format(d);
-
-/**
- * The reminder is due on the second calendar day (South African) after the
- * email: sent Monday, reminded Wednesday — whatever time the daily job runs.
- */
-export function reminderDue(sentAt: Date, now: Date): boolean {
-  const days = (Date.parse(sastDay(now)) - Date.parse(sastDay(sentAt))) / DAY_MS;
-  return days >= REMINDER_AFTER_DAYS;
 }
 
 /** "22 Nov 2026" in Johannesburg. */
@@ -116,7 +105,6 @@ const SHEET_SELECT = {
   emailRecipient: true,
   confirmTokenEnc: true,
   confirmTokenExpiresAt: true,
-  reminderSentAt: true,
   invoices: {
     orderBy: { lineNo: "asc" as const },
     select: { invoiceNo: true, signedAt: true, signedFileName: true },
@@ -299,76 +287,6 @@ export async function scheduleWaitingCourierEmails(tenantId: string): Promise<vo
     take: 20,
   });
   for (const s of waiting) await scheduleCourierConfirmation(tenantId, s.id);
-}
-
-/**
- * The one reminder, on the second day after the email, while unconfirmed.
- * Claimed by setting reminderSentAt, cleared again when the send fails so the
- * next day's run tries again. Never throws.
- */
-export async function sendCourierReminder(tenantId: string, id: string, now = new Date()): Promise<CourierEmailResult> {
-  const db = scopedPrisma(tenantId);
-  try {
-    const sheet = await db.courierTripSheet.findFirst({ where: { id }, select: SHEET_SELECT });
-    if (!sheet) return { outcome: "not_found" };
-    if (sheet.status === "DELIVERED") return { outcome: "confirmed" };
-    if (
-      sheet.status !== "COLLECTED" ||
-      sheet.emailStatus !== "SENT" ||
-      !sheet.emailSentAt ||
-      sheet.reminderSentAt ||
-      !sheet.confirmTokenEnc ||
-      !sheet.confirmTokenExpiresAt ||
-      sheet.confirmTokenExpiresAt <= now ||
-      !reminderDue(sheet.emailSentAt, now)
-    ) {
-      return { outcome: "not_ready" };
-    }
-
-    const recipient = await resolveRecipient(tenantId, sheet);
-    const email = recipient?.email || sheet.emailRecipient;
-    if (!email) return { outcome: "no_email" };
-
-    const claim = await db.courierTripSheet.updateMany({
-      where: { id, status: "COLLECTED", reminderSentAt: null },
-      data: { reminderSentAt: now },
-    });
-    if (claim.count === 0) return { outcome: "in_flight" };
-
-    const result = await sendCourierDispatch({
-      customerEmail: email,
-      customerName: sheet.customerName,
-      contactPerson: recipient?.contactPerson ?? undefined,
-      companyName: sheet.dispatchCompany || (await readDispatchCompany(tenantId)) || "Signex",
-      courierCompany: sheet.courierCompany || "the courier",
-      courierSheetNo: sheet.courierSheetNo,
-      waybills: sheet.waybills,
-      parcels: sheet.parcels,
-      invoiceNos: sheet.invoices.map((i) => i.invoiceNo),
-      collectedAt: formatStampTime(sheet.collectedAt ?? now),
-      confirmUrl: confirmUrl(decryptToken(sheet.confirmTokenEnc)),
-      expiresOn: formatDay(sheet.confirmTokenExpiresAt),
-      reminder: true,
-      attachments: [],
-    });
-
-    if (!result.success) {
-      await db.courierTripSheet.updateMany({ where: { id, status: "COLLECTED" }, data: { reminderSentAt: null } });
-      await logAudit({
-        action: "STATUS_CHANGE",
-        entity: "courier_sheet",
-        entityId: id,
-        details: `Reminder email to ${email} failed (tried again tomorrow): ${result.error ?? "rejected"}`,
-        tenantId,
-      });
-      return { outcome: "failed", recipient: email, error: result.error };
-    }
-    await logAudit({ action: "STATUS_CHANGE", entity: "courier_sheet", entityId: id, details: `Reminder email sent to ${email}`, tenantId });
-    return { outcome: "sent", recipient: email };
-  } catch (err) {
-    console.error(`[courier-confirm] Reminder for sheet ${id}:`, err);
-    return { outcome: "failed", error: err instanceof Error ? err.message : "Unknown error" };
-  }
 }
 
 // ─── The customer's link ─────────────────────────────────────────────────

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { reassessCreditNote, rereadCreditNote, setCreditNoteLink } from "@/lib/credit-intake";
-import { fileSignedCreditNote, rejectCreditNote } from "@/lib/credit-signoff";
+import { finishSignedCreditNote, rejectCreditNote } from "@/lib/credit-signoff";
 import type { CreditIssue, LineMatch } from "@/lib/credit-note";
 
 /**
@@ -109,6 +109,10 @@ async function detail(ctx: Ctx, id: string) {
     filedAt: note.filedAt?.toISOString() ?? null,
     filingError: note.filingError,
     originalRemoved: note.originalRemoved,
+    emailStatus: note.emailStatus,
+    emailRecipient: note.emailRecipient,
+    emailSentAt: note.emailSentAt?.toISOString() ?? null,
+    emailError: note.emailError,
     rejectedBy: note.rejectedBy,
     rejectedAt: note.rejectedAt?.toISOString() ?? null,
     // What a signed note paid for, as frozen at signing.
@@ -217,7 +221,8 @@ export const PUT = withAuth(async (
     const exists = await ctx.db.creditNote.findFirst({ where: { id }, select: { status: true } });
     if (!exists) return NextResponse.json({ error: "Credit note not found" }, { status: 404 });
     if (exists.status !== "SIGNED") return NextResponse.json({ error: "Only a signed credit note is filed." }, { status: 409 });
-    await fileSignedCreditNote(ctx.tenantId, id);
+    // Filing the signed copy now also sends the customer's email that waited for it.
+    await finishSignedCreditNote(ctx.tenantId, id, ctx.name);
   } else {
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   }

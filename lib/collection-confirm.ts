@@ -228,6 +228,21 @@ export function collectionDeclaration(template: string | null | undefined, compa
   return text.replace(/\{companyName\}/g, companyName.trim() || "the company");
 }
 
+// ─── The office's sheet, once it has come back ───────────────────────────
+
+/**
+ * Whether the office's original sheet is finished with: collected in full, and
+ * its pages are inside the signed receipt. The original is deleted when the
+ * trip closes, so nothing may offer to open it from the moment it is signed.
+ *
+ * Deliberately the same test as removeSettledOriginals. A PARTIAL can be
+ * rebooked against the same sheet, and a receipt that could not embed the
+ * sheet leaves the original as the only copy of what was listed: both keep it.
+ */
+export function officeSheetDiscarded(c: { status: string; signedIncludesSource?: boolean | null }): boolean {
+  return c.status === "COLLECTED" && c.signedIncludesSource === true;
+}
+
 // ─── The office's decision on a credit return ────────────────────────────
 
 interface ReviewableCollection {

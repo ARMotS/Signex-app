@@ -32,6 +32,6 @@ export const PUT = withAuth(async (
     case "conflict":
       return NextResponse.json({ error: result.error }, { status: 409 });
     default:
-      return NextResponse.json({ success: true, creditReview: result.creditReview });
+      return NextResponse.json({ success: true, creditReview: result.creditReview, creditNotes: result.creditNotes });
   }
 });

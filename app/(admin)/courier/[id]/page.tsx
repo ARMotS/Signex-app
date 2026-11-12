@@ -564,9 +564,10 @@ function CustomerConfirmation({ sheet, busy, onSend }: { sheet: Sheet; busy: boo
             Confirmation email sent to {sheet.emailRecipient} on {fmtTime(sheet.emailSentAt)} — not confirmed yet.
           </p>
           <p className="text-xs text-ink-muted">
+            {/* No reminder is sent any more; one sent before that change is still shown. */}
             {sheet.reminderSentAt
               ? `Reminder sent on ${fmtTime(sheet.reminderSentAt)}. If there is still no answer, phone the customer.`
-              : `One reminder goes on ${day(new Date(new Date(sheet.emailSentAt).getTime() + 2 * 86_400_000).toISOString())} if they have not confirmed.`}
+              : "No reminder is sent — if they do not confirm, phone them or resend the email."}
             {sheet.confirmTokenExpiresAt ? ` The link works until ${day(sheet.confirmTokenExpiresAt)}.` : ""}
           </p>
           {button("Resend email", true)}

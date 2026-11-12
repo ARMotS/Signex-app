@@ -55,6 +55,8 @@ const LIST_SELECT = {
   signedByName: true,
   signedAt: true,
   filingError: true,
+  emailStatus: true,
+  emailError: true,
   createdAt: true,
   collections: {
     where: { source: { in: ["AUTO", "MANUAL"] } },
@@ -89,6 +91,8 @@ function toRow(n: NoteWithLinks) {
     signedByName: n.signedByName,
     signedAt: n.signedAt?.toISOString() ?? null,
     filingError: n.filingError,
+    emailStatus: n.emailStatus,
+    emailError: n.emailError,
     receivedAt: n.createdAt.toISOString(),
   };
 }

@@ -2,7 +2,7 @@
  * CourierDispatch.tsx
  * React Email component for a courier delivery: the customer is told their
  * invoices left with a courier, and asked to press Confirm received once the
- * parcels arrive. The same component words the one reminder.
+ * parcels arrive.
  *
  * Nothing priced: the email names invoices, never amounts. The signed copies
  * are attached to the first email only.
@@ -38,8 +38,7 @@ export interface CourierDispatchProps {
   confirmUrl: string;
   /** "dd MMM yyyy" — when the link stops working. */
   expiresOn: string;
-  reminder?: boolean;
-  /** How many signed copies are attached (0 on a reminder). */
+  /** How many signed copies are attached. */
   attached: number;
   /** Invoices whose signed copy could not be attached. */
   notAttached?: string[];
@@ -59,7 +58,7 @@ export function CourierDispatch(p: CourierDispatchProps) {
   return (
     <Html lang="en" dir="ltr">
       <Head>
-        <title>{p.reminder ? "Please confirm your delivery arrived" : "Your order is on its way"}</title>
+        <title>Your order is on its way</title>
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap');
           * { font-family: 'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif; }
@@ -67,9 +66,7 @@ export function CourierDispatch(p: CourierDispatchProps) {
       </Head>
 
       <Preview>
-        {p.reminder
-          ? `Did your parcels from ${p.companyName} arrive? Please confirm.`
-          : `Your order left ${p.companyName} with ${p.courierCompany}. Confirm when it arrives.`}
+        {`Your order left ${p.companyName} with ${p.courierCompany}. Confirm when it arrives.`}
       </Preview>
 
       <Body style={styles.body}>
@@ -83,7 +80,7 @@ export function CourierDispatch(p: CourierDispatchProps) {
         <Section style={styles.banner}>
           <Container style={styles.bannerInner}>
             <Text style={styles.bannerIcon}>➜</Text>
-            <Text style={styles.bannerText}>{p.reminder ? "Did it arrive?" : "Sent by courier"}</Text>
+            <Text style={styles.bannerText}>Sent by courier</Text>
           </Container>
         </Section>
 
@@ -91,9 +88,7 @@ export function CourierDispatch(p: CourierDispatchProps) {
           <Section style={styles.card}>
             <Text style={styles.greeting}>{greeting}</Text>
             <Text style={styles.intro}>
-              {p.reminder
-                ? `We have not yet heard that your parcels arrived. Once they have, please press Confirm received below — it takes one click.`
-                : `Your order has left ${p.companyName} with ${p.courierCompany}. When the parcels arrive, please press Confirm received below so we know they reached you.`}
+              {`Your order has left ${p.companyName} with ${p.courierCompany}. When the parcels arrive, please press Confirm received below so we know they reached you.`}
             </Text>
 
             <Hr style={styles.divider} />
@@ -105,7 +100,7 @@ export function CourierDispatch(p: CourierDispatchProps) {
               </Row>
             ))}
 
-            {!p.reminder && (p.attached > 0 || p.notAttached?.length) ? (
+            {(p.attached > 0 || p.notAttached?.length) ? (
               <>
                 <Hr style={styles.divider} />
                 <Text style={styles.intro}>
