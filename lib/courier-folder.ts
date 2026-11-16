@@ -17,7 +17,7 @@ import { scopedPrisma } from "./db-scoped";
 import {
   ensureSubfolder,
   getParentFolderId,
-  listFolderById,
+  findChildFolderId,
   moveItemTo,
   uploadNewFileToFolder,
 } from "./microsoft-graph";
@@ -55,9 +55,7 @@ export async function resolveCourierFolder(
   if (!parent) return null;
   const itemId = create
     ? await ensureSubfolder(tenantId, parent, AUTO_FOLDER_NAME)
-    : (await listFolderById(tenantId, parent)).find(
-        (c) => c.folder && c.name.toLowerCase() === AUTO_FOLDER_NAME.toLowerCase()
-      )?.id ?? null;
+    : await findChildFolderId(tenantId, parent, AUTO_FOLDER_NAME);
   if (!itemId) return null;
 
   const base = (account.folderPath ?? "").replace(/\/[^/]*\/?$/, "");
