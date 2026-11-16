@@ -14,6 +14,8 @@
  * only through a live Graph call.
  */
 
+import { graphOpShape, logStorageTiming } from "./storage/timing";
+
 /** Statuses worth retrying. 429 is throttling; 503/504 are transient. */
 const RETRYABLE_STATUSES = new Set([429, 503, 504]);
 
@@ -66,16 +68,29 @@ export async function graphFetch(
   init?: RequestInit
 ): Promise<Response> {
   let spent = 0;
+  const started = Date.now();
+  const op = graphOpShape(init?.method ?? "GET", url);
+  // One line per call, retries and backoff included — the wait a user saw.
+  const done = (res: Response, attempts: number) => {
+    logStorageTiming({ provider: "onedrive", op, status: res.status, ms: Date.now() - started, attempts });
+    return res;
+  };
 
   for (let attempt = 1; ; attempt++) {
-    const res = await fetch(url, init);
+    let res: Response;
+    try {
+      res = await fetch(url, init);
+    } catch (err) {
+      logStorageTiming({ provider: "onedrive", op, status: "error", ms: Date.now() - started, attempts: attempt });
+      throw err;
+    }
 
     if (!RETRYABLE_STATUSES.has(res.status) || attempt >= MAX_ATTEMPTS) {
-      return res;
+      return done(res, attempt);
     }
 
     const delay = retryDelayMs(res, attempt);
-    if (spent + delay > MAX_TOTAL_BACKOFF_MS) return res;
+    if (spent + delay > MAX_TOTAL_BACKOFF_MS) return done(res, attempt);
 
     // Drain the body so the connection can be reused for the retry.
     await res.arrayBuffer().catch(() => {});

@@ -22,6 +22,7 @@ import { acquireLock, releaseLock } from "./lock";
 // Every Graph call goes through graphFetch so a 429 is retried with Graph's own
 // Retry-After rather than surfacing as a failure. See lib/graph-retry.ts.
 import { graphFetch } from "./graph-retry";
+import { logStorageTiming } from "./storage/timing";
 
 const MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0";
 const GRAPH_API_URL = "https://graph.microsoft.com/v1.0";
@@ -125,11 +126,13 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> 
     scope: SCOPES.join(" "),
   });
 
+  const started = Date.now();
   const res = await fetch(`${MICROSOFT_AUTH_URL}/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: body.toString(),
   });
+  logStorageTiming({ provider: "onedrive", op: "token refresh", status: res.status, ms: Date.now() - started });
 
   if (!res.ok) {
     const err = await res.text();
@@ -665,15 +668,14 @@ export async function listOneDriveSignedCollections(
 
   if (!account?.collectionsFolderItemId) return [];
 
-  const children = await listFolderById(tenantId, account.collectionsFolderItemId);
-  const signedFolder = children.find(
-    (item) =>
-      item.folder &&
-      item.name.toLowerCase() === COLLECTIONS_SIGNED_SUBFOLDER.toLowerCase()
+  const signedFolderId = await findChildFolderId(
+    tenantId,
+    account.collectionsFolderItemId,
+    COLLECTIONS_SIGNED_SUBFOLDER
   );
-  if (!signedFolder) return [];
+  if (!signedFolderId) return [];
 
-  const items = await listFolderById(tenantId, signedFolder.id);
+  const items = await listFolderById(tenantId, signedFolderId);
   return items.filter((item) => {
     if (item.folder) return false;
     return item.name.toLowerCase().endsWith(".pdf");
@@ -782,6 +784,25 @@ async function getItemInFolderByName(
     tenantId,
     `/me/drive/items/${folderItemId}:/${path}`
   );
+}
+
+/**
+ * The id of a subfolder by name, in ONE request; null when there is none.
+ *
+ * Finding `signed/` (or `processed/`, `Pending/`, a courier month…) used to
+ * list the whole parent folder, 200 items per request. The invoice folder holds
+ * thousands of PDFs, so every signature saved first paged through all of them
+ * just to learn the id of `signed/` — the wait drivers saw on "Save". Graph's
+ * path addressing is case-insensitive, like the comparison it replaces. A FILE
+ * of that name is not a folder: null, as the listing's `item.folder` test gave.
+ */
+export async function findChildFolderId(
+  tenantId: string,
+  parentItemId: string,
+  folderName: string
+): Promise<string | null> {
+  const item = await getItemInFolderByName(tenantId, parentItemId, [assertSafeItemName(folderName)]);
+  return item?.folder ? item.id : null;
 }
 
 /**
@@ -1160,13 +1181,10 @@ export async function listOneDriveSignedCreditNotes(tenantId: string): Promise<O
   const account = await getAccount(tenantId);
   if (!account?.creditsFolderItemId) return [];
 
-  const children = await listFolderById(tenantId, account.creditsFolderItemId);
-  const signedFolder = children.find(
-    (item) => item.folder && item.name.toLowerCase() === CREDITS_SUBFOLDERS.signed.toLowerCase()
-  );
-  if (!signedFolder) return [];
+  const signedFolderId = await findChildFolderId(tenantId, account.creditsFolderItemId, CREDITS_SUBFOLDERS.signed);
+  if (!signedFolderId) return [];
 
-  const items = await listFolderById(tenantId, signedFolder.id);
+  const items = await listFolderById(tenantId, signedFolderId);
   return items.filter((item) => !item.folder && item.name.toLowerCase().endsWith(".pdf"));
 }
 
@@ -1317,11 +1335,8 @@ export async function ensureSubfolder(
 ): Promise<string> {
   const token = await requireToken(tenantId);
 
-  const children = await listFolderById(tenantId, parentItemId);
-  const existing = children.find(
-    (item) => item.folder && item.name.toLowerCase() === folderName.toLowerCase()
-  );
-  if (existing) return existing.id;
+  const existing = await findChildFolderId(tenantId, parentItemId, folderName);
+  if (existing) return existing;
 
   const url = `${GRAPH_API_URL}/me/drive/items/${parentItemId}/children`;
   const res = await graphFetch(url, {
@@ -1340,11 +1355,9 @@ export async function ensureSubfolder(
   if (!res.ok) {
     const err = await res.text();
     if (res.status === 409) {
-      const retryChildren = await listFolderById(tenantId, parentItemId);
-      const retryExisting = retryChildren.find(
-        (item) => item.folder && item.name.toLowerCase() === folderName.toLowerCase()
-      );
-      if (retryExisting) return retryExisting.id;
+      // Someone created it between our look and our create.
+      const retryExisting = await findChildFolderId(tenantId, parentItemId, folderName);
+      if (retryExisting) return retryExisting;
     }
     throw new Error(`Graph API create folder error (${res.status}): ${err}`);
   }
@@ -1477,13 +1490,10 @@ export async function listOneDriveProcessedTripSheets(
 
   if (!account?.folderItemId) return [];
 
-  const children = await listFolderById(tenantId, account.folderItemId);
-  const processedFolder = children.find(
-    (item) => item.folder && item.name.toLowerCase() === "processed"
-  );
-  if (!processedFolder) return [];
+  const processedFolderId = await findChildFolderId(tenantId, account.folderItemId, "processed");
+  if (!processedFolderId) return [];
 
-  const items = await listFolderById(tenantId, processedFolder.id);
+  const items = await listFolderById(tenantId, processedFolderId);
   const extensions = [".csv", ".xlsx", ".xls"];
   return items.filter((item) => {
     if (item.folder) return false;
@@ -1522,13 +1532,10 @@ export async function listOneDriveSignedInvoices(
 
   if (!account?.invoiceFolderItemId) return [];
 
-  const children = await listFolderById(tenantId, account.invoiceFolderItemId);
-  const signedFolder = children.find(
-    (item) => item.folder && item.name.toLowerCase() === "signed"
-  );
-  if (!signedFolder) return [];
+  const signedFolderId = await findChildFolderId(tenantId, account.invoiceFolderItemId, "signed");
+  if (!signedFolderId) return [];
 
-  const items = await listFolderById(tenantId, signedFolder.id);
+  const items = await listFolderById(tenantId, signedFolderId);
   return items.filter((item) => {
     if (item.folder) return false;
     return item.name.toLowerCase().endsWith(".pdf");
