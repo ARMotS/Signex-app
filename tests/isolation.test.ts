@@ -1381,6 +1381,12 @@ suite("cross-ADMIN isolation", () => {
               ],
             });
           }
+          // signed/ found by path in one request (findChildFolderId, #61) — the
+          // listing above is no longer how the folder is found. Graph's path
+          // addressing is case-insensitive.
+          if (method === "GET" && u.toLowerCase().endsWith("/items/invoice-folder-a:/signed")) {
+            return json({ id: "signed-A", name: "signed", size: 0, folder: { childCount: 0 }, lastModifiedDateTime: "2026-10-01T00:00:00Z" });
+          }
           if (method === "GET" && u.includes("/items/signed-A/children")) return json({ value: [] });
           if (method === "GET" && files.some((name) => u.includes(`/items/invoice-folder-A:/${name}:/content`))) {
             return new Response(new Uint8Array(pdf));
@@ -5990,6 +5996,8 @@ suite("cross-ADMIN isolation", () => {
         graphCalls.push({ url: `${init?.method ?? "GET"} ${u}`, token: auth ? auth.replace("Bearer ", "") : null });
         const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
         if (u.includes("items/credits-folder-A/children")) return json({ value: [{ id: "signed-A", name: "Signed", folder: { childCount: 1 } }] });
+        // Signed/ found by path in one request (findChildFolderId, #61).
+        if (u.toLowerCase().endsWith("items/credits-folder-a:/signed")) return json({ id: "signed-A", name: "Signed", folder: { childCount: 1 } });
         if (u.includes("items/signed-A/children")) {
           return json({ value: [{ id: "signed-file-A", name: filename, size: pdf.length, lastModifiedDateTime: new Date().toISOString(), file: { mimeType: "application/pdf" } }] });
         }
