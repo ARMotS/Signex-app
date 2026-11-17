@@ -31,6 +31,7 @@ export default function DriversPage() {
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
+  const [deleteError, setDeleteError] = useState("");
 
   // Add form
   const [newName, setNewName] = useState("");
@@ -181,15 +182,21 @@ export default function DriversPage() {
   const handleDelete = async (driver: Driver) => {
     if (!confirm(`Delete driver "${driver.name}"? This cannot be undone.`)) return;
 
+    setDeleteError("");
     try {
-      await fetch("/api/drivers", {
+      const res = await fetch("/api/drivers", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: driver.id }),
       });
+      // A refusal used to be swallowed, so the row just stayed with no word why.
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setDeleteError(`${driver.name}: ${data.error || "Could not delete driver"}`);
+      }
       fetchDrivers();
     } catch {
-      // ignore
+      setDeleteError(`${driver.name}: could not delete driver (network error)`);
     }
   };
 
@@ -229,6 +236,21 @@ export default function DriversPage() {
         </button>
       </div>
 
+      {deleteError && (
+        <div
+          role="alert"
+          className="flex items-start justify-between gap-3 px-4 py-3 mb-6 bg-ink-red-dim rounded border border-ink-red/20 animate-fade-in"
+        >
+          <span className="text-sm text-ink-black">{deleteError}</span>
+          <button
+            onClick={() => setDeleteError("")}
+            className="text-xs text-ink-muted hover:text-ink-black shrink-0"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       {notice && (
         <div
           role="status"

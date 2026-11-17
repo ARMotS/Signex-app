@@ -5,6 +5,7 @@ import {
   assertItemInConfiguredFolder,
 } from "@/lib/microsoft-graph";
 import { getScope, requireOffice } from "@/lib/tenant";
+import { importStates } from "@/lib/trip-sheet-folder";
 import { withAuth } from "@/lib/api-handler";
 
 /**
@@ -20,23 +21,22 @@ export const GET = withAuth(async () => {
 
   // Which files this ADMIN has already imported. Import state is per-scope, so
   // another ADMIN importing the same filename does not mark it consumed here.
-  const filenames = items.map((i) => i.name);
-  const importRecords = await ctx.db.importedFile.findMany({
-    where: { filename: { in: filenames } },
-  });
-  const importMap = new Map(importRecords.map((r) => [r.filename, r]));
+  // Same rule as the trip sheet folder listing: a file whose run was deleted
+  // reads as removed, not imported (see importStates).
+  const states = await importStates(ctx.tenantId, items.map((i) => i.name));
 
   const files = items.map((item) => {
-    const importRecord = importMap.get(item.name);
+    const state = states.get(item.name);
     return {
       id: item.id,
       filename: item.name,
       sizeBytes: item.size,
       lastModified: item.lastModifiedDateTime,
       extension: item.name.slice(item.name.lastIndexOf(".") + 1).toLowerCase(),
-      imported: !!importRecord,
-      importedAt: importRecord?.importedAt.toISOString(),
-      importStatus: importRecord?.status,
+      imported: state?.imported ?? false,
+      tripRemoved: state?.tripRemoved ?? false,
+      importedAt: state?.importedAt,
+      importStatus: state?.importStatus,
     };
   });
 
@@ -48,7 +48,7 @@ export const GET = withAuth(async () => {
 
   return NextResponse.json({
     totalFiles: files.length,
-    newFiles: files.filter((f) => !f.imported).length,
+    newFiles: files.filter((f) => !f.imported && !f.tripRemoved).length,
     files,
   });
 });

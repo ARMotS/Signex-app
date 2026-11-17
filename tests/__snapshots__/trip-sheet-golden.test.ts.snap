@@ -2,6 +2,7 @@
 
 exports[`trip sheet golden output — errors > every row blank after the header 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [],
   "matchedCollections": 0,
@@ -18,6 +19,7 @@ exports[`trip sheet golden output — errors > every row blank after the header 
 
 exports[`trip sheet golden output — errors > header row only 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [],
   "error": "File has no data rows (needs a header row + at least one data row)",
@@ -35,6 +37,7 @@ exports[`trip sheet golden output — errors > header row only 1`] = `
 
 exports[`trip sheet golden output — errors > no invoice or collection column 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "code": "NEEDS_TEMPLATE",
   "driverResults": [],
@@ -53,6 +56,7 @@ exports[`trip sheet golden output — errors > no invoice or collection column 1
 
 exports[`trip sheet golden output — errors > unsupported file type 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [],
   "error": "Unsupported file type: .pdf. Use CSV or Excel (.xlsx/.xls)",
@@ -70,6 +74,7 @@ exports[`trip sheet golden output — errors > unsupported file type 1`] = `
 
 exports[`trip sheet golden output — real exports > ts-100001-p5.xls 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [
     {
       "driverName": null,
@@ -471,6 +476,7 @@ exports[`trip sheet golden output — real exports > ts-100001-p5.xls 1`] = `
 
 exports[`trip sheet golden output — real exports > ts-100002-j12.xls 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [
     {
@@ -604,6 +610,7 @@ exports[`trip sheet golden output — real exports > ts-100002-j12.xls 1`] = `
 
 exports[`trip sheet golden output — real exports > ts-100003-c2.xls 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [
     {
@@ -662,6 +669,7 @@ exports[`trip sheet golden output — real exports > ts-100003-c2.xls 1`] = `
 
 exports[`trip sheet golden output — synthetic > CSV with quotes, CRLF and a blank line 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [
     {
@@ -758,6 +766,7 @@ exports[`trip sheet golden output — synthetic > CSV with quotes, CRLF and a bl
 
 exports[`trip sheet golden output — synthetic > INVOICENO in column A, placeholders, padding, blank rows, deferred collection 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [
     {
@@ -954,6 +963,7 @@ exports[`trip sheet golden output — synthetic > INVOICENO in column A, placeho
 
 exports[`trip sheet golden output — synthetic > alias spellings, every optional column 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [
     {
@@ -1153,6 +1163,7 @@ exports[`trip sheet golden output — synthetic > alias spellings, every optiona
 
 exports[`trip sheet golden output — synthetic > duplicate and unknown headers — first match wins 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [
     {
@@ -1240,6 +1251,7 @@ exports[`trip sheet golden output — synthetic > duplicate and unknown headers 
 
 exports[`trip sheet golden output — synthetic > legacy .xls (BIFF8) written by SheetJS 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [
     {
@@ -1318,6 +1330,7 @@ exports[`trip sheet golden output — synthetic > legacy .xls (BIFF8) written by
 
 exports[`trip sheet golden output — synthetic > legacy sheet with no COLLECTNO column 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [
     {
@@ -1399,6 +1412,7 @@ exports[`trip sheet golden output — synthetic > legacy sheet with no COLLECTNO
 
 exports[`trip sheet golden output — synthetic > reads only the first worksheet 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [
     {
@@ -1457,6 +1471,7 @@ exports[`trip sheet golden output — synthetic > reads only the first worksheet
 
 exports[`trip sheet golden output — synthetic > uppercase extension is read 1`] = `
 {
+  "alreadyOnRun": [],
   "alreadySigned": [],
   "driverResults": [
     {

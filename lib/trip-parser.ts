@@ -83,6 +83,20 @@ export interface AlreadySignedInvoice {
 }
 
 /**
+ * An invoice on the sheet that is already a stop on a live (not yet completed)
+ * run, unsigned. Deploying it again would put the same delivery on two runs —
+ * the double deploy of ts-103573 on 2026-11-13. The preview skips it, the
+ * deploy refuses it (ALREADY_ON_RUN); a run left unfinished is moved with
+ * Reallocate, which keeps one row per delivery.
+ */
+export interface AlreadyOnRunInvoice {
+  invoiceNumber: string;
+  driverName: string;
+  sourceFilename: string;
+  status: string;
+}
+
+/**
  * A row on the sheet whose invoice PDF is not in the invoice folder.
  *
  * Reported flat, alongside the per-driver `unmatchedInvoices`, because the
@@ -134,6 +148,8 @@ export interface ParseResult {
    */
   collectionsFolderError?: string;
   alreadySigned: AlreadySignedInvoice[];
+  /** Delivery stops already out, unsigned, on a live run in this scope. */
+  alreadyOnRun: AlreadyOnRunInvoice[];
   /** Every row with no matching PDF, across all drivers */
   missingInvoices: MissingInvoice[];
 }
@@ -156,6 +172,7 @@ function emptyResult(
     matchedCollections: 0,
     unmatchedCollections: 0,
     alreadySigned: [],
+    alreadyOnRun: [],
     missingInvoices: [],
   };
 }
@@ -597,6 +614,13 @@ export async function parseTripSheet(
       pattern
     );
 
+    // 8. Deliveries already out on a live run. Only delivery stops: an invoice
+    // on a collection row is the one being credited, not a delivery.
+    const alreadyOnRun = await detectAlreadyOnRun(
+      tenantId,
+      driverResults.flatMap((r) => r.stops.map((s) => s.invoiceNumber)).filter(Boolean)
+    );
+
     return {
       success: true,
       rows: parsedRows,
@@ -612,6 +636,7 @@ export async function parseTripSheet(
         ? { collectionsFolderError: collectionFolder.error }
         : {}),
       alreadySigned,
+      alreadyOnRun,
       missingInvoices,
     };
   } catch (err) {
@@ -722,6 +747,86 @@ async function detectAlreadySignedInvoices(
  * stop having no invoice number at all, and a row with a blank invoice cell and
  * no collection number never became a stop in the first place.
  */
+/**
+ * Live, unsigned stops in this scope carrying any of these invoice numbers.
+ *
+ * Every Stop row belongs to a live run (completion deletes the trip sheet and
+ * its stops), so no join on status is needed. Matched exactly, ignoring case:
+ * a re-deploy of the same sheet carries the same raw values, and a looser
+ * match would refuse a different invoice that shares its digits. A SIGNED
+ * stop is left to the already-signed check, which already skips it.
+ */
+async function detectAlreadyOnRun(
+  tenantId: string,
+  invoiceNumbers: string[]
+): Promise<AlreadyOnRunInvoice[]> {
+  if (invoiceNumbers.length === 0) return [];
+  const wanted = [...new Set(invoiceNumbers)];
+  const stops = await scopedPrisma(tenantId).stop.findMany({
+    where: {
+      OR: wanted.map((n) => ({ invoiceNumber: { equals: n, mode: "insensitive" as const } })),
+      status: { not: "SIGNED" },
+    },
+    select: {
+      invoiceNumber: true,
+      status: true,
+      tripSheet: { select: { sourceFilename: true, driver: { select: { name: true } } } },
+    },
+  });
+
+  const seen = new Set<string>();
+  const results: AlreadyOnRunInvoice[] = [];
+  for (const s of stops) {
+    const key = s.invoiceNumber.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    results.push({
+      invoiceNumber: wanted.find((n) => n.toUpperCase() === key) ?? s.invoiceNumber,
+      driverName: s.tripSheet?.driver?.name ?? "another driver",
+      sourceFilename: s.tripSheet?.sourceFilename ?? "",
+      status: s.status,
+    });
+  }
+  return results;
+}
+
+/**
+ * The deploy-time half of `alreadyOnRun`: the flagged invoices the dispatcher
+ * did not skip. Run against the deploy's own re-parse, so a run deployed from
+ * another tab since the preview is seen too.
+ */
+export function collectAlreadyOnRun(
+  parseResult: Pick<ParseResult, "alreadyOnRun" | "driverResults">,
+  skipInvoices: Set<string>,
+  options: { includeUnassigned?: boolean } = {}
+): AlreadyOnRunInvoice[] {
+  // Only stops this deploy would write: an unassigned row with no driver
+  // chosen is not being deployed, so it cannot double anything.
+  const deploying = new Set<string>();
+  for (const result of parseResult.driverResults) {
+    if (result.driverId === "__unassigned__" && !options.includeUnassigned) continue;
+    for (const stop of result.stops) {
+      const key = stop.invoiceNumber.toUpperCase();
+      if (key && !skipInvoices.has(key)) deploying.add(key);
+    }
+  }
+  return parseResult.alreadyOnRun.filter((i) => deploying.has(i.invoiceNumber.toUpperCase()));
+}
+
+/** The 409 body both deploy routes answer with. */
+export function alreadyOnRunRefusal(invoices: AlreadyOnRunInvoice[]) {
+  const n = invoices.length;
+  const first = invoices[0];
+  return {
+    error:
+      n === 1
+        ? `Invoice ${first.invoiceNumber} is already on ${first.driverName}'s live run. Skip it, or reallocate that run instead.`
+        : `${n} invoices are already on a live run (${first.invoiceNumber} on ${first.driverName}'s, and ${n - 1} more). Skip them, or reallocate those runs instead.`,
+    code: "ALREADY_ON_RUN" as const,
+    alreadyOnRun: invoices,
+  };
+}
+
 export function collectMissingInvoices(
   driverResults: MatchResult[],
   skipInvoices: Set<string>,

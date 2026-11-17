@@ -337,7 +337,11 @@ model TripSheet {
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
-  driver Driver @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  // Restrict, not Cascade: deleting a driver used to delete their live runs —
+  // signed stops and signatures with them, with no archive. A trip sheet only
+  // exists while its run is live (completion deletes it), so the database now
+  // refuses to delete a driver who still has one. See deleteDriver.
+  driver Driver @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
   admin  Admin? @relation(fields: [tenantId, adminId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
 
   @@unique([tenantId, id])
