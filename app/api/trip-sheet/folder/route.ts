@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseTripSheet, collectMissingInvoices } from "@/lib/trip-parser";
+import {
+  parseTripSheet,
+  collectMissingInvoices,
+  collectAlreadyOnRun,
+  alreadyOnRunRefusal,
+} from "@/lib/trip-parser";
 import {
   listTripSheetFiles,
   readTripSheetFile,
@@ -123,6 +128,16 @@ export const POST = withAuth(async (request: NextRequest) => {
       resolvedAssignTo = { driverId: target.id, driverName: target.name };
     }
 
+    // A delivery already out on a live run is never deployed a second time
+    // (ts-103573 went to the same driver twice, 51s apart). Checked on this
+    // re-parse, so a run deployed from another tab since the preview counts.
+    const alreadyOnRun = collectAlreadyOnRun(parseResult, skipInvoices, {
+      includeUnassigned: !!resolvedAssignTo,
+    });
+    if (alreadyOnRun.length > 0) {
+      return NextResponse.json(alreadyOnRunRefusal(alreadyOnRun), { status: 409 });
+    }
+
     // Same gate as the direct upload path, and equally unconditional — see the
     // note in ../route.ts.
     const missingInvoices = collectMissingInvoices(
@@ -139,6 +154,21 @@ export const POST = withAuth(async (request: NextRequest) => {
           missingInvoices,
         },
         { status: 409 }
+      );
+    }
+
+    // A deploy that would write no trip sheet (every stop skipped, or only
+    // unassigned rows with no driver chosen) is refused rather than answered
+    // "success": it used to mark the file imported anyway, leaving a file that
+    // read "Imported" with no run behind it.
+    const deploysSomething = parseResult.driverResults.some((result) => {
+      if (result.driverId === "__unassigned__" && !resolvedAssignTo) return false;
+      return result.stops.some((s) => !skipInvoices.has(s.invoiceNumber.toUpperCase()));
+    });
+    if (!deploysSomething) {
+      return NextResponse.json(
+        { error: "Nothing to deploy — every stop is skipped or has no driver", code: "NOTHING_TO_DEPLOY" },
+        { status: 400 }
       );
     }
 

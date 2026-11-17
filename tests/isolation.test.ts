@@ -766,6 +766,108 @@ suite("cross-ADMIN isolation", () => {
         await db().importedFile.count({ where: { filename: "shared-name.csv" } })
       ).toBe(2);
     });
+
+    it("a file whose run was deleted reads as removed, judged only by this scope's runs", async () => {
+      const { markFileImported, importStates } = await import("@/lib/trip-sheet-folder");
+      const { deleteTripSheet } = await import("@/lib/trip-data");
+
+      // A run of its own to delete — the shared fixture trip must survive for
+      // the tests after this one. route-b.csv is B's live run, not A's.
+      const run = await db().tripSheet.create({
+        data: {
+          sourceFilename: "removed-run.csv",
+          uploadedBy: f.a.admin.id,
+          driverId: f.a.driver.id,
+          tenantId: f.a.tenantId,
+        },
+        select: { id: true },
+      });
+      await markFileImported(f.a.tenantId, "removed-run.csv", run.id, "imported");
+      await markFileImported(f.a.tenantId, "route-a.csv", f.a.tripSheet.id, "imported");
+      await markFileImported(f.a.tenantId, "route-b.csv", null, "imported");
+
+      let states = await importStates(f.a.tenantId, ["removed-run.csv", "route-a.csv", "route-b.csv", "never.csv"]);
+      expect(states.get("removed-run.csv")).toMatchObject({ imported: true, tripRemoved: false });
+      expect(states.get("route-a.csv")).toMatchObject({ imported: true, tripRemoved: false });
+      // B's live trip from a file of that name must not make A's read imported.
+      expect(states.get("route-b.csv")).toMatchObject({ imported: false, tripRemoved: true });
+      expect(states.has("never.csv")).toBe(false);
+
+      // Deleting the run (not completing it) leaves the file importable again.
+      expect((await deleteTripSheet(f.a.tenantId, run.id)).success).toBe(true);
+      states = await importStates(f.a.tenantId, ["removed-run.csv"]);
+      expect(states.get("removed-run.csv")).toMatchObject({ imported: false, tripRemoved: true });
+
+      // A completed run keeps its file imported, even with the file still in the root.
+      const archived = await db().completedTripSheet.create({
+        data: {
+          tripSheetId: run.id,
+          driverId: f.a.driver.id,
+          driverName: f.a.driver.name,
+          sourceFilename: "removed-run.csv",
+          uploadedAt: new Date(),
+          uploadedBy: f.a.admin.id,
+          totalStops: 1,
+          signedStops: 1,
+          stops: [],
+          tenantId: f.a.tenantId,
+        },
+      });
+      states = await importStates(f.a.tenantId, ["removed-run.csv"]);
+      expect(states.get("removed-run.csv")).toMatchObject({ imported: true, tripRemoved: false });
+
+      // B's file of A's name is untouched by any of it.
+      expect((await importStates(f.b.tenantId, ["removed-run.csv"])).has("removed-run.csv")).toBe(false);
+
+      // Leave nothing behind for later tests that count archives or imports.
+      // (The run itself was deleted above.)
+      await db().completedTripSheet.delete({ where: { id: archived.id } });
+      await db().importedFile.deleteMany({
+        where: { tenantId: f.a.tenantId, filename: { in: ["removed-run.csv", "route-a.csv", "route-b.csv"] } },
+      });
+    });
+  });
+
+  // ── Deleting a driver ────────────────────────────────────────────────
+  describe("deleting a driver", () => {
+    const del = async (id: string) => {
+      const { DELETE } = await import("@/app/api/drivers/route");
+      return DELETE(req("/api/drivers", { method: "DELETE", body: { id } }));
+    };
+
+    it("is refused while the driver has a live run, and the run survives", async () => {
+      useSession(adminSession(f.a));
+      const res = await del(f.a.driver.id);
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ code: "HAS_LIVE_TRIPS", liveTrips: 1 });
+
+      expect(await db().driver.count({ where: { id: f.a.driver.id } })).toBe(1);
+      expect(await db().tripSheet.count({ where: { id: f.a.tripSheet.id } })).toBe(1);
+      expect(await db().stop.count({ where: { id: f.a.stop.id } })).toBe(1);
+    });
+
+    it("the database refuses it too, so a run deployed mid-delete is never cascaded away", async () => {
+      await expect(db().driver.delete({ where: { id: f.a.driver.id } })).rejects.toThrow();
+      expect(await db().tripSheet.count({ where: { id: f.a.tripSheet.id } })).toBe(1);
+    });
+
+    it("another scope's driver is 404, never 409 — the refusal must not confirm it exists", async () => {
+      useSession(adminSession(f.a));
+      const res = await del(f.b.driver.id);
+      expect(res.status).toBe(404);
+      expect(await db().driver.count({ where: { id: f.b.driver.id } })).toBe(1);
+    });
+
+    it("a driver with no live run is deleted as before", async () => {
+      const spare = await db().driver.create({
+        data: { name: "Spare Driver", tenantId: f.a.tenantId },
+        select: { id: true },
+      });
+      useSession(adminSession(f.a));
+      expect((await del(spare.id)).status).toBe(200);
+      expect(await db().driver.count({ where: { id: spare.id } })).toBe(0);
+    });
   });
 
   // ── Trip sheet parsing ───────────────────────────────────────────────
@@ -4531,6 +4633,109 @@ suite("cross-ADMIN isolation", () => {
       expect(
         await db().tripSheet.count({ where: { tenantId: f.a.tenantId } })
       ).toBe(1);
+    });
+  });
+
+  // ── Already on a live run (the double deploy) ────────────────────────
+  //
+  // ts-103573 was deployed to the same driver twice, 51s apart: nothing
+  // checked whether the sheet's deliveries were already out. Each test gets
+  // its own live stop — the shared fixture stop may have been signed by then.
+  describe("already on a live run", () => {
+    const sheet = (driverName: string, invoiceNumber: string, extra: Record<string, string> = {}) => {
+      const form = new FormData();
+      form.append("file", tripSheetCsv(driverName, invoiceNumber));
+      for (const [key, value] of Object.entries(extra)) form.append(key, value);
+      return form;
+    };
+    const liveStop = (fx: typeof f.a, invoiceNumber: string) =>
+      db().stop.create({
+        data: {
+          tripSheetId: fx.tripSheet.id,
+          stopNumber: 90,
+          customerName: "Acme Trading",
+          address: "1 Test Street",
+          invoiceNumber,
+          tenantId: fx.tenantId,
+        },
+        select: { id: true },
+      });
+
+    it("the preview names it, and the deploy refuses it, writing nothing", async () => {
+      const { POST } = await import("@/app/api/trip-sheet/route");
+      const stop = await liveStop(f.a, "INV-7700");
+      try {
+        useSession(adminSession(f.a));
+        const preview = await (await POST(formReq("/api/trip-sheet", sheet(f.a.driver.name, "INV-7700")))).json();
+        expect(preview.preview.alreadyOnRun).toEqual([
+          expect.objectContaining({ invoiceNumber: "INV-7700", driverName: f.a.driver.name, sourceFilename: "route-a.csv" }),
+        ]);
+
+        const before = await db().tripSheet.count({ where: { tenantId: f.a.tenantId } });
+        const res = await POST(formReq("/api/trip-sheet", sheet(f.a.driver.name, "INV-7700", { action: "deploy" })));
+        const body = await res.json();
+        expect(res.status).toBe(409);
+        expect(body.code).toBe("ALREADY_ON_RUN");
+        expect(body.alreadyOnRun.map((i: { invoiceNumber: string }) => i.invoiceNumber)).toEqual(["INV-7700"]);
+        expect(await db().tripSheet.count({ where: { tenantId: f.a.tenantId } })).toBe(before);
+        expect(await db().stop.count({ where: { tenantId: f.a.tenantId, invoiceNumber: "INV-7700" } })).toBe(1);
+      } finally {
+        await db().stop.delete({ where: { id: stop.id } });
+      }
+    });
+
+    it("skipping it gets past this gate (the missing-PDF gate still applies)", async () => {
+      const { POST } = await import("@/app/api/trip-sheet/route");
+      const stop = await liveStop(f.a, "INV-7700");
+      try {
+        useSession(adminSession(f.a));
+        const res = await POST(
+          formReq("/api/trip-sheet", sheet(f.a.driver.name, "INV-7700", {
+            action: "deploy",
+            skipInvoices: JSON.stringify(["INV-7700"]),
+          }))
+        );
+        expect(res.status).toBe(200);
+        expect((await res.json()).totalStops).toBe(0);
+      } finally {
+        await db().stop.delete({ where: { id: stop.id } });
+      }
+    });
+
+    it("another scope's live run never counts — not in the preview, not at deploy", async () => {
+      const { POST } = await import("@/app/api/trip-sheet/route");
+      const stop = await liveStop(f.b, "INV-7701");
+      try {
+        useSession(adminSession(f.a));
+        const preview = await (await POST(formReq("/api/trip-sheet", sheet(f.a.driver.name, "INV-7701")))).json();
+        expect(preview.preview.alreadyOnRun).toEqual([]);
+
+        // A's deploy goes on to A's own gates (no PDF here), never B's run.
+        const body = await (await POST(formReq("/api/trip-sheet", sheet(f.a.driver.name, "INV-7701", { action: "deploy" })))).json();
+        expect(body.code).toBe("MISSING_INVOICES");
+        expect(JSON.stringify(body)).not.toContain(f.b.tripSheet.id);
+
+        // And B sees its own.
+        useSession(adminSession(f.b));
+        const forB = await (await POST(formReq("/api/trip-sheet", sheet(f.b.driver.name, "INV-7701")))).json();
+        expect(forB.preview.alreadyOnRun).toHaveLength(1);
+      } finally {
+        await db().stop.delete({ where: { id: stop.id } });
+      }
+    });
+
+    it("a signed stop on a live run is left to the already-signed check", async () => {
+      const { POST } = await import("@/app/api/trip-sheet/route");
+      const stop = await liveStop(f.a, "INV-7702");
+      await db().stop.update({ where: { id: stop.id }, data: { status: "SIGNED", signedAt: new Date() } });
+      try {
+        useSession(adminSession(f.a));
+        const preview = await (await POST(formReq("/api/trip-sheet", sheet(f.a.driver.name, "INV-7702")))).json();
+        expect(preview.preview.alreadyOnRun).toEqual([]);
+        expect(preview.preview.alreadySigned.map((s: { invoiceNumber: string }) => s.invoiceNumber)).toContain("INV-7702");
+      } finally {
+        await db().stop.delete({ where: { id: stop.id } });
+      }
     });
   });
 

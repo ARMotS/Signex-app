@@ -205,6 +205,22 @@ interface AlreadySignedInvoice {
   source: "database" | "filesystem";
 }
 
+/** An invoice already out, unsigned, on a live run — the server refuses it. */
+interface AlreadyOnRunInvoice {
+  invoiceNumber: string;
+  driverName: string;
+  sourceFilename: string;
+  status: string;
+}
+
+/** What a fresh preview skips by default: already signed, or already on a run. */
+function defaultSkips(preview?: { alreadySigned?: AlreadySignedInvoice[]; alreadyOnRun?: AlreadyOnRunInvoice[] }): Set<string> {
+  return new Set([
+    ...(preview?.alreadySigned ?? []).map((s) => s.invoiceNumber),
+    ...(preview?.alreadyOnRun ?? []).map((s) => s.invoiceNumber),
+  ]);
+}
+
 /** A row on the sheet whose PDF is not in the invoice folder. */
 interface MissingInvoice {
   invoiceNumber: string;
@@ -229,6 +245,8 @@ interface PreviewData {
     collectionsFolderError?: string;
     driverResults: MatchResult[];
     alreadySigned: AlreadySignedInvoice[];
+    /** Absent from a server on the previous bundle. */
+    alreadyOnRun?: AlreadyOnRunInvoice[];
     missingInvoices: MissingInvoice[];
   };
 }
@@ -352,6 +370,8 @@ interface CloudTripFile {
   lastModified: string;
   extension: string;
   imported: boolean;
+  /** Deployed once, but its run was deleted before completion — importable again. */
+  tripRemoved?: boolean;
   importedAt?: string;
   importStatus?: string;
 }
@@ -935,9 +955,8 @@ export default function TripSheetPage() {
       } else {
         setPreview(data);
         setImportPrompts(opts.prompts ?? {});
-        // Auto-select all already-signed invoices for skipping
-        const signed = data.preview?.alreadySigned || [];
-        setSkippedInvoices(new Set(signed.map((s: AlreadySignedInvoice) => s.invoiceNumber)));
+        // Already-signed and already-on-a-run invoices start skipped.
+        setSkippedInvoices(defaultSkips(data.preview));
       }
     } catch {
       setError("Failed to connect to server");
@@ -973,9 +992,8 @@ export default function TripSheetPage() {
         setImportSourceFile(filename);
         setUploadedFile(null);
         setImportPrompts(opts.prompts ?? {});
-        // Auto-select all already-signed invoices for skipping
-        const signed = data.preview?.alreadySigned || [];
-        setSkippedInvoices(new Set(signed.map((s: AlreadySignedInvoice) => s.invoiceNumber)));
+        // Already-signed and already-on-a-run invoices start skipped.
+        setSkippedInvoices(defaultSkips(data.preview));
         setInvoiceUploads({});
         setInvoiceConflict(null);
       }
@@ -1149,10 +1167,28 @@ export default function TripSheetPage() {
    * was stale, so re-preview to show what the server actually saw.
    */
   const handleMissingInvoiceRejection = async (message?: string) => {
+    // After the refresh: refreshPreview clears the error as it starts, which
+    // used to wipe this message before it was ever seen.
+    await refreshPreview();
     setError(
       `${message || "Some invoices have no PDF"}. Upload the PDFs, or skip those stops.`
     );
+  };
+
+  /**
+   * The server refused the deploy because some invoices are already out on a
+   * live run — deployed from another tab, or by a retry of a deploy that had
+   * in fact gone through. Skip them (refreshPreview keeps skip decisions, so
+   * they would not be re-seeded) and re-preview to show where they are.
+   */
+  const handleAlreadyOnRunRejection = async (data: { error?: string; alreadyOnRun?: AlreadyOnRunInvoice[] }) => {
+    setSkippedInvoices((prev) => {
+      const next = new Set(prev);
+      for (const inv of data.alreadyOnRun ?? []) next.add(inv.invoiceNumber);
+      return next;
+    });
     await refreshPreview();
+    setError(`${data.error || "Some invoices are already on a live run"} They have been skipped.`);
   };
 
   const handleDeploy = async () => {
@@ -1193,6 +1229,8 @@ export default function TripSheetPage() {
 
         if (res.status === 409 && data.code === "MISSING_INVOICES") {
           await handleMissingInvoiceRejection(data.error);
+        } else if (res.status === 409 && data.code === "ALREADY_ON_RUN") {
+          await handleAlreadyOnRunRejection(data);
         } else if (!res.ok) {
           setError(data.error || "Deploy failed");
         } else {
@@ -1237,6 +1275,8 @@ export default function TripSheetPage() {
 
         if (res.status === 409 && data.code === "MISSING_INVOICES") {
           await handleMissingInvoiceRejection(data.error);
+        } else if (res.status === 409 && data.code === "ALREADY_ON_RUN") {
+          await handleAlreadyOnRunRejection(data);
         } else if (!res.ok) {
           setError(data.error || "Deploy failed");
         } else {
@@ -1246,6 +1286,8 @@ export default function TripSheetPage() {
           setSkippedInvoices(new Set());
           setInvoiceUploads({});
           fetchTripSheets();
+          // The upload is now in the folder and recorded as imported there.
+          fetchCloudFolder();
         }
       }
     } catch {
@@ -1848,6 +1890,14 @@ export default function TripSheetPage() {
                   </div>
 
                   {/* Status / Action */}
+                  {file.tripRemoved && (
+                    <span
+                      className="status tone-amber shrink-0"
+                      title="This sheet was deployed, but its trip sheet was later deleted without being completed. Import it again to put the run back."
+                    >
+                      Trip removed{file.importedAt ? ` · imported ${new Date(file.importedAt).toLocaleDateString("en-ZA", { day: "2-digit", month: "short" })}` : ""}
+                    </span>
+                  )}
                   {file.imported ? (
                     <span className="status tone-green shrink-0">
                       <span className="status-dot" aria-hidden="true" />
@@ -1871,7 +1921,7 @@ export default function TripSheetPage() {
                             <polyline points="7 10 12 15 17 10" />
                             <line x1="12" y1="15" x2="12" y2="3" />
                           </svg>
-                          Import
+                          {file.tripRemoved ? "Import again" : "Import"}
                         </>
                       )}
                     </button>
@@ -2262,6 +2312,38 @@ export default function TripSheetPage() {
               </div>
             )}
 
+            {/* Already on a live run — refused by the server, so skipped and not optional */}
+            {preview.preview.alreadyOnRun && preview.preview.alreadyOnRun.length > 0 && (
+              <div className="mb-4 border border-ink-amber/40 rounded overflow-hidden" role="status">
+                <div className="flex items-start gap-3 px-4 py-3 bg-ink-amber-dim/40">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-amber shrink-0 mt-0.5">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="12" y1="8" x2="12" y2="12" />
+                    <line x1="12" y1="16" x2="12.01" y2="16" />
+                  </svg>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-ink-black">
+                      {preview.preview.alreadyOnRun.length} invoice{preview.preview.alreadyOnRun.length !== 1 ? "s are" : " is"} already on a live run
+                    </p>
+                    <p className="text-xs text-ink-muted mt-0.5">
+                      Skipped — a delivery is never put on two runs. If that run will not be finished, use Reallocate on its trip card instead.
+                    </p>
+                  </div>
+                </div>
+                <div className="divide-y divide-ink-border">
+                  {preview.preview.alreadyOnRun.map((inv) => (
+                    <div key={inv.invoiceNumber} className="flex items-center gap-3 px-4 py-2.5 text-xs">
+                      <span className="font-mono font-medium text-ink-black min-w-[100px]">{inv.invoiceNumber}</span>
+                      <span className="text-ink-muted flex-1 truncate" title={inv.sourceFilename}>
+                        On {inv.driverName}&apos;s run{inv.sourceFilename ? ` · ${inv.sourceFilename}` : ""}
+                      </span>
+                      <span className="text-ink-amber font-mono">skip</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Already-signed warning */}
             {preview.preview.alreadySigned && preview.preview.alreadySigned.length > 0 && (
               <div className="mb-4 border border-ink-red/30 rounded overflow-hidden">
@@ -2279,18 +2361,29 @@ export default function TripSheetPage() {
                       These invoices were previously signed. They will be skipped by default — uncheck to include them anyway.
                     </p>
                   </div>
-                  <button
-                    onClick={() => {
-                      if (skippedInvoices.size === preview.preview.alreadySigned.length) {
-                        setSkippedInvoices(new Set());
-                      } else {
-                        setSkippedInvoices(new Set(preview.preview.alreadySigned.map((s) => s.invoiceNumber)));
-                      }
-                    }}
-                    className="text-xs font-mono text-ink-muted hover:text-ink-black transition-colors whitespace-nowrap"
-                  >
-                    {skippedInvoices.size === preview.preview.alreadySigned.length ? "Include all" : "Skip all"}
-                  </button>
+                  {(() => {
+                    // By membership, not by set size: the skip set also holds
+                    // invoices already on a run, which this toggle must leave alone.
+                    const signedNos = preview.preview.alreadySigned.map((s) => s.invoiceNumber);
+                    const allSkipped = signedNos.every((n) => skippedInvoices.has(n));
+                    return (
+                      <button
+                        onClick={() => {
+                          setSkippedInvoices((prev) => {
+                            const next = new Set(prev);
+                            for (const n of signedNos) {
+                              if (allSkipped) next.delete(n);
+                              else next.add(n);
+                            }
+                            return next;
+                          });
+                        }}
+                        className="text-xs font-mono text-ink-muted hover:text-ink-black transition-colors whitespace-nowrap"
+                      >
+                        {allSkipped ? "Include all" : "Skip all"}
+                      </button>
+                    );
+                  })()}
                 </div>
                 <div className="divide-y divide-ink-border">
                   {preview.preview.alreadySigned.map((inv) => (

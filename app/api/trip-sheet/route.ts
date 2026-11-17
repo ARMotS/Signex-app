@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseTripSheet, collectMissingInvoices } from "@/lib/trip-parser";
+import {
+  parseTripSheet,
+  collectMissingInvoices,
+  collectAlreadyOnRun,
+  alreadyOnRunRefusal,
+} from "@/lib/trip-parser";
 import {
   saveTripSheet,
   getAllTripSheets,
@@ -10,7 +15,7 @@ import {
   getTripStats,
 } from "@/lib/trip-data";
 import { matchStopsToContacts, applyContactMatches } from "@/lib/contact-matcher";
-import { saveUploadedFile } from "@/lib/trip-sheet-folder";
+import { saveUploadedFile, markFileImported } from "@/lib/trip-sheet-folder";
 import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { scheduleCollectionSheets } from "@/lib/collection-sheet-sync";
@@ -124,6 +129,15 @@ export const POST = withAuth(async (request: NextRequest) => {
       }
     }
 
+    // A delivery already out on a live run is never deployed a second time —
+    // see the same gate in ./folder/route.ts.
+    const alreadyOnRun = collectAlreadyOnRun(parseResult, skipInvoices, {
+      includeUnassigned: !!assignTo,
+    });
+    if (alreadyOnRun.length > 0) {
+      return NextResponse.json(alreadyOnRunRefusal(alreadyOnRun), { status: 409 });
+    }
+
     // A stop is never deployed without its invoice PDF. The PDF is the physical
     // record the signature is embedded on — sign a stop that has none and the
     // delivery exists only as a database row, with nothing to hand back to the
@@ -202,6 +216,13 @@ export const POST = withAuth(async (request: NextRequest) => {
         .filter((m) => m.status === "auto" && m.contactId)
         .map((m) => ({ stopId: m.stopId, contactId: m.contactId! }));
       if (autoMatches.length) await applyContactMatches(ctx.tenantId, autoMatches);
+    }
+
+    // The upload was just saved into the trip sheet folder under this name, so
+    // record it as imported there too. Without this the folder listed the file
+    // as new, with an Import button that deployed the same sheet again.
+    if (savedTrips.length > 0) {
+      await markFileImported(ctx.tenantId, file.name, savedTrips[0].id, "imported");
     }
 
     return NextResponse.json({

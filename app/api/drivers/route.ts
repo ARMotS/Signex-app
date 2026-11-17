@@ -122,7 +122,12 @@ export const DELETE = withAuth(async (request: NextRequest) => {
 
   const result = await deleteDriver(ctx.tenantId, id);
   if (!result.success) {
-    return NextResponse.json({ error: result.error }, { status: 400 });
+    // 409: the driver exists but still has live runs (or collections) that a
+    // delete would destroy. The page offers deactivation instead.
+    return NextResponse.json(
+      { error: result.error, code: result.code, liveTrips: result.liveTrips },
+      { status: result.code ? 409 : 400 }
+    );
   }
 
   return NextResponse.json({ success: true });

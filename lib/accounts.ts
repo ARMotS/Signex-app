@@ -13,6 +13,7 @@
  */
 
 import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import { UNSAFE_unscopedPrisma, scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
 import { revokeSessionsWrite } from "./session";
@@ -805,19 +806,57 @@ export async function updateDriver(
   }
 }
 
+/**
+ * Delete a driver — refused while they still have a live trip sheet.
+ *
+ * Deleting a driver used to cascade to their trip sheets: a run mid-route,
+ * signed stops and signatures included, vanished with no archive, and its
+ * source file kept reading "Imported" with no trip behind it. The FK is now
+ * RESTRICT (migration 20261117120000); this check is what turns that into a
+ * clear answer. A driver who collected anything is also kept by the database
+ * (Collection -> Driver is RESTRICT), so that is reported too, not a bare
+ * failure. Deactivating is the way to retire either.
+ */
 export async function deleteDriver(
   tenantId: string,
   id: string
-): Promise<{ success: boolean; error?: string }> {
-  try {
-    const db = scopedPrisma(tenantId);
+): Promise<{
+  success: boolean;
+  error?: string;
+  code?: "HAS_LIVE_TRIPS" | "HAS_HISTORY";
+  liveTrips?: number;
+}> {
+  const db = scopedPrisma(tenantId);
+  const liveTripsRefusal = (n: number) => ({
+    success: false as const,
+    code: "HAS_LIVE_TRIPS" as const,
+    liveTrips: n,
+    error: `This driver still has ${n} active trip sheet${n !== 1 ? "s" : ""}. Complete, reallocate or delete ${n !== 1 ? "them" : "it"} first, or deactivate the driver instead.`,
+  });
 
+  try {
     const driver = await db.driver.findFirst({ where: { id } });
     if (!driver) {
       return { success: false, error: "Driver not found" };
     }
 
-    await db.driver.delete({ where: { id } });
+    const liveTrips = await db.tripSheet.count({ where: { driverId: id } });
+    if (liveTrips > 0) return liveTripsRefusal(liveTrips);
+
+    try {
+      await db.driver.delete({ where: { id } });
+    } catch (err) {
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== "P2003") throw err;
+      // A foreign key kept the row: a run deployed since the count, or
+      // collections this driver brought back.
+      const nowLive = await db.tripSheet.count({ where: { driverId: id } });
+      if (nowLive > 0) return liveTripsRefusal(nowLive);
+      return {
+        success: false,
+        code: "HAS_HISTORY",
+        error: "This driver has collections on record, so they cannot be deleted. Deactivate the driver instead.",
+      };
+    }
 
     await logAudit({
       action: "DRIVER_DELETE",

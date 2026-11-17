@@ -46,12 +46,89 @@ export interface TripSheetFile {
   lastModified: string;
   /** File extension (csv, xlsx, xls) */
   extension: string;
-  /** Whether this file has already been imported */
+  /** Whether a run deployed from this file still exists (live or completed) */
   imported: boolean;
+  /**
+   * It was deployed, but every run from it has since gone without being
+   * completed (the trip sheet, or its driver, was deleted). Importable again.
+   */
+  tripRemoved?: boolean;
   /** When this file was imported (if applicable) */
   importedAt?: string;
   /** Import status */
   importStatus?: string;
+}
+
+export interface FileImportState {
+  imported: boolean;
+  tripRemoved: boolean;
+  importedAt?: string;
+  importStatus?: string;
+}
+
+/**
+ * Import state per filename, for the folder listing.
+ *
+ * An `ImportedFile` row records that a deploy happened, not that its run still
+ * exists. Deleting a trip sheet — or deleting a driver, which cascades to
+ * their trips — removes the run without archiving it and without touching
+ * that row, so the file used to read "Imported" while no trip sheet, live or
+ * completed, came from it, and it offered no Import button. So "imported"
+ * also requires a live TripSheet or a CompletedTripSheet with that
+ * `sourceFilename`; otherwise the file is `tripRemoved` and can be imported
+ * again. A completed run keeps its file imported even if the move to
+ * processed/ failed, so a delivered run is never offered for re-deploy.
+ */
+export async function importStates(
+  tenantId: string,
+  filenames: string[]
+): Promise<Map<string, FileImportState>> {
+  const db = scopedPrisma(tenantId);
+  const records = filenames.length
+    ? await db.importedFile.findMany({ where: { filename: { in: filenames } } })
+    : [];
+  const recorded = records.map((r) => r.filename);
+
+  const [live, archived] = recorded.length
+    ? await Promise.all([
+        db.tripSheet.findMany({
+          where: { sourceFilename: { in: recorded } },
+          select: { sourceFilename: true },
+          distinct: ["sourceFilename"],
+        }),
+        db.completedTripSheet.findMany({
+          where: { sourceFilename: { in: recorded } },
+          select: { sourceFilename: true },
+          distinct: ["sourceFilename"],
+        }),
+      ])
+    : [[], []];
+  const hasRun = new Set([...live, ...archived].map((t) => t.sourceFilename));
+
+  const states = new Map<string, FileImportState>();
+  for (const r of records) {
+    const exists = hasRun.has(r.filename);
+    states.set(r.filename, {
+      imported: exists,
+      tripRemoved: !exists,
+      importedAt: r.importedAt.toISOString(),
+      importStatus: r.status,
+    });
+  }
+  return states;
+}
+
+/** New and removed files first, then newest first. */
+function sortFolderFiles<T extends { imported: boolean; lastModified: string }>(files: T[]): T[] {
+  return files.sort((a, b) => {
+    if (a.imported !== b.imported) return a.imported ? 1 : -1;
+    return new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime();
+  });
+}
+
+/** Files nobody has deployed yet — a removed run is not "new". */
+function countNewFiles(files: { imported: boolean; tripRemoved?: boolean }[]): number {
+  return files.filter((f) => !f.imported && !f.tripRemoved).length;
 }
 
 export interface TripSheetFolderInfo {
@@ -130,15 +207,11 @@ async function listTripSheetFilesFromOneDrive(
   try {
     const items = await listOneDriveTripSheetFiles(tenantId);
 
-    const filenames = items.map((i) => i.name);
-    const importRecords = await scopedPrisma(tenantId).importedFile.findMany({
-      where: { filename: { in: filenames } },
-    });
-    const importMap = new Map(importRecords.map((r) => [r.filename, r]));
+    const states = await importStates(tenantId, items.map((i) => i.name));
 
     const files: TripSheetFile[] = items.map((item) => {
       const ext = item.name.slice(item.name.lastIndexOf(".") + 1).toLowerCase();
-      const importRecord = importMap.get(item.name);
+      const state = states.get(item.name);
 
       return {
         filename: item.name,
@@ -146,18 +219,15 @@ async function listTripSheetFilesFromOneDrive(
         sizeBytes: item.size,
         lastModified: item.lastModifiedDateTime,
         extension: ext,
-        imported: !!importRecord,
-        importedAt: importRecord?.importedAt.toISOString(),
-        importStatus: importRecord?.status,
+        imported: state?.imported ?? false,
+        tripRemoved: state?.tripRemoved ?? false,
+        importedAt: state?.importedAt,
+        importStatus: state?.importStatus,
       };
     });
 
-    files.sort((a, b) => {
-      if (a.imported !== b.imported) return a.imported ? 1 : -1;
-      return new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime();
-    });
-
-    const newFiles = files.filter((f) => !f.imported).length;
+    sortFolderFiles(files);
+    const newFiles = countNewFiles(files);
 
     return {
       path: folderPath,
@@ -214,20 +284,13 @@ async function listTripSheetFilesFromLocal(tenantId: string): Promise<TripSheetF
       return TRIP_SHEET_EXTENSIONS.includes(ext);
     });
 
-    const importRecords = await scopedPrisma(tenantId).importedFile.findMany({
-      where: {
-        filename: { in: tripFiles },
-      },
-    });
-    const importMap = new Map(
-      importRecords.map((r) => [r.filename, r])
-    );
+    const states = await importStates(tenantId, tripFiles);
 
     const files: TripSheetFile[] = tripFiles.map((filename) => {
       const fullPath = path.join(folderPath, filename);
       const stats = fs.statSync(fullPath);
       const ext = path.extname(filename).toLowerCase().slice(1);
-      const importRecord = importMap.get(filename);
+      const state = states.get(filename);
 
       return {
         filename,
@@ -235,18 +298,15 @@ async function listTripSheetFilesFromLocal(tenantId: string): Promise<TripSheetF
         sizeBytes: stats.size,
         lastModified: stats.mtime.toISOString(),
         extension: ext,
-        imported: !!importRecord,
-        importedAt: importRecord?.importedAt.toISOString(),
-        importStatus: importRecord?.status,
+        imported: state?.imported ?? false,
+        tripRemoved: state?.tripRemoved ?? false,
+        importedAt: state?.importedAt,
+        importStatus: state?.importStatus,
       };
     });
 
-    files.sort((a, b) => {
-      if (a.imported !== b.imported) return a.imported ? 1 : -1;
-      return new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime();
-    });
-
-    const newFiles = files.filter((f) => !f.imported).length;
+    sortFolderFiles(files);
+    const newFiles = countNewFiles(files);
 
     return {
       path: folderPath,
