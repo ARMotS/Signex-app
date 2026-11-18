@@ -1,17 +1,16 @@
 import type { Metadata } from "next";
 import { readDelivery } from "@/lib/courier-confirm";
-import ConfirmReceived from "./ConfirmReceived";
 
 /**
- * The customer's link from the courier email (lib/courier-confirm.ts).
- * Public — no login — and read-only: only the button confirms, because mail
- * scanners open links. Never cached, never indexed, and the token is kept
- * out of any Referer header.
+ * The link in courier emails sent before 2026-11-18 (lib/courier-confirm.ts).
+ * Customers no longer confirm anything: the page only shows the delivery.
+ * New emails carry no link. Public — no login — never cached, never indexed,
+ * and the token is kept out of any Referer header.
  */
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: "Confirm your delivery",
+  title: "Your delivery",
   robots: { index: false, follow: false },
   referrer: "no-referrer",
 };
@@ -24,7 +23,7 @@ function Shell({ company, children }: { company: string; children: React.ReactNo
       <div className="w-full max-w-md">
         <p className="font-mono text-xs tracking-[0.2em] text-ink-muted uppercase text-center mb-5">{company}</p>
         <div className="bg-white border border-ink-border rounded-lg shadow-sm overflow-hidden">{children}</div>
-        <p className="text-[11px] text-ink-muted text-center mt-6">Delivery confirmation by Signex</p>
+        <p className="text-[11px] text-ink-muted text-center mt-6">Delivery details by Signex</p>
       </div>
     </main>
   );
@@ -36,7 +35,7 @@ export default async function DeliveryPage({ params }: Props) {
 
   if (found.state === "not_found") {
     return (
-      <Shell company="Delivery confirmation">
+      <Shell company="Delivery details">
         <div className="px-6 py-8 text-center space-y-2">
           <h1 className="text-lg font-medium text-ink-black">This link is not valid</h1>
           <p className="text-sm text-ink-muted">Check that the whole link from the email was opened, or contact the sender.</p>
@@ -51,7 +50,7 @@ export default async function DeliveryPage({ params }: Props) {
         <div className="px-6 py-8 text-center space-y-2">
           <h1 className="text-lg font-medium text-ink-black">This link has expired</h1>
           <p className="text-sm text-ink-muted">
-            If your parcels have arrived, please let {found.companyName} know directly.
+            For the delivery details, please contact {found.companyName} directly.
           </p>
         </div>
       </Shell>
@@ -63,6 +62,7 @@ export default async function DeliveryPage({ params }: Props) {
     ["Customer", v.customerName],
     [v.invoiceNos.length === 1 ? "Invoice" : "Invoices", v.invoiceNos.join(", ")],
     ["Courier", v.courierCompany || "—"],
+    ...(v.courierDriverName ? [["Driver", v.courierDriverName] as [string, string]] : []),
     [v.waybills.length === 1 ? "Waybill" : "Waybills", v.waybills.join(", ") || "—"],
     ...(v.parcels != null ? [["Parcels", String(v.parcels)] as [string, string]] : []),
     ["Collected", v.collectedAt],
@@ -71,9 +71,7 @@ export default async function DeliveryPage({ params }: Props) {
   return (
     <Shell company={v.companyName}>
       <div className="px-6 pt-6 pb-4">
-        <h1 className="text-lg font-medium text-ink-black">
-          {found.state === "confirmed" ? "Delivery confirmed" : "Has your delivery arrived?"}
-        </h1>
+        <h1 className="text-lg font-medium text-ink-black">Collected by courier</h1>
         <p className="text-sm text-ink-muted mt-1">Courier trip sheet {v.courierSheetNo}</p>
       </div>
       <dl className="px-6 pb-5 divide-y divide-ink-border border-y border-ink-border">
@@ -84,9 +82,7 @@ export default async function DeliveryPage({ params }: Props) {
           </div>
         ))}
       </dl>
-      <div className="px-6 py-5">
-        <ConfirmReceived token={token} confirmedAt={v.confirmedAt} expiresOn={v.expiresOn} />
-      </div>
+      <p className="px-6 py-5 text-sm text-ink-muted">There is nothing you need to do. The signed copies were attached to your email.</p>
     </Shell>
   );
 }

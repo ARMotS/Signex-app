@@ -6,9 +6,21 @@ import { useState, useEffect, useCallback } from "react";
 import ScopeSwitcher, { ChooseBranch, ScopeBanner, useScopes } from "@/components/admin/ScopeSwitcher";
 import LogoMark from "@/components/LogoMark";
 import { LiveSyncProvider } from "@/hooks/useLiveSync";
+import type { NavBadges } from "@/lib/nav-badges";
 
 /** A COMPANY_ADMIN's own pages: they work with no branch chosen. */
 const COMPANY_ADMIN_HOME_PAGES = ["/my-branches", "/usage", "/my-admins", "/devices"];
+
+/** A badge never grows wider than three characters. */
+const badgeText = (n: number) => (n > 99 ? "99+" : String(n));
+
+/** Which page each nav badge sits on. */
+const BADGE_KEY: Record<string, keyof NavBadges> = {
+  "/trip-sheet": "tripSheets",
+  "/courier": "courier",
+  "/collections": "collections",
+  "/credits": "credits",
+};
 
 const navItems = [
   {
@@ -273,10 +285,15 @@ export default function AdminLayout({
     checkSession();
   }, [checkSession]);
 
-  // The Courier badge: sheets that need the office. Carried on the live-sync
-  // poll (hidden tabs do not poll); the dashboard carries the detail.
-  const [courierAttention, setCourierAttention] = useState(0);
-  const badgeFor = (href: string) => (href === "/courier" ? courierAttention : 0);
+  // The nav badges: what is still open on each page — that page's Active tab
+  // (lib/nav-badges.ts). Carried on the live-sync poll (hidden tabs do not
+  // poll); the dashboard carries the detail.
+  const [badges, setBadges] = useState<NavBadges | null>(null);
+  const badgeFor = (href: string): number => {
+    if (!badges) return 0;
+    const n = BADGE_KEY[href] ? badges[BADGE_KEY[href]] : 0;
+    return typeof n === "number" && n > 0 ? n : 0;
+  };
 
   const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -327,9 +344,9 @@ export default function AdminLayout({
                 {badgeFor(item.href) > 0 ? (
                   <span
                     className="ml-auto min-w-5 h-5 px-1.5 rounded-full bg-ink-amber text-[11px] leading-5 text-center text-ink-black"
-                    aria-label={`${badgeFor(item.href)} need attention`}
+                    aria-label={`${badgeFor(item.href)} open`}
                   >
-                    {badgeFor(item.href)}
+                    {badgeText(badgeFor(item.href))}
                   </span>
                 ) : (
                   isActive && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-ink-green" />
@@ -420,7 +437,7 @@ export default function AdminLayout({
                     {item.icon}
                     {badgeFor(item.href) > 0 && (
                       <span className="absolute -top-1.5 -right-2.5 min-w-4 h-4 px-1 rounded-full bg-ink-amber text-[10px] leading-4 text-center text-ink-black">
-                        {badgeFor(item.href)}
+                        {badgeText(badgeFor(item.href))}
                       </span>
                     )}
                   </span>
@@ -439,7 +456,7 @@ export default function AdminLayout({
         {/* 16px gutter on a phone: 24px either side left too little room for
             the trip cards and invoice tables. */}
         <main className="flex-1 p-4 sm:p-6 md:p-8 pb-24 md:pb-8 overflow-y-auto bg-ink-surface">
-          <LiveSyncProvider onAuthProblem={checkSession} onAttention={setCourierAttention}>
+          <LiveSyncProvider onAuthProblem={checkSession} onBadges={setBadges}>
             {needsBranch ? <ChooseBranch data={scopes} /> : children}
           </LiveSyncProvider>
         </main>

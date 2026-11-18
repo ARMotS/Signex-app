@@ -281,8 +281,9 @@ describe("todayInJohannesburg", () => {
 });
 
 describe("the Courier page's tabs", () => {
-  it("keeps a sheet Active until the customer confirms it", () => {
-    for (const s of ["NEEDS_ATTENTION", "AWAITING_COLLECTION", "COLLECTED"]) expect(courierTabOf(s)).toBe("active");
-    expect(courierTabOf("DELIVERED")).toBe("completed");
+  it("completes a sheet the moment the courier signs — nothing waits on the customer", () => {
+    for (const s of ["NEEDS_ATTENTION", "AWAITING_COLLECTION"]) expect(courierTabOf(s)).toBe("active");
+    // DELIVERED: a sheet a customer confirmed before confirming was retired.
+    for (const s of ["COLLECTED", "DELIVERED"]) expect(courierTabOf(s)).toBe("completed");
   });
 });

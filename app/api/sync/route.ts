@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getSessionContext } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { buildSyncCursor } from "@/lib/sync-cursor";
-import { courierOverview } from "@/lib/courier-confirm";
+import { navBadges } from "@/lib/nav-badges";
 
 /**
  * GET /api/sync — the change feed.
@@ -35,28 +35,27 @@ export const GET = withAuth(async () => {
   const ctx = await getSessionContext();
   if (ctx.role === "COMPANY_ADMIN" && !ctx.isViewingOtherScope) {
     return NextResponse.json(
-      { cursor: "no-branch", attention: 0 },
+      { cursor: "no-branch", attention: 0, badges: { tripSheets: 0, courier: 0, collections: 0, credits: 0 } },
       { headers: { "Cache-Control": "no-store, must-revalidate" } }
     );
   }
   const isDriver = ctx.role === "DRIVER";
 
-  const [cursor, courier] = await Promise.all([
+  const [cursor, badges] = await Promise.all([
     buildSyncCursor(ctx.tenantId, {
       // For a driver session the session id IS the driver row id, so this needs
       // no extra lookup. Scoping to it is what stops one driver's activity from
       // waking every other device in the fleet.
       driverId: isDriver ? ctx.userId : undefined,
     }),
-    // The office's Courier nav badge rides on this poll instead of a timer of
-    // its own (it was /api/courier/attention, once a minute per tab). Every
-    // other role here is office: a company admin with no branch chosen has
-    // already been answered above. Recomputed every poll, not only when the
-    // cursor moves — "no answer" is reached by the clock, not by a write.
-    isDriver ? null : courierOverview(ctx.tenantId, new Date()),
+    // The office's nav badges ride on this poll instead of timers of their
+    // own (lib/nav-badges.ts). Every other role here is office: a company
+    // admin with no branch chosen has already been answered above.
+    isDriver ? null : navBadges(ctx.tenantId),
   ]);
 
-  return NextResponse.json(courier ? { ...cursor, attention: courier.attention } : cursor, {
+  // `attention` is the Courier badge for tabs still on the previous bundle.
+  return NextResponse.json(badges ? { ...cursor, attention: badges.courier, badges } : cursor, {
     headers: {
       "Cache-Control": "no-store, must-revalidate",
     },

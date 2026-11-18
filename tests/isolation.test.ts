@@ -63,7 +63,7 @@ vi.mock("@/lib/session", async (importOriginal) => ({
  */
 const sentEmails: { to: string; invoiceNumber: string }[] = [];
 /** Courier emails: who they went to, which link they carried, what was attached. */
-const courierEmails: { to: string; confirmUrl: string; invoiceNos: string[]; attachments: Buffer[] }[] = [];
+const courierEmails: { to: string; courierCompany: string; courierDriverName?: string; invoiceNos: string[]; attachments: Buffer[] }[] = [];
 const courierMail = { fail: false };
 /** Signed credit notes emailed to customers: who, which note, what was attached. */
 const creditEmails: { to: string; creditNo: string; attachment: Buffer | null }[] = [];
@@ -79,11 +79,12 @@ vi.mock("@/lib/email", () => ({
     }
   ),
   sendCourierDispatch: vi.fn(
-    async (p: { customerEmail: string; confirmUrl: string; invoiceNos: string[]; attachments: { content: Buffer }[] }) => {
+    async (p: { customerEmail: string; courierCompany: string; courierDriverName?: string; invoiceNos: string[]; attachments: { content: Buffer }[] }) => {
       if (courierMail.fail) return { success: false, error: "550 mailbox unavailable" };
       courierEmails.push({
         to: p.customerEmail,
-        confirmUrl: p.confirmUrl,
+        courierCompany: p.courierCompany,
+        courierDriverName: p.courierDriverName,
         invoiceNos: p.invoiceNos,
         attachments: p.attachments.map((a) => a.content),
       });
@@ -1530,13 +1531,17 @@ suite("cross-ADMIN isolation", () => {
         expect(await db().courierTripSheet.count({ where: { tenantId: f.b.tenantId, status: "COLLECTED" } })).toBe(0);
 
         // Once filed, the customer's email went to A's own contact, carrying
-        // the stamped copy and a link to this sheet.
+        // the stamped copy and naming the courier and its driver — no link,
+        // nothing to confirm: the sheet is complete.
         expect(courierEmails).toHaveLength(1);
-        expect(courierEmails[0]).toMatchObject({ to: "acme-a@example.test", invoiceNos: ["7105"] });
+        expect(courierEmails[0]).toMatchObject({
+          to: "acme-a@example.test",
+          invoiceNos: ["7105"],
+          courierCompany: "The Courier Guy",
+          courierDriverName: "Sipho K",
+        });
         expect(courierEmails[0].attachments.map((b) => b.equals(uploads[0].body))).toEqual([true]);
-        const token = courierEmails[0].confirmUrl.split("/delivery/")[1];
-        const { hashConfirmToken } = await import("@/lib/courier-confirm");
-        expect(after.confirmTokenHash).toBe(hashConfirmToken(token));
+        expect(after.confirmTokenHash).toBeNull();
         expect(after).toMatchObject({ emailStatus: "SENT", emailRecipient: "acme-a@example.test" });
       });
 
@@ -1579,12 +1584,12 @@ suite("cross-ADMIN isolation", () => {
       });
     });
 
-    // ── The customer's confirmation ──
+    // ── The customer's confirmation email ──
     //
-    // The customer's link carries no scope and no session — the token is the
-    // credential. It must find only its own sheet; the daily job reads every
-    // scope and must mail each customer from their own scope's contact; and
-    // the office's counts read only their own sheets.
+    // An older email's link carries no scope and no session — the token is
+    // the credential. It must find only its own sheet; the daily job reads
+    // every scope and must mail each customer from their own scope's
+    // contact; and the office's counts read only their own sheets.
     describe("customer confirmation", () => {
       /** A sheet the courier has signed for and whose copies are all filed. */
       async function collectedSheet(fx: typeof f.a, no: string, customerName = "Acme Trading") {
@@ -1595,6 +1600,7 @@ suite("cross-ADMIN isolation", () => {
             sheetDate: new Date("2026-10-22"),
             customerName,
             courierCompany: "The Courier Guy",
+            courierDriverName: "Sipho K",
             sourceFileName: `cts-${no}-p5.xlsx`,
             importedById: fx.admin.id,
             status: "COLLECTED",
@@ -1616,21 +1622,21 @@ suite("cross-ADMIN isolation", () => {
         return { status: res.status, body: await res.json() };
       }
 
-      async function confirm(token: string) {
-        const { POST } = await import("@/app/api/public/delivery/[token]/confirm/route");
-        useSession(null);
-        const res = await POST(req(`/api/public/delivery/${token}/confirm`, { method: "POST" }), params({ token }));
-        return { status: res.status, body: await res.json() };
+      /** A link as emails sent before 2026-11-18 carried it (no new ones are issued). */
+      async function oldLink(id: string, expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000)) {
+        const crypto = await import("crypto");
+        const { hashConfirmToken } = await import("@/lib/courier-confirm");
+        const token = crypto.randomBytes(32).toString("base64url");
+        await db().courierTripSheet.update({ where: { id }, data: { confirmTokenHash: hashConfirmToken(token), confirmTokenExpiresAt: expiresAt } });
+        return token;
       }
-
-      const tokenOf = (url: string) => url.split("/delivery/")[1];
 
       beforeEach(() => {
         courierEmails.length = 0;
         courierMail.fail = false;
       });
 
-      it("the email goes to the caller's own customer with a link to the caller's own sheet; another scope's sheet is 404", async () => {
+      it("the email goes to the caller's own customer, names the courier and its driver, and carries no link; another scope's sheet is 404", async () => {
         const a = await collectedSheet(f.a, "720001");
         const b = await collectedSheet(f.b, "720001");
 
@@ -1639,75 +1645,56 @@ suite("cross-ADMIN isolation", () => {
         expect(sent.body).toMatchObject({ outcome: "sent", recipient: "acme-a@example.test" });
         expect(courierEmails.map((e) => e.to)).toEqual(["acme-a@example.test"]);
 
-        // Never the token or its hash back to the browser.
+        expect(courierEmails[0]).toMatchObject({ courierCompany: "The Courier Guy", courierDriverName: "Sipho K" });
+        // Nothing for the customer to press: no link is issued any more.
         const row = await db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } });
-        const token = tokenOf(courierEmails[0].confirmUrl);
-        expect(JSON.stringify(sent.body)).not.toContain(token);
-        expect(JSON.stringify(sent.body)).not.toContain(row.confirmTokenHash!);
-        expect(row.confirmTokenEnc).not.toContain(token);
+        expect(row).toMatchObject({ confirmTokenHash: null, confirmTokenEnc: null, status: "COLLECTED" });
 
         expect((await notify(f.a, b.id)).status).toBe(404);
         expect((await notify(null, a.id)).status).toBe(403);
         expect(courierEmails).toHaveLength(1);
         expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: b.id } })).emailStatus).toBe("NOT_SENT");
 
-        // A second Send does not mail again; Resend (force) does, with the same link.
+        // A second Send does not mail again; Resend (force) does.
         expect((await notify(f.a, a.id)).body.outcome).toBe("already_sent");
         expect((await notify(f.a, a.id, { force: true })).body.outcome).toBe("sent");
-        expect(courierEmails.map((e) => tokenOf(e.confirmUrl))).toEqual([token, token]);
+        expect(courierEmails.map((e) => e.to)).toEqual(["acme-a@example.test", "acme-a@example.test"]);
+
+        // A sheet a customer confirmed before confirming was retired is completed too: Resend works.
+        await db().courierTripSheet.update({ where: { id: a.id }, data: { status: "DELIVERED" } });
+        expect((await notify(f.a, a.id, { force: true })).body.outcome).toBe("sent");
       });
 
-      it("the link confirms only its own delivery, once; opening it confirms nothing", async () => {
+      it("a link from an older email shows only its own delivery and changes nothing", async () => {
         const a = await collectedSheet(f.a, "720002");
         const b = await collectedSheet(f.b, "720002");
+        const [tokenA, tokenB] = [await oldLink(a.id), await oldLink(b.id)];
+        // Sending today issues no link and leaves the old one as it was.
         await notify(f.a, a.id);
         await notify(f.b, b.id);
-        const [tokenA, tokenB] = courierEmails.map((e) => tokenOf(e.confirmUrl));
         expect(courierEmails.map((e) => e.to)).toEqual(["acme-a@example.test", "acme-b@example.test"]);
-        expect(tokenA).not.toBe(tokenB);
 
         const { readDelivery } = await import("@/lib/courier-confirm");
         const seen = await readDelivery(tokenA);
         expect(seen.state).toBe("open");
-        expect(seen.state === "open" && seen.view).toMatchObject({ courierSheetNo: "720002", invoiceNos: ["720002"] });
+        expect(seen.state === "open" && seen.view).toMatchObject({
+          courierSheetNo: "720002",
+          invoiceNos: ["720002"],
+          courierDriverName: "Sipho K",
+          companyName: `Branch ${f.a.tenantId.slice(-4)}`,
+        });
+        const seenB = await readDelivery(tokenB);
+        expect(seenB.state === "open" && seenB.view.companyName).toBe(`Branch ${f.b.tenantId.slice(-4)}`);
         expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } })).status).toBe("COLLECTED");
-
-        const done = await confirm(tokenA);
-        expect(done.status).toBe(200);
-        expect(done.body.outcome).toBe("confirmed");
-        const [afterA, afterB] = await Promise.all([
-          db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } }),
-          db().courierTripSheet.findUniqueOrThrow({ where: { id: b.id } }),
-        ]);
-        expect(afterA.status).toBe("DELIVERED");
-        expect(afterA.confirmedAt).not.toBeNull();
-        expect(afterB).toMatchObject({ status: "COLLECTED", confirmedAt: null });
-
-        const again = await confirm(tokenA);
-        expect(again.body.outcome).toBe("already_confirmed");
-        expect((await readDelivery(tokenA)).state).toBe("confirmed");
 
         // Made-up or mangled tokens find nothing.
-        expect((await confirm("A".repeat(43))).status).toBe(404);
-        expect((await confirm("not-a-token")).status).toBe(404);
-        expect((await confirm(tokenB.slice(0, 42) + (tokenB.endsWith("A") ? "B" : "A"))).status).toBe(404);
+        expect((await readDelivery("A".repeat(43))).state).toBe("not_found");
+        expect((await readDelivery("not-a-token")).state).toBe("not_found");
+        expect((await readDelivery(tokenB.slice(0, 42) + (tokenB.endsWith("A") ? "B" : "A"))).state).toBe("not_found");
 
-        // Recorded in A's own history; the office cannot email a confirmed delivery.
-        const log = await db().auditLog.findFirst({ where: { entityId: a.id, details: { contains: "confirmed the delivery" } } });
-        expect(log?.tenantId).toBe(f.a.tenantId);
-        expect((await notify(f.a, a.id, { force: true })).status).toBe(409);
-      });
-
-      it("an expired link confirms nothing", async () => {
-        const a = await collectedSheet(f.a, "720003");
-        await notify(f.a, a.id);
-        const token = tokenOf(courierEmails[0].confirmUrl);
-        await db().courierTripSheet.update({ where: { id: a.id }, data: { confirmTokenExpiresAt: new Date(Date.now() - 1000) } });
-
-        expect((await confirm(token)).status).toBe(410);
-        const { readDelivery } = await import("@/lib/courier-confirm");
-        expect((await readDelivery(token)).state).toBe("expired");
-        expect((await db().courierTripSheet.findUniqueOrThrow({ where: { id: a.id } })).status).toBe("COLLECTED");
+        // Expired: the page says so and shows nothing.
+        const expired = await oldLink(a.id, new Date(Date.now() - 1000));
+        expect((await readDelivery(expired)).state).toBe("expired");
       });
 
       it("an email waiting for an address goes when the caller adds one — to the caller's customer only", async () => {
@@ -1767,51 +1754,77 @@ suite("cross-ADMIN isolation", () => {
         }
       });
 
-      it("the badge and the dashboard count only the caller's own courier sheets", async () => {
+      it("the nav badges and the dashboard count only the caller's own open work", async () => {
         const attention = await import("@/app/api/courier/attention/route");
-        const count = async (fx: typeof f.a) => {
-          useSession(adminSession(fx));
-          return (await (await attention.GET(req("/api/courier/attention"))).json()).attention as number;
-        };
-        const [beforeA, beforeB] = [await count(f.a), await count(f.b)];
-        const b = await collectedSheet(f.b, "720008");
-        await db().courierTripSheet.update({ where: { id: b.id }, data: { emailStatus: "FAILED", emailError: "550" } });
-        expect(await count(f.a)).toBe(beforeA);
-        expect(await count(f.b)).toBe(beforeB + 1);
-
-        const { GET } = await import("@/app/api/dashboard/route");
-        useSession(adminSession(f.a));
-        const dash = await (await GET(req("/api/dashboard"))).json();
-        expect(dash.courier.attention).toBe(beforeA);
-        expect(JSON.stringify(dash.courier)).not.toContain(b.id);
-
-        // The badge now rides on the change feed every office tab polls.
         const sync = await import("@/app/api/sync/route");
-        useSession(adminSession(f.a));
-        expect((await (await sync.GET(req("/api/sync"))).json()).attention).toBe(beforeA);
-        useSession(adminSession(f.b));
-        expect((await (await sync.GET(req("/api/sync"))).json()).attention).toBe(beforeB + 1);
+        type Poll = { attention: number; badges: { tripSheets: number; courier: number; collections: number; credits: number } };
+        const poll = async (fx: typeof f.a) => {
+          useSession(adminSession(fx));
+          return (await (await sync.GET(req("/api/sync"))).json()) as Poll;
+        };
+        const [beforeA, beforeB] = [await poll(f.a), await poll(f.b)];
 
-        useSession(driverSession(f.a));
-        expect((await attention.GET(req("/api/courier/attention"))).status).toBe(403);
-        expect((await (await sync.GET(req("/api/sync"))).json()).attention).toBeUndefined();
-      });
+        // In B: a sheet waiting for the courier, a completed one whose email
+        // failed (completed — off the badge, on the dashboard), and a live run.
+        const waiting = await db().courierTripSheet.create({
+          data: {
+            tenantId: f.b.tenantId,
+            courierSheetNo: "720010",
+            sheetDate: new Date("2026-10-22"),
+            customerName: "Acme Trading",
+            sourceFileName: "cts-720010-p5.xlsx",
+            importedById: f.b.admin.id,
+            status: "AWAITING_COLLECTION",
+          },
+        });
+        const done = await collectedSheet(f.b, "720008");
+        await db().courierTripSheet.update({ where: { id: done.id }, data: { emailStatus: "FAILED", emailError: "550" } });
+        const trip = await db().tripSheet.create({
+          data: { tenantId: f.b.tenantId, sourceFilename: "badge-run.xlsx", uploadedBy: "test", driverId: f.b.driver.id },
+        });
+        try {
+          const [afterA, afterB] = [await poll(f.a), await poll(f.b)];
+          expect(afterA).toMatchObject({ attention: beforeA.attention, badges: beforeA.badges });
+          expect(afterB.badges).toEqual({
+            ...beforeB.badges,
+            courier: beforeB.badges.courier + 1,
+            tripSheets: beforeB.badges.tripSheets + 1,
+          });
+          // Tabs on the previous bundle read `attention` as the Courier badge.
+          expect(afterB.attention).toBe(afterB.badges.courier);
+          // Each badge is that page's Active tab, in the caller's own scope.
+          expect(afterB.badges.tripSheets).toBe(await db().tripSheet.count({ where: { tenantId: f.b.tenantId } }));
+          expect(afterB.badges.courier).toBe(
+            await db().courierTripSheet.count({ where: { tenantId: f.b.tenantId, status: { in: ["NEEDS_ATTENTION", "AWAITING_COLLECTION"] } } })
+          );
+          expect(afterA.badges.credits).toBe(
+            await db().creditNote.count({ where: { tenantId: f.a.tenantId, status: { in: ["RECEIVED", "NEEDS_REVIEW"] } } })
+          );
 
-      it("a customer confirming moves the office's cursor, never a driver's", async () => {
-        const { buildSyncCursor } = await import("@/lib/sync-cursor");
-        const a = await collectedSheet(f.a, "720009");
-        await notify(f.a, a.id);
-        const token = tokenOf(courierEmails[0].confirmUrl);
-        const [officeA, officeB, driverA] = await Promise.all([
-          buildSyncCursor(f.a.tenantId),
-          buildSyncCursor(f.b.tenantId),
-          buildSyncCursor(f.a.tenantId, { driverId: f.a.driver.id }),
-        ]);
-        await new Promise((r) => setTimeout(r, 5));
-        expect((await confirm(token)).body.outcome).toBe("confirmed");
-        expect((await buildSyncCursor(f.a.tenantId)).cursor).not.toBe(officeA.cursor);
-        expect((await buildSyncCursor(f.b.tenantId)).cursor).toBe(officeB.cursor);
-        expect((await buildSyncCursor(f.a.tenantId, { driverId: f.a.driver.id })).cursor).toBe(driverA.cursor);
+          // The old badge route answers the same figure.
+          useSession(adminSession(f.b));
+          expect((await (await attention.GET(req("/api/courier/attention"))).json()).attention).toBe(afterB.badges.courier);
+
+          // The dashboard lists B's failed email in B's card only.
+          const { GET } = await import("@/app/api/dashboard/route");
+          useSession(adminSession(f.a));
+          const dashA = await (await GET(req("/api/dashboard"))).json();
+          expect(JSON.stringify(dashA.courier)).not.toContain(done.id);
+          expect(JSON.stringify(dashA.courier)).not.toContain(waiting.id);
+          useSession(adminSession(f.b));
+          const dashB = await (await GET(req("/api/dashboard"))).json();
+          expect(dashB.courier.items).toContainEqual(expect.objectContaining({ id: done.id, state: "email_problem" }));
+          expect(dashB.courier.awaitingCollection).toBeGreaterThanOrEqual(1);
+
+          useSession(driverSession(f.a));
+          expect((await attention.GET(req("/api/courier/attention"))).status).toBe(403);
+          const driverPoll = await (await sync.GET(req("/api/sync"))).json();
+          expect(driverPoll.attention).toBeUndefined();
+          expect(driverPoll.badges).toBeUndefined();
+        } finally {
+          await db().tripSheet.delete({ where: { id: trip.id } });
+          await db().courierTripSheet.delete({ where: { id: waiting.id } });
+        }
       });
     });
 
@@ -6070,9 +6083,9 @@ suite("cross-ADMIN isolation", () => {
         },
       });
 
-    it("sorts by status, moves a sheet when its status changes, and deletes only before the handover", async () => {
+    it("sorts by status, completes a sheet when the courier signs, and deletes only before the handover", async () => {
       const open = await sheet(f.a, "TAB-1", "AWAITING_COLLECTION");
-      const signed = await sheet(f.a, "TAB-2", "COLLECTED");
+      const signed = await sheet(f.a, "TAB-2", "AWAITING_COLLECTION");
       const done = await sheet(f.a, "TAB-3", "DELIVERED");
       const other = await sheet(f.b, "TAB-4", "DELIVERED");
       const { GET } = await import("@/app/api/courier/route");
@@ -6086,7 +6099,8 @@ suite("cross-ADMIN isolation", () => {
         expect(await list("active")).toEqual(["TAB-1", "TAB-2"]);
         expect(await list("completed")).toEqual(["TAB-3"]);
 
-        await db().courierTripSheet.update({ where: { id: signed.id }, data: { status: "DELIVERED" } });
+        // The courier signing (COLLECTED) is what completes it — nothing waits on the customer.
+        await db().courierTripSheet.update({ where: { id: signed.id }, data: { status: "COLLECTED" } });
         expect(await list("active")).toEqual(["TAB-1"]);
         expect(await list("completed")).toEqual(["TAB-2", "TAB-3"]);
 
@@ -6921,7 +6935,7 @@ suite("cross-ADMIN isolation", () => {
       const dashboard = await import("@/app/api/dashboard/route");
       expect((await drivers.GET(req("/api/drivers"))).status).toBe(403);
       // The live-sync poll answers (it carries the session check), with no data.
-      expect(await (await sync.GET(req("/api/sync"))).json()).toEqual({ cursor: "no-branch", attention: 0 });
+      expect(await (await sync.GET(req("/api/sync"))).json()).toEqual({ cursor: "no-branch", attention: 0, badges: { tripSheets: 0, courier: 0, collections: 0, credits: 0 } });
       expect((await dashboard.GET(req("/api/dashboard"))).status).toBe(403);
     });
 
@@ -7467,7 +7481,7 @@ suite("cross-ADMIN isolation", () => {
       useSession(companyAdminSession(lead, null));
       const res = await sync.GET(req("/api/sync"));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ cursor: "no-branch", attention: 0 });
+      expect(await res.json()).toEqual({ cursor: "no-branch", attention: 0, badges: { tripSheets: 0, courier: 0, collections: 0, credits: 0 } });
     });
   });
   // ── Paged lists: Courier, Credits, Collections, and the Invoices listing ──

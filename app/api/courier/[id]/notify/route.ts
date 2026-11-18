@@ -12,14 +12,12 @@ export const maxDuration = 60;
 const STATUS: Partial<Record<CourierEmailOutcome, number>> = {
   not_found: 404,
   not_ready: 409,
-  confirmed: 409,
   in_flight: 409,
 };
 
 const MESSAGE: Partial<Record<CourierEmailOutcome, string>> = {
   not_found: "Courier trip sheet not found",
   not_ready: "The email goes once the courier has signed and every signed copy is filed.",
-  confirmed: "The customer has already confirmed this delivery.",
   in_flight: "The email is being sent right now.",
   no_email: "There is no email address for this customer — add one to their contact first.",
 };

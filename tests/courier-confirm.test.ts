@@ -1,29 +1,21 @@
 /**
- * The customer's side of a courier delivery, without a database: the link's
- * token, where links point, what state a sheet is
- * in, and what the email says.
+ * The customer's side of a courier delivery, without a database: older
+ * emails' link tokens, where links point, what still follows a completed
+ * sheet, and what the email says.
  */
 
 import { describe, it, expect } from "vitest";
 import { render } from "@react-email/render";
 import crypto from "crypto";
-import {
-  confirmUrl,
-  formatDay,
-  hashConfirmToken,
-  newConfirmToken,
-} from "@/lib/courier-confirm";
+import { hashConfirmToken } from "@/lib/courier-confirm";
 import { appBaseUrl } from "@/lib/app-url";
 import { confirmationState } from "@/lib/courier-sheet";
 import { CourierDispatch } from "@/emails/CourierDispatch";
 
-describe("the link's token", () => {
-  it("is 32 random bytes, looked up by its SHA-256", () => {
-    const { token, hash } = newConfirmToken();
-    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(hash).toBe(crypto.createHash("sha256").update(token).digest("hex"));
-    expect(hashConfirmToken(token)).toBe(hash);
-    expect(newConfirmToken().token).not.toBe(token);
+describe("an older email's link token", () => {
+  it("is looked up by its SHA-256", () => {
+    const token = crypto.randomBytes(32).toString("base64url");
+    expect(hashConfirmToken(token)).toBe(crypto.createHash("sha256").update(token).digest("hex"));
   });
 
   it("anything that cannot be one of our tokens is never looked up", () => {
@@ -32,9 +24,6 @@ describe("the link's token", () => {
     }
   });
 
-  it("goes in a /delivery link", () => {
-    expect(confirmUrl("abc", "https://signex-app.vercel.app")).toBe("https://signex-app.vercel.app/delivery/abc");
-  });
 });
 
 describe("appBaseUrl", () => {
@@ -61,22 +50,18 @@ describe("appBaseUrl", () => {
 });
 
 describe("confirmationState", () => {
-  const base = { status: "COLLECTED", filingCompletedAt: new Date(), emailStatus: "SENT", reminderSentAt: null, confirmedAt: null };
-  const now = new Date("2026-10-23T10:00:00Z");
+  const base = { status: "COLLECTED", filingCompletedAt: new Date(), emailStatus: "SENT" };
 
-  it("reads where a collected sheet stands with its customer", () => {
+  it("reads what still follows a completed sheet", () => {
     expect(confirmationState({ ...base, status: "AWAITING_COLLECTION" })).toBeNull();
+    expect(confirmationState({ ...base, status: "NEEDS_ATTENTION" })).toBeNull();
     expect(confirmationState({ ...base, filingCompletedAt: null })).toBe("filing");
     expect(confirmationState({ ...base, emailStatus: "NO_EMAIL" })).toBe("email_problem");
     expect(confirmationState({ ...base, emailStatus: "FAILED" })).toBe("email_problem");
     expect(confirmationState({ ...base, emailStatus: "NOT_SENT" })).toBe("sending");
-    expect(confirmationState(base)).toBe("awaiting");
-    expect(confirmationState({ ...base, status: "DELIVERED", confirmedAt: now })).toBe("confirmed");
-  });
-
-  it("asks the office to phone two days after the reminder", () => {
-    expect(confirmationState({ ...base, reminderSentAt: "2026-10-22T06:00:00Z" }, now)).toBe("reminded");
-    expect(confirmationState({ ...base, reminderSentAt: "2026-10-21T06:00:00Z" }, now)).toBe("no_answer");
+    expect(confirmationState(base)).toBe("emailed");
+    // Confirmed by a customer before confirming was retired: the same.
+    expect(confirmationState({ ...base, status: "DELIVERED" })).toBe("emailed");
   });
 });
 
@@ -91,16 +76,27 @@ describe("the email", () => {
     parcels: 3,
     invoiceNos: ["634573", "634574"],
     collectedAt: "23/10/2026, 09:47",
-    confirmUrl: "https://signex-app.vercel.app/delivery/TOKEN",
-    expiresOn: formatDay(new Date("2026-11-22T10:00:00Z")),
+    courierDriverName: "Sipho Ndlovu",
   };
 
-  it("names the invoices, the courier and the link — and the link's last day", async () => {
+  it("names the invoices, the courier company and its driver", async () => {
     const html = await render(CourierDispatch({ ...props, attached: 2 }));
-    for (const s of ["634573, 634574", "The Courier Guy", "W500", "200189", 'href="https://signex-app.vercel.app/delivery/TOKEN"', "Confirm received", "22 Nov 2026", "Hi Jo"]) {
+    for (const s of ["634573, 634574", "The Courier Guy", "Courier driver", "Sipho Ndlovu", "W500", "200189", "23/10/2026, 09:47", "Hi Jo", "Collected by courier"]) {
       expect(html).toContain(s);
     }
     expect(html).toContain("copies of your 2 invoices are");
+  });
+
+  it("asks the customer for nothing: no button, no link", async () => {
+    const html = await render(CourierDispatch({ ...props, attached: 2 }));
+    expect(html).not.toContain("Confirm received");
+    expect(html).not.toContain("/delivery/");
+    expect(html).not.toMatch(/<as/i);
+  });
+
+  it("leaves the driver row out when no name was recorded", async () => {
+    const html = await render(CourierDispatch({ ...props, courierDriverName: undefined, attached: 0 }));
+    expect(html).not.toContain("Courier driver");
   });
 
   it("says which copies could not be attached", async () => {

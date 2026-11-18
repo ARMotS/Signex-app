@@ -3,7 +3,8 @@
 /**
  * Courier: invoices that leave with a courier rather than one of our drivers.
  * One sheet per customer, imported from the Trip application's export; the
- * courier driver signs for it at the office and the customer confirms receipt.
+ * courier driver signs for it at the office, which completes it, and the
+ * customer is emailed the signed copies.
  * See lib/courier-import.ts.
  */
 
@@ -12,6 +13,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   COURIER_ACTIVE_STATUSES,
+  COURIER_COMPLETED_STATUSES,
   COURIER_OPEN_STATUSES,
   courierTabOf,
   type ConfirmationState,
@@ -52,10 +54,7 @@ const CONFIRMATION_NOTE: Record<ConfirmationState, { text: string; tone: "muted"
   filing: { text: "Copies not filed", tone: "red" },
   email_problem: { text: "Email not sent", tone: "amber" },
   sending: { text: "Emailing customer", tone: "muted" },
-  awaiting: { text: "Awaiting confirmation", tone: "muted" },
-  reminded: { text: "Reminder sent", tone: "muted" },
-  no_answer: { text: "No answer — phone them", tone: "red" },
-  confirmed: null,
+  emailed: null,
 };
 
 /** The list's filters and page, as the URL carries them. */
@@ -197,7 +196,7 @@ export default function CourierPage() {
     return () => clearInterval(timer);
   }, [view, load]);
 
-  // A sheet changes tab the moment a customer confirms it.
+  // A sheet changes tab the moment the courier signs for it (on any device).
   useLiveSync(() => {
     if (view) void load(view);
   });
@@ -236,6 +235,7 @@ export default function CourierPage() {
     }
   };
   const activeCount = COURIER_ACTIVE_STATUSES.reduce((n, s) => n + (counts[s] ?? 0), 0);
+  const completedCount = COURIER_COMPLETED_STATUSES.reduce((n, s) => n + (counts[s] ?? 0), 0);
 
   return (
     <div className="animate-fade-in">
@@ -243,8 +243,8 @@ export default function CourierPage() {
         <div className="flex-1 min-w-[16rem]">
           <h1 className="font-mono text-lg font-medium text-ink-black">Courier</h1>
           <p className="text-sm text-ink-muted mt-1">
-            Invoices sent with a courier. The courier driver signs for the sheet here; the customer confirms receipt
-            from their email.
+            Invoices sent with a courier. The courier driver signs for the sheet here, which completes it; the
+            customer is emailed the signed copies.
           </p>
         </div>
         <button
@@ -277,7 +277,7 @@ export default function CourierPage() {
           onChange={(tab) => change({ tab, status: "ALL" })}
           tabs={[
             { id: "active" as const, label: "Active Sheets", short: "Active", count: activeCount },
-            { id: "completed" as const, label: "Completed", short: "Completed", count: counts.DELIVERED ?? 0 },
+            { id: "completed" as const, label: "Completed", short: "Completed", count: completedCount },
           ]}
         />
         <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b border-ink-border bg-ink-surface/30">
@@ -327,7 +327,7 @@ export default function CourierPage() {
               : !v.q && !v.from && !v.to && status === "ALL"
                 ? v.tab === "active"
                   ? "No active courier trip sheets."
-                  : "No sheets have been confirmed by the customer yet."
+                  : "No completed sheets yet. A sheet is completed when the courier signs for it."
                 : "Nothing matches these filters."}
           </p>
         ) : (
