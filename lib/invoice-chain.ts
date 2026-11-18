@@ -118,6 +118,9 @@ export function chainTone(status: ChainStatus): "idle" | "green" | "amber" | "vi
 
 // ─── A page of invoices at once (the Invoices tab) ───────────────────────
 
+/** Above this many ids, read the scope's rows instead of sending an IN list. */
+export const WIDE_IN_LIST = 500;
+
 /**
  * The chain status of each invoice, in two queries for the whole page.
  * `delivered` says which have a signed copy filed.
@@ -130,10 +133,14 @@ export async function chainStatuses(
   const result = new Map<string, ChainStatus>();
   if (invoiceIds.length === 0) return result;
   const db = scopedPrisma(tenantId);
+  // A whole folder of ids (thousands) costs more as an IN list than reading
+  // the rows in this scope that point at any invoice and keeping those asked for.
+  const wanted = new Set(invoiceIds);
+  const byInvoice = invoiceIds.length > WIDE_IN_LIST ? { not: null } : { in: invoiceIds };
 
   const [collections, notes] = await Promise.all([
     db.collection.findMany({
-      where: { invoiceId: { in: invoiceIds } },
+      where: { invoiceId: byInvoice },
       select: {
         id: true,
         invoiceId: true,
@@ -145,7 +152,7 @@ export async function chainStatuses(
       },
     }),
     db.creditNote.findMany({
-      where: { invoiceId: { in: invoiceIds }, status: { not: "REJECTED" } },
+      where: { invoiceId: byInvoice, status: { not: "REJECTED" } },
       select: {
         invoiceId: true,
         status: true,
@@ -155,8 +162,23 @@ export async function chainStatuses(
     }),
   ]);
 
+  // Grouped once: filtering both lists per invoice was invoices × rows on a
+  // folder of thousands.
+  const group = <T extends { invoiceId: string | null }>(rows: T[]) => {
+    const by = new Map<string, T[]>();
+    for (const r of rows) {
+      if (!r.invoiceId || !wanted.has(r.invoiceId)) continue;
+      const list = by.get(r.invoiceId);
+      if (list) list.push(r);
+      else by.set(r.invoiceId, [r]);
+    }
+    return by;
+  };
+  const notesBy = group(notes);
+  const collectionsBy = group(collections);
+
   for (const id of invoiceIds) {
-    const mine = notes.filter((n) => n.invoiceId === id);
+    const mine = notesBy.get(id) ?? [];
     const creditedByLine = new Map<string, number>();
     const creditedCollectionIds = new Set<string>();
     for (const n of mine.filter((n) => n.status === "SIGNED")) {
@@ -169,7 +191,7 @@ export async function chainStatuses(
       id,
       chainStatus({
         delivered: delivered.get(id) ?? false,
-        collections: collections.filter((c) => c.invoiceId === id),
+        collections: collectionsBy.get(id) ?? [],
         creditNoteStatuses: mine.map((n) => n.status),
         creditedByLine,
         creditedCollectionIds,

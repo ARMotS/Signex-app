@@ -97,6 +97,7 @@ model Tenant {
   courierTripSheets CourierTripSheet[]
   courierTripSheetInvoices CourierTripSheetInvoice[]
   courierImportFailures CourierImportFailure[]
+  invoiceFolderFiles InvoiceFolderFile[]
 
   // Composite-FK target: an allocation names a branch together with its
   // company and kind, so allocating across companies, or allocating anything
@@ -894,6 +895,24 @@ model CloudAccount {
   /// Last look at the courier folder — throttles the automatic check.
   courierCheckedAt    DateTime?
   courierError        String?  @db.Text
+  /// Invoice folder index (InvoiceFolderFile, lib/invoice-index-sync.ts).
+  /// The invoice folder the index was built for: a different folder chosen in
+  /// Settings starts the index again from nothing.
+  invoiceIndexFolderId  String?
+  /// The invoice folder's "signed" subfolder, as the index last saw it.
+  invoiceSignedFolderId String?
+  /// Graph's link to carry on from: a nextLink while the first pass is still
+  /// under way, the deltaLink once it has finished.
+  invoiceDeltaLink      String?   @db.Text
+  /// When the first full pass finished. Null: the index is not complete and
+  /// the Invoices tab lists the folder itself, as it always did.
+  invoiceIndexReadyAt   DateTime?
+  /// Last look at the invoice folder — throttles the automatic check.
+  invoiceCheckedAt      DateTime?
+  /// Last look that worked, for the tab's "Checked … ago".
+  invoiceIndexSyncedAt  DateTime?
+  /// Why the last look failed. Null when it worked.
+  invoiceIndexError     String?   @db.Text
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -1111,6 +1130,37 @@ model CourierImportFailure {
 
   @@unique([tenantId, itemId])
   @@index([tenantId])
+}
+
+/// The invoice folder as OneDrive last told us — what the Invoices tab reads,
+/// instead of listing the folder over Graph on every load. One row per PDF
+/// anywhere under the invoice folder; which ones are originals (parent = the
+/// invoice folder) and which are signed copies (parent = its "signed"
+/// subfolder) is worked out when it is read, so a folder moved or renamed
+/// never leaves a row filed under the wrong heading.
+///
+/// A cache, never an authority: kept current by Graph delta and by Signex's
+/// own writes (lib/invoice-index.ts). Matching, deploys and signing still read
+/// the folder itself. Not workspace data — the admin delete removes it.
+model InvoiceFolderFile {
+  id         String   @id @default(cuid())
+  tenantId   String   @default("")
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  /// OneDrive item id — follows the file through renames and moves.
+  itemId     String
+  /// The folder it sits in.
+  parentId   String
+  filename   String
+  /// lower(filename): OneDrive names are case-insensitive, and an original
+  /// counts as signed when signed/ holds the same name.
+  nameKey    String
+  sizeBytes  Int      @default(0)
+  modifiedAt DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([tenantId, itemId])
+  @@index([tenantId, parentId])
 }
 
 // ─── Imported Files (Trip Sheet Cloud Folder Tracking) ────────────────────

@@ -105,6 +105,24 @@ interface InvoiceData {
   unsignedCount: number;
   invoices: InvoiceFile[];
   duplicates?: DuplicateGroup[];
+  /** The invoice folder index (lib/invoice-index.ts). Absent from an older server. */
+  index?: {
+    state: "ready" | "building" | "off";
+    syncedAt: string | null;
+    error: string | null;
+  };
+}
+
+/** "just now", "4 min ago", "2 h ago" — how fresh the index is. */
+function checkedAgo(iso: string | null): string | null {
+  if (!iso) return null;
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return null;
+  const min = Math.floor(ms / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min} min ago`;
+  const h = Math.floor(min / 60);
+  return h < 24 ? `${h} h ago` : `${Math.floor(h / 24)} d ago`;
 }
 
 export default function InvoicesPage() {
@@ -206,10 +224,29 @@ export default function InvoicesPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  /** Reload without the spinner — the follow-up after a background folder look. */
+  const refreshQuietly = useCallback(() => {
+    fetch("/api/invoices")
+      .then((res) => res.json())
+      .then((json) => {
+        if (!json.error) setData(json);
+      })
+      .catch(() => {});
+  }, []);
+
+  const indexState = data?.index?.state;
   const syncInvoices = useCallback(() => {
     setSyncing(true);
     setError(null);
-    fetch("/api/invoices")
+    // With the index built, Sync first asks OneDrive what changed (usually one
+    // small request), then reloads. A failed check still reloads: the list
+    // shows what was last seen, and the folder bar says the check failed.
+    const check =
+      indexState === "ready"
+        ? fetch("/api/invoices/sync", { method: "POST" }).catch(() => undefined)
+        : Promise.resolve(undefined);
+    check
+      .then(() => fetch("/api/invoices"))
       .then((res) => res.json())
       .then((json) => {
         if (json.error) {
@@ -223,7 +260,20 @@ export default function InvoicesPage() {
       })
       .catch(() => setError("Failed to connect to server"))
       .finally(() => setSyncing(false));
-  }, []);
+  }, [indexState]);
+
+  // Opening the tab answers from the index and starts a look at the folder
+  // after the response. When the index was more than a minute old, reload
+  // once, quietly, a few seconds later to pick up what that look found.
+  const followedUp = useRef(false);
+  useEffect(() => {
+    if (followedUp.current || data?.index?.state !== "ready") return;
+    const synced = data.index.syncedAt ? Date.parse(data.index.syncedAt) : NaN;
+    if (Number.isFinite(synced) && Date.now() - synced < 60_000) return;
+    followedUp.current = true;
+    const timer = setTimeout(refreshQuietly, 8_000);
+    return () => clearTimeout(timer);
+  }, [data, refreshQuietly]);
 
   /**
    * Send PDFs to the invoice folder, one request each.
@@ -569,6 +619,21 @@ export default function InvoicesPage() {
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
           </svg>
           <span className="text-xs font-mono text-ink-muted truncate">{data.folder}</span>
+          {data.index?.state === "ready" && (
+            <span
+              className={`ml-auto shrink-0 max-w-[55%] truncate text-[11px] font-mono ${data.index.error ? "text-ink-amber" : "text-ink-muted"}`}
+              title={data.index.error ?? undefined}
+            >
+              {data.index.error
+                ? "Last check failed — showing what was last seen"
+                : `Checked ${checkedAgo(data.index.syncedAt) ?? "—"}`}
+            </span>
+          )}
+          {data.index?.state === "building" && (
+            <span className="ml-auto shrink-0 max-w-[55%] truncate text-[11px] font-mono text-ink-muted" title={data.index.error ?? undefined}>
+              Indexing the folder — loads get quicker once this is done
+            </span>
+          )}
         </div>
       )}
 

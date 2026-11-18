@@ -33,6 +33,7 @@ import {
   uploadSignedInvoiceToOneDrive,
   uploadFileToFolder,
 } from "./microsoft-graph";
+import { forgetInvoiceFolderItems, recordInvoiceFolderWrite } from "./invoice-index";
 
 /** Default fallback folder (relative to project root) */
 const DEFAULT_FOLDER = path.join(process.cwd(), "invoices");
@@ -240,8 +241,11 @@ export async function saveSignedInvoiceDetailed(
   const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
     try {
-      const itemId = await uploadSignedInvoiceToOneDrive(tenantId, filename, pdfBuffer);
-      return { path: `onedrive://signed/${filename}`, itemId };
+      const item = await uploadSignedInvoiceToOneDrive(tenantId, filename, pdfBuffer);
+      // The Invoices tab shows it signed at once, not at the next folder look.
+      // Never throws: the signed copy is already saved.
+      await recordInvoiceFolderWrite(tenantId, item, { signed: true });
+      return { path: `onedrive://signed/${filename}`, itemId: item?.id ?? null };
     } catch (err) {
       console.error("Failed to upload signed invoice to OneDrive:", err);
       throw err;
@@ -641,6 +645,7 @@ export async function deleteInvoiceFile(
       ]);
       if (match) await deleteFileById(tenantId, match.id);
       if (signedMatch) await deleteFileById(tenantId, signedMatch.id);
+      await forgetInvoiceFolderItems(tenantId, [match?.id, signedMatch?.id].filter((id): id is string => !!id));
       return { success: true };
     } catch (err) {
       console.error(`Failed to delete invoice file ${filename} from OneDrive:`, err);
@@ -711,16 +716,21 @@ export async function deleteInvoiceOriginalOnly(
 
   const onedrive = await getOneDriveInvoiceSource(tenantId);
   if (onedrive) {
-    const items = await listOneDriveInvoiceFiles(tenantId);
+    // One addressed lookup per file, not a listing of the whole folder.
+    const gone: string[] = [];
     for (const filename of filenames) {
       try {
-        const match = items.find((i) => i.name === filename);
-        if (match) await deleteFileById(tenantId, match.id);
+        const match = await getInvoiceItemByName(tenantId, filename);
+        if (match) {
+          await deleteFileById(tenantId, match.id);
+          gone.push(match.id);
+        }
         deleted++;
       } catch {
         failed.push(filename);
       }
     }
+    await forgetInvoiceFolderItems(tenantId, gone);
     return { deleted, failed };
   }
 
@@ -965,13 +975,18 @@ export async function saveInvoiceFile(
         }
       }
 
-      await uploadFileToFolder(
+      const item = await uploadFileToFolder(
         tenantId,
         dest.folderItemId!,
         safe,
         buffer,
         "application/pdf"
       );
+      await recordInvoiceFolderWrite(tenantId, {
+        ...item,
+        name: item?.name ?? safe,
+        parentReference: { id: item?.parentReference?.id ?? dest.folderItemId },
+      });
       return { success: true, filename: safe, location: dest.label };
     } catch (err) {
       console.error(`Failed to upload invoice ${safe} to OneDrive:`, err);

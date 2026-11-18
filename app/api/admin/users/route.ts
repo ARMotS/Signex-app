@@ -610,6 +610,7 @@ export const DELETE = withAuth(async (request: NextRequest) => {
       await tx.appConfig.deleteMany({ where: { tenantId } });
       await tx.importTemplate.deleteMany({ where: { tenantId } });
       await tx.courierImportFailure.deleteMany({ where: { tenantId } });
+      await tx.invoiceFolderFile.deleteMany({ where: { tenantId } });
     }
 
     if (targetUser) {
@@ -640,6 +641,8 @@ export const DELETE = withAuth(async (request: NextRequest) => {
         await tx.importTemplate.deleteMany({ where: { tenantId } });
         // A note about a file in the folder, not workspace data — same reason.
         await tx.courierImportFailure.deleteMany({ where: { tenantId } });
+        // The invoice folder index is a copy of what OneDrive holds — same.
+        await tx.invoiceFolderFile.deleteMany({ where: { tenantId } });
         await tx.tenant.delete({ where: { id: tenantId } });
       }
     }
