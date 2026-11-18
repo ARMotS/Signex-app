@@ -1,65 +1,61 @@
 /**
  * courier-confirm.ts
  * The customer's side of a courier delivery: the email telling them their
- * invoices left with a courier, and the link they press once the parcels
- * arrive. There is no reminder email (removed 2026-11-12 — customers did not
- * answer them, and they ran up the Brevo bill); the office's Resend is the
- * only way a second email goes.
+ * invoices were collected by a courier — which courier, which driver, which
+ * waybills — with the signed copies attached. It is a delivery confirmation,
+ * like the one a customer gets when one of our own drivers delivers: the
+ * customer is asked for nothing (user decision, 2026-11-18). The sheet is
+ * complete the moment the courier driver signs; there is no Confirm received
+ * and no reminder (removed 2026-11-12). The office's Resend is the only way a
+ * second email goes.
  *
- * The first email goes out by itself once every signed copy is filed (it
- * carries them). Like the delivery confirmation, nothing here throws and
- * nothing here can undo the handover: a failure is recorded on the sheet and
- * picked up by the office's Send or the daily job (lib/courier-confirm-job.ts).
- * Sending CLAIMS the sheet first with the same lease as Stop.emailStatus, so
- * the automatic send, the daily job and the office's Send never double-mail.
+ * The email goes out by itself once every signed copy is filed (it carries
+ * them). Like the delivery confirmation, nothing here throws and nothing here
+ * can undo the handover: a failure is recorded on the sheet and picked up by
+ * the office's Send or the daily job (lib/courier-confirm-job.ts). Sending
+ * CLAIMS the sheet first with the same lease as Stop.emailStatus, so the
+ * automatic send, the daily job and the office's Send never double-mail.
  *
- * ── The link ──────────────────────────────────────────────────────────────
- * /delivery/<token>: 32 random bytes, no login, one per sheet, 30 days. It is
- * looked up by its SHA-256 (`confirmTokenHash`), so the database alone holds
- * no working link; a resend carries the SAME link from an encrypted copy
- * (`confirmTokenEnc`, TOKEN_ENCRYPTION_KEY). Opening the link only shows the
- * delivery — confirming is a POST — because mail scanners open links.
- *
- * The token is the credential, the way a session token is: a visit has no
- * session, and the scope is the scope of the row the token finds.
+ * ── Links already sent ────────────────────────────────────────────────────
+ * Emails sent before 2026-11-18 carry a /delivery/<token> link (30 days). The
+ * page still opens, read-only, showing the delivery; nothing confirms any
+ * more and no new link is issued. The token is looked up by its SHA-256
+ * (`confirmTokenHash`) and is the credential, the way a session token is: the
+ * scope is the scope of the row it finds. Once the last link has expired the
+ * page, the lookup and the token columns can go (expand/contract).
  */
 
 import crypto from "crypto";
 import { after } from "next/server";
 import { scopedPrisma, UNSAFE_unscopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
-import { decryptToken, encryptToken } from "./crypto";
 import { sendCourierDispatch } from "./email";
 import { readSignedPdf } from "./delivery-notify";
 import { readDispatchCompany } from "./config";
-import { companyKey, confirmationState, NEEDS_OFFICE, type ConfirmationState } from "./courier-sheet";
+import {
+  COURIER_ACTIVE_STATUSES,
+  COURIER_COMPLETED_STATUSES,
+  companyKey,
+  confirmationState,
+  NEEDS_OFFICE,
+  type ConfirmationState,
+} from "./courier-sheet";
 import { formatStampTime, STAMP_TIME_ZONE } from "./courier-stamp-text";
-import { appBaseUrl } from "./app-url";
 
-export const LINK_DAYS = 30;
-/** Failed first emails the daily job retries by itself; past this, the office's Send. */
+/** Failed emails the daily job retries by itself; past this, the office's Send. */
 export const MAX_AUTO_ATTEMPTS = 5;
 const STALE_CLAIM_MS = 2 * 60 * 1000;
 /** Mail relays refuse large messages; copies past this are named instead of attached. */
 const MAX_ATTACHMENT_BYTES = 15_000_000;
-const DAY_MS = 24 * 60 * 60 * 1000;
+
+const COMPLETED = [...COURIER_COMPLETED_STATUSES];
 
 // ─── Pure parts ──────────────────────────────────────────────────────────
-
-/** A new link token and the hash it is looked up by. */
-export function newConfirmToken(): { token: string; hash: string } {
-  const token = crypto.randomBytes(32).toString("base64url");
-  return { token, hash: hashConfirmToken(token)! };
-}
 
 /** The lookup hash, or null when the string cannot be one of our tokens. */
 export function hashConfirmToken(token: string): string | null {
   if (!/^[A-Za-z0-9_-]{43}$/.test(String(token ?? ""))) return null;
   return crypto.createHash("sha256").update(token).digest("hex");
-}
-
-export function confirmUrl(token: string, base = appBaseUrl()): string {
-  return `${base}/delivery/${token}`;
 }
 
 /** "22 Nov 2026" in Johannesburg. */
@@ -77,8 +73,6 @@ export type CourierEmailOutcome =
   | "in_flight"
   /** Not collected yet, or its signed copies are not all filed. */
   | "not_ready"
-  /** The customer has already confirmed. */
-  | "confirmed"
   | "not_found";
 
 export interface CourierEmailResult {
@@ -95,6 +89,7 @@ const SHEET_SELECT = {
   contactId: true,
   customerEmail: true,
   courierCompany: true,
+  courierDriverName: true,
   dispatchCompany: true,
   waybills: true,
   parcels: true,
@@ -103,8 +98,6 @@ const SHEET_SELECT = {
   emailStatus: true,
   emailSentAt: true,
   emailRecipient: true,
-  confirmTokenEnc: true,
-  confirmTokenExpiresAt: true,
   invoices: {
     orderBy: { lineNo: "asc" as const },
     select: { invoiceNo: true, signedAt: true, signedFileName: true },
@@ -133,26 +126,8 @@ async function resolveRecipient(tenantId: string, sheet: { contactId: string | n
   return c ? { contactId: c.id, email: c.email?.trim() || null, contactPerson: c.contactPerson } : null;
 }
 
-/** The sheet's link token: the live one, or a new one when there is none or it expired. */
-async function linkToken(tenantId: string, sheet: { id: string; confirmTokenEnc: string | null; confirmTokenExpiresAt: Date | null }) {
-  if (sheet.confirmTokenEnc && sheet.confirmTokenExpiresAt && sheet.confirmTokenExpiresAt > new Date()) {
-    try {
-      return { token: decryptToken(sheet.confirmTokenEnc), expiresAt: sheet.confirmTokenExpiresAt };
-    } catch {
-      // A rotated key: the old link is unreadable — issue a new one below.
-    }
-  }
-  const { token, hash } = newConfirmToken();
-  const expiresAt = new Date(Date.now() + LINK_DAYS * DAY_MS);
-  await scopedPrisma(tenantId).courierTripSheet.updateMany({
-    where: { id: sheet.id },
-    data: { confirmTokenHash: hash, confirmTokenEnc: encryptToken(token), confirmTokenExpiresAt: expiresAt },
-  });
-  return { token, expiresAt };
-}
-
 /**
- * Send (or with `force`, re-send) the customer's email for one collected
+ * Send (or with `force`, re-send) the customer's email for one completed
  * sheet. Never throws.
  */
 export async function sendCourierConfirmation(
@@ -164,8 +139,9 @@ export async function sendCourierConfirmation(
   try {
     const sheet = await db.courierTripSheet.findFirst({ where: { id }, select: SHEET_SELECT });
     if (!sheet) return { outcome: "not_found" };
-    if (sheet.status === "DELIVERED") return { outcome: "confirmed" };
-    if (sheet.status !== "COLLECTED" || !sheet.filingCompletedAt) return { outcome: "not_ready" };
+    // DELIVERED: a sheet a customer confirmed before confirming was retired —
+    // completed all the same, and the office may still resend its email.
+    if (!(COMPLETED as string[]).includes(sheet.status) || !sheet.filingCompletedAt) return { outcome: "not_ready" };
 
     const recipient = await resolveRecipient(tenantId, sheet);
     if (recipient && recipient.contactId !== sheet.contactId) {
@@ -190,13 +166,12 @@ export async function sendCourierConfirmation(
     ];
     if (opts.force) claimable.push({ emailStatus: "SENT" });
     const claim = await db.courierTripSheet.updateMany({
-      where: { id, status: "COLLECTED", OR: claimable },
+      where: { id, status: { in: COMPLETED }, OR: claimable },
       data: { emailStatus: "SENDING", emailLastAttemptAt: new Date(), emailAttempts: { increment: 1 }, customerEmail: recipient.email },
     });
     if (claim.count === 0) return { outcome: "in_flight", recipient: recipient.email };
 
     // ── Build and send ──
-    const { token, expiresAt } = await linkToken(tenantId, sheet);
     const attachments: { filename: string; content: Buffer }[] = [];
     const notAttached: string[] = [];
     let bytes = 0;
@@ -217,13 +192,12 @@ export async function sendCourierConfirmation(
       contactPerson: recipient.contactPerson ?? undefined,
       companyName,
       courierCompany: sheet.courierCompany || "the courier",
+      courierDriverName: sheet.courierDriverName ?? undefined,
       courierSheetNo: sheet.courierSheetNo,
       waybills: sheet.waybills,
       parcels: sheet.parcels,
       invoiceNos: sheet.invoices.map((i) => i.invoiceNo),
       collectedAt: formatStampTime(sheet.collectedAt ?? new Date()),
-      confirmUrl: confirmUrl(token),
-      expiresOn: formatDay(expiresAt),
       attachments,
       notAttached,
     });
@@ -282,50 +256,43 @@ export async function scheduleCourierConfirmation(tenantId: string, id: string):
  */
 export async function scheduleWaitingCourierEmails(tenantId: string): Promise<void> {
   const waiting = await scopedPrisma(tenantId).courierTripSheet.findMany({
-    where: { status: "COLLECTED", filingCompletedAt: { not: null }, emailStatus: { in: ["NO_EMAIL", "NOT_SENT"] } },
+    where: { status: { in: COMPLETED }, filingCompletedAt: { not: null }, emailStatus: { in: ["NO_EMAIL", "NOT_SENT"] } },
     select: { id: true },
     take: 20,
   });
   for (const s of waiting) await scheduleCourierConfirmation(tenantId, s.id);
 }
 
-// ─── The customer's link ─────────────────────────────────────────────────
-
-/** The row a link points at, in whichever scope it is. */
-async function findByToken(token: string) {
-  const hash = hashConfirmToken(token);
-  if (!hash) return null;
-  // SCOPE-EXEMPT: the link is the credential (no session exists on a
-  // customer's visit), like a session token check. It finds exactly one row
-  // by a 256-bit secret; everything after is done in that row's own scope.
-  const row = await UNSAFE_unscopedPrisma.courierTripSheet.findUnique({
-    where: { confirmTokenHash: hash },
-    select: { id: true, tenantId: true, status: true, confirmedAt: true, confirmTokenExpiresAt: true },
-  });
-  return row ? { ...row, hash } : null;
-}
+// ─── Links already sent (read-only) ──────────────────────────────────────
 
 export interface DeliveryView {
   companyName: string;
   customerName: string;
   courierSheetNo: string;
   courierCompany: string | null;
+  courierDriverName: string | null;
   waybills: string[];
   parcels: number | null;
   invoiceNos: string[];
   collectedAt: string;
-  confirmedAt: string | null;
-  expiresOn: string;
 }
 
 export type DeliveryLookup =
   | { state: "not_found" }
   | { state: "expired"; companyName: string }
-  | { state: "open" | "confirmed"; view: DeliveryView };
+  | { state: "open"; view: DeliveryView };
 
-/** What the link's page shows. Read-only: opening the link confirms nothing. */
+/** What an older email's link shows. Read-only: nothing is confirmed. */
 export async function readDelivery(token: string, now = new Date()): Promise<DeliveryLookup> {
-  const row = await findByToken(token);
+  const hash = hashConfirmToken(token);
+  if (!hash) return { state: "not_found" };
+  // SCOPE-EXEMPT: the link is the credential (no session exists on a
+  // customer's visit), like a session token check. It finds exactly one row
+  // by a 256-bit secret; everything after is done in that row's own scope.
+  const row = await UNSAFE_unscopedPrisma.courierTripSheet.findUnique({
+    where: { confirmTokenHash: hash },
+    select: { id: true, tenantId: true },
+  });
   if (!row) return { state: "not_found" };
   const sheet = await scopedPrisma(row.tenantId).courierTripSheet.findFirst({
     where: { id: row.id },
@@ -333,65 +300,32 @@ export async function readDelivery(token: string, now = new Date()): Promise<Del
       courierSheetNo: true,
       customerName: true,
       courierCompany: true,
+      courierDriverName: true,
       dispatchCompany: true,
       waybills: true,
       parcels: true,
       collectedAt: true,
-      confirmedAt: true,
       confirmTokenExpiresAt: true,
       invoices: { orderBy: { lineNo: "asc" }, select: { invoiceNo: true } },
     },
   });
   if (!sheet) return { state: "not_found" };
   const companyName = sheet.dispatchCompany || (await readDispatchCompany(row.tenantId)) || "Signex";
-  const expired = !sheet.confirmTokenExpiresAt || sheet.confirmTokenExpiresAt <= now;
-  if (expired && !sheet.confirmedAt) return { state: "expired", companyName };
+  if (!sheet.confirmTokenExpiresAt || sheet.confirmTokenExpiresAt <= now) return { state: "expired", companyName };
   return {
-    state: sheet.confirmedAt ? "confirmed" : "open",
+    state: "open",
     view: {
       companyName,
       customerName: sheet.customerName,
       courierSheetNo: sheet.courierSheetNo,
       courierCompany: sheet.courierCompany,
+      courierDriverName: sheet.courierDriverName,
       waybills: sheet.waybills,
       parcels: sheet.parcels,
       invoiceNos: sheet.invoices.map((i) => i.invoiceNo),
       collectedAt: formatStampTime(sheet.collectedAt ?? now),
-      confirmedAt: sheet.confirmedAt ? formatStampTime(sheet.confirmedAt) : null,
-      expiresOn: sheet.confirmTokenExpiresAt ? formatDay(sheet.confirmTokenExpiresAt) : "",
     },
   };
-}
-
-export type ConfirmOutcome = "confirmed" | "already_confirmed" | "expired" | "not_found";
-
-/** The customer pressed Confirm received. Idempotent; one conditional update. */
-export async function confirmDelivery(token: string, now = new Date()): Promise<{ outcome: ConfirmOutcome; confirmedAt?: string }> {
-  const row = await findByToken(token);
-  if (!row) return { outcome: "not_found" };
-  if (row.confirmedAt) return { outcome: "already_confirmed", confirmedAt: formatStampTime(row.confirmedAt) };
-  if (!row.confirmTokenExpiresAt || row.confirmTokenExpiresAt <= now) return { outcome: "expired" };
-
-  const db = scopedPrisma(row.tenantId);
-  const done = await db.courierTripSheet.updateMany({
-    where: { id: row.id, status: "COLLECTED", confirmTokenHash: row.hash, confirmedAt: null },
-    data: { status: "DELIVERED", confirmedAt: now },
-  });
-  if (done.count === 0) {
-    const again = await db.courierTripSheet.findFirst({ where: { id: row.id }, select: { confirmedAt: true } });
-    return again?.confirmedAt
-      ? { outcome: "already_confirmed", confirmedAt: formatStampTime(again.confirmedAt) }
-      : { outcome: "not_found" };
-  }
-  await logAudit({
-    action: "STATUS_CHANGE",
-    entity: "courier_sheet",
-    entityId: row.id,
-    userName: "Customer (email link)",
-    details: "Customer confirmed the delivery arrived",
-    tenantId: row.tenantId,
-  });
-  return { outcome: "confirmed", confirmedAt: formatStampTime(now) };
 }
 
 // ─── The office's view ───────────────────────────────────────────────────
@@ -400,68 +334,77 @@ export interface CourierAttentionItem {
   id: string;
   courierSheetNo: string;
   customerName: string;
-  /** NEEDS_ATTENTION before the handover, else the confirmation state. */
+  /** NEEDS_ATTENTION before the handover, else what still follows it. */
   state: "needs_attention" | ConfirmationState;
 }
 
 export interface CourierOverview {
   needsAttention: number;
   awaitingCollection: number;
-  /** Collected and not yet confirmed, in any state. */
-  awaitingConfirmation: number;
-  confirmedToday: number;
-  /** What the office has to act on — what the nav badge counts. */
+  /** Signed for by the courier since the start of today. */
+  completedToday: number;
+  /** Still open: needs attention + awaiting collection — the nav badge. */
+  active: number;
+  /** What the office has to act on: fixes before the handover, copies not filed, emails not sent. */
   attention: number;
   items: CourierAttentionItem[];
+  /** For dashboards on the previous bundle: nothing awaits a confirmation now. */
+  awaitingConfirmation: 0;
+  /** For dashboards on the previous bundle: the same figure as completedToday. */
+  confirmedToday: number;
 }
 
 /**
- * The scope's courier sheets as the dashboard card and the nav badge read
- * them. Database only (the dashboard is polled all day) and scoped.
+ * The scope's courier sheets as the dashboard card and the branch overview
+ * read them. Database only (the dashboard is polled all day) and scoped.
+ * Completed sheets are read only while something still follows them — the
+ * card used to read every collected sheet ever, waiting for a confirmation.
  */
-export async function courierOverview(tenantId: string, todayStart: Date, now = new Date()): Promise<CourierOverview> {
-  const rows = await scopedPrisma(tenantId).courierTripSheet.findMany({
-    where: {
-      OR: [
-        { status: { in: ["NEEDS_ATTENTION", "AWAITING_COLLECTION", "COLLECTED"] } },
-        { status: "DELIVERED", confirmedAt: { gte: todayStart } },
-      ],
-    },
-    orderBy: { sheetDate: "asc" },
-    take: 1000,
-    select: {
-      id: true,
-      courierSheetNo: true,
-      customerName: true,
-      status: true,
-      filingCompletedAt: true,
-      emailStatus: true,
-      reminderSentAt: true,
-      confirmedAt: true,
-    },
-  });
-  const out: CourierOverview = { needsAttention: 0, awaitingCollection: 0, awaitingConfirmation: 0, confirmedToday: 0, attention: 0, items: [] };
-  for (const r of rows) {
-    if (r.status === "NEEDS_ATTENTION") {
-      out.needsAttention++;
-      out.items.push({ id: r.id, courierSheetNo: r.courierSheetNo, customerName: r.customerName, state: "needs_attention" });
-      continue;
-    }
-    if (r.status === "AWAITING_COLLECTION") {
-      out.awaitingCollection++;
-      continue;
-    }
-    const state = confirmationState(r, now);
-    if (state === "confirmed") {
-      out.confirmedToday++;
-      continue;
-    }
-    out.awaitingConfirmation++;
-    if (state && NEEDS_OFFICE.includes(state)) {
-      out.items.push({ id: r.id, courierSheetNo: r.courierSheetNo, customerName: r.customerName, state });
-    }
+export async function courierOverview(tenantId: string, todayStart: Date): Promise<CourierOverview> {
+  const db = scopedPrisma(tenantId);
+  const [grouped, completedToday, open, followUps] = await Promise.all([
+    db.courierTripSheet.groupBy({
+      by: ["status"],
+      where: { status: { in: [...COURIER_ACTIVE_STATUSES] } },
+      _count: { _all: true },
+    }),
+    db.courierTripSheet.count({ where: { status: { in: COMPLETED }, collectedAt: { gte: todayStart } } }),
+    db.courierTripSheet.findMany({
+      where: { status: "NEEDS_ATTENTION" },
+      orderBy: { sheetDate: "asc" },
+      take: 8,
+      select: { id: true, courierSheetNo: true, customerName: true },
+    }),
+    db.courierTripSheet.findMany({
+      where: {
+        status: { in: COMPLETED },
+        OR: [{ filingCompletedAt: null }, { emailStatus: { in: ["FAILED", "NO_EMAIL"] } }],
+      },
+      orderBy: { collectedAt: "asc" },
+      take: 500,
+      select: { id: true, courierSheetNo: true, customerName: true, status: true, filingCompletedAt: true, emailStatus: true },
+    }),
+  ]);
+
+  const count = (s: string) => grouped.find((g) => g.status === s)?._count._all ?? 0;
+  const needsAttention = count("NEEDS_ATTENTION");
+  const awaitingCollection = count("AWAITING_COLLECTION");
+  const items: CourierAttentionItem[] = open.map((r) => ({ ...r, state: "needs_attention" }));
+  let followUpCount = 0;
+  for (const r of followUps) {
+    const state = confirmationState(r);
+    if (!state || !NEEDS_OFFICE.includes(state)) continue;
+    followUpCount++;
+    items.push({ id: r.id, courierSheetNo: r.courierSheetNo, customerName: r.customerName, state });
   }
-  out.attention = out.items.length;
-  out.items = out.items.slice(0, 8);
-  return out;
+  return {
+    needsAttention,
+    awaitingCollection,
+    completedToday,
+    active: needsAttention + awaitingCollection,
+    attention: needsAttention + followUpCount,
+    items: items.slice(0, 8),
+    awaitingConfirmation: 0,
+    confirmedToday: completedToday,
+  };
 }

@@ -163,8 +163,8 @@ export interface CourierDispatchParams extends Omit<CourierDispatchProps, "attac
 }
 
 /**
- * A courier delivery: the customer is told it left with a courier (signed
- * copies attached) and asked to confirm it arrived. Same transport, sender and error reporting as the delivery
+ * A courier delivery: the customer is told which courier and driver collected
+ * it (signed copies attached) — a confirmation, nothing to answer. Same transport, sender and error reporting as the delivery
  * confirmation — see sendDeliveryConfirmation.
  */
 export async function sendCourierDispatch(

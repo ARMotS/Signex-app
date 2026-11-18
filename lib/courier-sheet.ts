@@ -12,12 +12,20 @@ import { normalizeInvoiceNo, type InvoiceNoPattern } from "./invoice-number";
 import type { MappedSheet } from "./sheet-mapping";
 
 /**
- * The Courier page's tabs. Active runs up to the customer's confirmation: a
- * collected sheet can still need filing, its email or a phone call. Completed is
- * a sheet the customer confirmed. Status strings, so the browser can use them.
+ * The Courier page's tabs. A sheet is COMPLETED the moment the courier driver
+ * signs for it (user decision, 2026-11-18): nobody waits on the customer any
+ * more. The database value stays COLLECTED — every screen calls it Completed —
+ * and DELIVERED is only on sheets a customer confirmed before then; nothing
+ * sets it now. Filing and the customer's email still follow the handover, and
+ * a problem with either shows on the row and the dashboard, not as a tab.
+ * Status strings, so the browser can use them.
  */
-export const COURIER_ACTIVE_STATUSES = ["NEEDS_ATTENTION", "AWAITING_COLLECTION", "COLLECTED"] as const;
-export const COURIER_COMPLETED_STATUSES = ["DELIVERED"] as const;
+export const COURIER_ACTIVE_STATUSES = ["NEEDS_ATTENTION", "AWAITING_COLLECTION"] as const;
+export const COURIER_COMPLETED_STATUSES = ["COLLECTED", "DELIVERED"] as const;
+
+export function isCourierCompleted(status: string): boolean {
+  return (COURIER_COMPLETED_STATUSES as readonly string[]).includes(status);
+}
 export type CourierTab = "active" | "completed";
 
 export function courierTabOf(status: string): CourierTab {
@@ -353,41 +361,30 @@ export function todayInJohannesburg(now = new Date()): string {
 // ─── After the handover ───────────────────────────────────────────────────
 
 /**
- * Where a collected sheet stands with its customer, for the list, the
- * dashboard and the nav badge (null while the sheet is still open):
+ * What still follows a completed sheet, for the list, the dashboard and the
+ * branch overview (null while the sheet is still open):
  * - filing: signed copies not all filed yet — the email waits for them
  * - email_problem: no address on file, or the email failed
  * - sending: the email is due or going out now
- * - awaiting: sent, not confirmed yet
- * - reminded: a reminder went, not confirmed yet
- * - no_answer: two days after the reminder and still nothing — phone them
- *   (reminded / no_answer are only reached by sheets reminded before the
- *   reminder email was removed on 2026-11-12; nothing sets reminderSentAt now)
- * - confirmed: the customer confirmed the parcels arrived
+ * - emailed: the customer has their confirmation email — nothing left to do
+ *
+ * There is no customer confirmation any more (2026-11-18), so nothing here
+ * waits on the customer: reminderSentAt / confirmedAt on older sheets are
+ * history only.
  */
-export type ConfirmationState = "filing" | "email_problem" | "sending" | "awaiting" | "reminded" | "no_answer" | "confirmed";
+export type ConfirmationState = "filing" | "email_problem" | "sending" | "emailed";
 
-/** How long after the reminder the office is asked to follow up by phone. */
-export const NO_ANSWER_AFTER_MS = 2 * 24 * 60 * 60 * 1000;
-
-export function confirmationState(
-  r: {
-    status: string;
-    filingCompletedAt: Date | string | null;
-    emailStatus: string;
-    reminderSentAt: Date | string | null;
-    confirmedAt: Date | string | null;
-  },
-  now = new Date()
-): ConfirmationState | null {
-  if (r.status === "DELIVERED" || r.confirmedAt) return "confirmed";
-  if (r.status !== "COLLECTED") return null;
+export function confirmationState(r: {
+  status: string;
+  filingCompletedAt: Date | string | null;
+  emailStatus: string;
+}): ConfirmationState | null {
+  if (!isCourierCompleted(r.status)) return null;
   if (!r.filingCompletedAt) return "filing";
   if (r.emailStatus === "FAILED" || r.emailStatus === "NO_EMAIL") return "email_problem";
   if (r.emailStatus !== "SENT") return "sending";
-  if (!r.reminderSentAt) return "awaiting";
-  return now.getTime() - new Date(r.reminderSentAt).getTime() >= NO_ANSWER_AFTER_MS ? "no_answer" : "reminded";
+  return "emailed";
 }
 
-/** The states the office has to act on — what the nav badge counts. */
-export const NEEDS_OFFICE: ConfirmationState[] = ["filing", "email_problem", "no_answer"];
+/** The follow-ups the office has to act on — what the dashboard lists. */
+export const NEEDS_OFFICE: ConfirmationState[] = ["filing", "email_problem"];

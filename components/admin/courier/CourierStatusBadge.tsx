@@ -7,10 +7,13 @@ export type CourierStatus = "NEEDS_ATTENTION" | "AWAITING_COLLECTION" | "COLLECT
 export const COURIER_STATUS: Record<CourierStatus, { label: string; tone: Tone }> = {
   NEEDS_ATTENTION: { label: "Needs attention", tone: "amber" },
   AWAITING_COLLECTION: { label: "Awaiting collection", tone: "blue" },
-  COLLECTED: { label: "Collected", tone: "violet" },
-  DELIVERED: { label: "Delivered", tone: "green" },
+  // Complete the moment the courier signs (2026-11-18). DELIVERED is only on
+  // sheets a customer confirmed before then, and reads the same.
+  COLLECTED: { label: "Completed", tone: "green" },
+  DELIVERED: { label: "Completed", tone: "green" },
 };
 
+/** Every status a link may name; the list filters only by the active ones. */
 export const COURIER_STATUS_ORDER: CourierStatus[] = [
   "NEEDS_ATTENTION",
   "AWAITING_COLLECTION",

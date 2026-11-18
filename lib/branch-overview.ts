@@ -111,7 +111,7 @@ export async function branchSummary(branch: BranchRef, day: { start: Date; end: 
       }),
       db.creditNote.count({ where: { status: "NEEDS_REVIEW" } }),
       db.creditNote.count({ where: { status: "RECEIVED" } }),
-      courierOverview(branch.tenantId, day.start, now),
+      courierOverview(branch.tenantId, day.start),
     ]);
   return {
     tenantId: branch.tenantId,

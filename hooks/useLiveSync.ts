@@ -15,7 +15,7 @@
  *     API call validates it), and only then does the layout ask
  *     /api/auth/session why — which clears the cookie and says "signed out
  *     elsewhere";
- *   - the office's COURIER badge (`attention`).
+ *   - the office's nav BADGES (`badges`, lib/nav-badges.ts).
  *
  * Every guard below exists because the alternative costs somebody something
  * real:
@@ -44,6 +44,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import type { NavBadges } from "@/lib/nav-badges";
 
 /**
  * 30s while a page is following live data, not the 12s it was. Every open tab
@@ -55,7 +56,7 @@ const LIVE_INTERVAL_MS = 30_000;
 
 /**
  * A page with nothing subscribed (Contacts, Settings, the sign screen) only
- * needs the session check and the badge, which ran once a minute before.
+ * needs the session check and the badges, which ran once a minute before.
  */
 const IDLE_INTERVAL_MS = 60_000;
 
@@ -78,11 +79,11 @@ export interface LiveSyncProviderProps {
    * ceiling in case it was not (a company admin with no branch chosen).
    */
   onAuthProblem: () => void;
-  /** The office's courier badge. Never called for a driver. */
-  onAttention?: (count: number) => void;
+  /** The office's nav badges. Never called for a driver. */
+  onBadges?: (badges: NavBadges) => void;
 }
 
-export function LiveSyncProvider({ children, onAuthProblem, onAttention }: LiveSyncProviderProps) {
+export function LiveSyncProvider({ children, onAuthProblem, onBadges }: LiveSyncProviderProps) {
   const [{ listeners, value }] = useState(() => {
     const listeners = new Set<Listener>();
     const value: LiveSync = {
@@ -98,9 +99,9 @@ export function LiveSyncProvider({ children, onAuthProblem, onAttention }: LiveS
 
   // Held in a ref so a layout passing inline arrows does not tear down and
   // rebuild the polling loop on every render.
-  const callbacks = useRef({ onAuthProblem, onAttention });
+  const callbacks = useRef({ onAuthProblem, onBadges });
   useEffect(() => {
-    callbacks.current = { onAuthProblem, onAttention };
+    callbacks.current = { onAuthProblem, onBadges };
   });
 
   useEffect(() => {
@@ -156,10 +157,10 @@ export function LiveSyncProvider({ children, onAuthProblem, onAttention }: LiveS
 
         if (!res.ok) throw new Error(`sync ${res.status}`);
 
-        const data: { cursor?: string; attention?: number } = await res.json();
+        const data: { cursor?: string; badges?: NavBadges } = await res.json();
         backoff = LIVE_INTERVAL_MS;
 
-        if (typeof data.attention === "number") callbacks.current.onAttention?.(data.attention);
+        if (data.badges && typeof data.badges === "object") callbacks.current.onBadges?.(data.badges);
 
         if (typeof data.cursor === "string") {
           if (cursor === null) {
@@ -195,7 +196,7 @@ export function LiveSyncProvider({ children, onAuthProblem, onAttention }: LiveS
     // not seen yet. Dispatched by lib/offline-sync.ts.
     window.addEventListener("signex:sync-complete", wake as EventListener);
 
-    // At once: this first answer is the session check on load, the badge, and
+    // At once: this first answer is the session check on load, the badges, and
     // the cursor baseline the pages' own first fetch is compared against.
     schedule(0);
 

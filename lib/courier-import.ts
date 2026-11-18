@@ -30,6 +30,7 @@ import {
   confirmationState,
   COURIER_ACTIVE_STATUSES,
   COURIER_COMPLETED_STATUSES,
+  isCourierCompleted,
   COURIER_OPEN_STATUSES,
   originalFileName,
   originalFolder,
@@ -543,12 +544,12 @@ async function openSheet(tenantId: string, id: string) {
 
 /**
  * Link a contact by hand — the sheet's customer name did not match one. Also
- * allowed once COLLECTED, while the customer has not confirmed: the contact
- * is then only where the confirmation email goes (the caller sends it).
+ * allowed once the sheet is completed: the contact is then only where the
+ * confirmation email goes (the caller sends it).
  */
 export async function linkCourierContact(tenantId: string, id: string, contactId: string, userName: string | null) {
   const sheet = await scopedPrisma(tenantId).courierTripSheet.findFirst({ where: { id }, select: { status: true } });
-  const collected = sheet?.status === "COLLECTED";
+  const collected = !!sheet && isCourierCompleted(sheet.status);
   if (!collected) await openSheet(tenantId, id);
   const contact = await scopedPrisma(tenantId).contact.findFirst({
     where: { id: contactId, deletedAt: null },
@@ -557,7 +558,7 @@ export async function linkCourierContact(tenantId: string, id: string, contactId
   // Another scope's contact is simply not found.
   if (!contact) throw new CourierError("NOT_FOUND", "Contact not found", 404);
   await scopedPrisma(tenantId).courierTripSheet.updateMany({
-    where: { id, status: { in: collected ? ["COLLECTED"] : OPEN } },
+    where: { id, status: { in: collected ? [...COURIER_COMPLETED_STATUSES] : OPEN } },
     data: { contactId: contact.id, ...(collected ? { customerEmail: contact.email?.trim() || null } : {}) },
   });
   if (collected) {
@@ -640,7 +641,7 @@ export interface CourierSheetSummary {
   blockCount: number;
   warningCount: number;
   hasEmail: boolean;
-  /** After the handover: where it stands with the customer. */
+  /** After the handover: what still follows it (filing, the customer's email). */
   confirmation: ConfirmationState | null;
   createdAt: string;
 }
@@ -658,8 +659,6 @@ const SUMMARY_SELECT = {
   customerEmail: true,
   filingCompletedAt: true,
   emailStatus: true,
-  reminderSentAt: true,
-  confirmedAt: true,
   createdAt: true,
   invoices: { orderBy: { lineNo: "asc" }, select: { invoiceNo: true } },
 } satisfies Prisma.CourierTripSheetSelect;
@@ -833,14 +832,11 @@ export async function getCourierSheet(tenantId: string, id: string) {
       filingCompletedAt: true,
       filingError: true,
       driverSignature: true,
-      // The customer's email and confirmation — never the link's token.
+      // The customer's confirmation email — never an old link's token.
       emailStatus: true,
       emailSentAt: true,
       emailRecipient: true,
       emailError: true,
-      reminderSentAt: true,
-      confirmedAt: true,
-      confirmTokenExpiresAt: true,
       createdAt: true,
       updatedAt: true,
       contact: { select: { id: true, companyName: true, email: true, contactPerson: true, phone: true } },

@@ -25,9 +25,8 @@ const serwist = new Serwist({
   clientsClaim: true,
   navigationPreload: true,
   runtimeCaching: [
-    // A customer's delivery link (and its confirm call) — never from a cache.
-    // The page carries a secret token, and a cached copy would offer Confirm
-    // received for a delivery already confirmed.
+    // A customer's delivery link (older courier emails) — never from a cache:
+    // the page carries a secret token.
     {
       matcher: ({ url }) => /^\/(api\/public\/)?delivery\//.test(url.pathname),
       handler: new NetworkOnly(),

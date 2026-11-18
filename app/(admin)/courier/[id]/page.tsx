@@ -49,9 +49,6 @@ interface Sheet {
   emailSentAt: string | null;
   emailRecipient: string | null;
   emailError: string | null;
-  reminderSentAt: string | null;
-  confirmedAt: string | null;
-  confirmTokenExpiresAt: string | null;
   createdAt: string;
   contact: { id: string; companyName: string; email: string | null; contactPerson: string | null; phone: string | null } | null;
   invoices: {
@@ -217,6 +214,7 @@ export default function CourierSheetPage() {
   }
 
   const open = OPEN.includes(sheet.status);
+  const completed = sheet.status === "COLLECTED" || sheet.status === "DELIVERED";
   const blocks = sheet.issues.filter((i) => i.level === "block");
   const warnings = sheet.issues.filter((i) => i.level === "warning");
   const lineFor = (invoiceNo?: string) => sheet.invoices.find((l) => l.invoiceNo === invoiceNo);
@@ -358,7 +356,7 @@ export default function CourierSheetPage() {
           </h2>
           <div className="px-5 py-4 space-y-3 text-sm">
             <p className="text-ink-black font-medium">{sheet.customerName}</p>
-            <ContactFixer sheet={sheet} open={open || sheet.status === "COLLECTED"} busy={busy !== null} act={act} setMessage={setMessage} />
+            <ContactFixer sheet={sheet} open={open || completed} busy={busy !== null} act={act} setMessage={setMessage} />
           </div>
         </section>
 
@@ -536,19 +534,12 @@ export default function CourierSheetPage() {
 
 // ─── Pieces ─────────────────────────────────────────────────────────────────
 
-/** The customer's email and confirmation, once every signed copy is filed. */
+/**
+ * The customer's confirmation email, once every signed copy is filed. It asks
+ * the customer for nothing: the sheet is complete once the courier signs.
+ */
 function CustomerConfirmation({ sheet, busy, onSend }: { sheet: Sheet; busy: boolean; onSend: (force: boolean) => void }) {
-  if (!sheet.filingCompletedAt && !sheet.confirmedAt) return null;
-  const day = (iso: string) =>
-    new Date(iso).toLocaleDateString("en-ZA", { timeZone: "Africa/Johannesburg", weekday: "short", day: "numeric", month: "short" });
-
-  if (sheet.confirmedAt) {
-    return (
-      <p className="text-ink-green pt-2 border-t border-ink-border">
-        ✓ The customer confirmed the parcels arrived on {fmtTime(sheet.confirmedAt)}
-      </p>
-    );
-  }
+  if (!sheet.filingCompletedAt) return null;
 
   const button = (label: string, force: boolean) => (
     <button type="button" className="act" disabled={busy} onClick={() => onSend(force)}>
@@ -561,14 +552,7 @@ function CustomerConfirmation({ sheet, busy, onSend }: { sheet: Sheet; busy: boo
       {sheet.emailStatus === "SENT" && sheet.emailSentAt ? (
         <>
           <p className="text-ink-black">
-            Confirmation email sent to {sheet.emailRecipient} on {fmtTime(sheet.emailSentAt)} — not confirmed yet.
-          </p>
-          <p className="text-xs text-ink-muted">
-            {/* No reminder is sent any more; one sent before that change is still shown. */}
-            {sheet.reminderSentAt
-              ? `Reminder sent on ${fmtTime(sheet.reminderSentAt)}. If there is still no answer, phone the customer.`
-              : "No reminder is sent — if they do not confirm, phone them or resend the email."}
-            {sheet.confirmTokenExpiresAt ? ` The link works until ${day(sheet.confirmTokenExpiresAt)}.` : ""}
+            ✓ Confirmation email sent to {sheet.emailRecipient} on {fmtTime(sheet.emailSentAt)}
           </p>
           {button("Resend email", true)}
         </>
@@ -686,7 +670,7 @@ function ContactFixer({
         await act(
           "recheck",
           { action: "recheck" },
-          sheet.status === "COLLECTED" ? "Email added — the confirmation email is on its way" : "Email added"
+          sheet.status === "COLLECTED" || sheet.status === "DELIVERED" ? "Email added — the confirmation email is on its way" : "Email added"
         );
       } else {
         const res = await fetch("/api/contacts", {

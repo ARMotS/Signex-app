@@ -1304,22 +1304,18 @@ const COURIER_ITEM: Record<CourierOverview["items"][number]["state"], string> = 
   needs_attention: "Fix before the courier signs",
   filing: "Signed copies not filed",
   email_problem: "Customer email not sent",
-  no_answer: "No answer after the reminder — phone them",
   sending: "Emailing the customer",
-  awaiting: "Awaiting confirmation",
-  reminded: "Reminder sent",
-  confirmed: "Confirmed",
+  emailed: "Customer emailed",
 };
 
-/** Courier sheets: what waits on the courier, the customer, or the office. */
+/** Courier sheets: what waits on the courier, and what the office still has to finish. */
 function CourierCard({ courier }: { courier: CourierOverview }) {
-  const total = courier.needsAttention + courier.awaitingCollection + courier.awaitingConfirmation + courier.confirmedToday;
+  const total = courier.needsAttention + courier.awaitingCollection + courier.completedToday + courier.attention;
   if (total === 0) return null;
   const figures: [string, number, string][] = [
     ["Needs attention", courier.needsAttention, courier.needsAttention ? "text-ink-red" : "text-ink-black"],
     ["Awaiting collection", courier.awaitingCollection, "text-ink-black"],
-    ["Awaiting confirmation", courier.awaitingConfirmation, "text-ink-black"],
-    ["Confirmed today", courier.confirmedToday, "text-ink-green"],
+    ["Completed today", courier.completedToday, "text-ink-green"],
   ];
   return (
     <div className="bg-ink-card border border-ink-border rounded xl:col-span-2">
@@ -1336,9 +1332,9 @@ function CourierCard({ courier }: { courier: CourierOverview }) {
           Open courier →
         </Link>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-px bg-ink-border">
+      <div className="grid grid-cols-3 gap-px bg-ink-border">
         {figures.map(([label, value, tone]) => (
-          <div key={label} className="bg-ink-card px-5 py-3">
+          <div key={label} className="bg-ink-card px-3 sm:px-5 py-3 min-w-0">
             <p className="text-[11px] font-mono text-ink-muted uppercase tracking-wide">{label}</p>
             <p className={`text-xl font-mono font-medium ${tone}`}>{value}</p>
           </div>
@@ -1350,7 +1346,7 @@ function CourierCard({ courier }: { courier: CourierOverview }) {
             <Link key={item.id} href={`/courier/${item.id}`} className="flex items-center gap-3 px-5 py-3 hover:bg-ink-surface/60">
               <span className="font-mono text-sm text-ink-black">{item.courierSheetNo}</span>
               <span className="flex-1 min-w-0 text-sm text-ink-muted truncate">{item.customerName}</span>
-              <span className={`text-xs ${item.state === "needs_attention" || item.state === "no_answer" || item.state === "filing" ? "text-ink-red" : ""}`} style={item.state === "email_problem" ? { color: "var(--tone-amber-fg)" } : undefined}>
+              <span className={`text-xs ${item.state === "needs_attention" || item.state === "filing" ? "text-ink-red" : ""}`} style={item.state === "email_problem" ? { color: "var(--tone-amber-fg)" } : undefined}>
                 {COURIER_ITEM[item.state]}
               </span>
             </Link>

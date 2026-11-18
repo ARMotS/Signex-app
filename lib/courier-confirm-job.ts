@@ -9,8 +9,8 @@
  *     have been added), failed (up to MAX_AUTO_ATTEMPTS), or a stale claim.
  *
  * There is no reminder email any more (removed 2026-11-12: customers were not
- * answering them and they ran up the Brevo bill). Sheets reminded before then
- * keep their reminderSentAt; nothing sets it now.
+ * answering them and they ran up the Brevo bill), and since 2026-11-18 nothing
+ * waits on the customer at all — a sheet is complete when the courier signs.
  *
  * Bounded by a time budget so one slow OneDrive never runs the function out;
  * whatever is left is the next day's work (or the office's Send).
@@ -19,6 +19,7 @@
 import { UNSAFE_unscopedPrisma } from "./db-scoped";
 import { fileCourierSheet } from "./courier-collect";
 import { MAX_AUTO_ATTEMPTS, sendCourierConfirmation } from "./courier-confirm";
+import { COURIER_COMPLETED_STATUSES } from "./courier-sheet";
 
 const BATCH = 200;
 const STALE_CLAIM_MS = 2 * 60 * 1000;
@@ -39,7 +40,7 @@ export async function runCourierConfirmationJob(now = new Date(), budgetMs = 45_
   // scope's client, exactly as the office's own actions would be.
   const rows = await UNSAFE_unscopedPrisma.courierTripSheet.findMany({
     where: {
-      status: "COLLECTED",
+      status: { in: [...COURIER_COMPLETED_STATUSES] },
       OR: [
         { filingCompletedAt: null, driverSignature: { not: null } },
         { filingCompletedAt: { not: null }, emailStatus: { in: ["NOT_SENT", "NO_EMAIL"] } },
