@@ -120,9 +120,11 @@ describe("saving a signed invoice", () => {
       ["PUT items/SIGNED:/IV-365.pdf:/content", () => json({ id: "ITEM" }, 201)],
     ]);
 
+    // The item comes back with the folder it went into, even when Graph's reply
+    // leaves that out — the invoice folder index files it under signed/.
     await expect(
       graph.uploadSignedInvoiceToOneDrive("t1", "IV-365.pdf", Buffer.from("%PDF-1.4"))
-    ).resolves.toBe("ITEM");
+    ).resolves.toMatchObject({ id: "ITEM", parentReference: { id: "SIGNED" } });
     expect(calls.map((c) => c.method)).toEqual(["GET", "PUT"]);
   });
 });

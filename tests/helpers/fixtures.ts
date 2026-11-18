@@ -79,6 +79,7 @@ export async function resetDatabase() {
   await p.appConfig.deleteMany();
   await p.importTemplate.deleteMany();
   await p.courierImportFailure.deleteMany();
+  await p.invoiceFolderFile.deleteMany();
   // Append-only: a trigger refuses DELETE, and TRUNCATE is what it does not cover.
   await p.$executeRawUnsafe(`TRUNCATE "AuditLog"`);
   await p.driver.deleteMany();

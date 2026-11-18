@@ -690,7 +690,11 @@ suite("cross-ADMIN isolation", () => {
       for (const key of Object.keys(seeded ?? {})) {
         if (
           ["id", "tenantId", "accountEmail", "accountName", "accessToken",
-           "refreshToken", "tokenExpiry", "createdAt", "updatedAt"].includes(key)
+           "refreshToken", "tokenExpiry", "createdAt", "updatedAt",
+           // The invoice folder index's own progress, not configuration.
+           "invoiceIndexFolderId", "invoiceSignedFolderId", "invoiceDeltaLink",
+           "invoiceIndexReadyAt", "invoiceCheckedAt", "invoiceIndexSyncedAt",
+           "invoiceIndexError"].includes(key)
         ) {
           continue;
         }
@@ -7639,6 +7643,183 @@ suite("cross-ADMIN isolation", () => {
       } finally {
         fetchMock.mockImplementation(original);
       }
+    });
+
+    // ── The invoice folder index (lib/invoice-index*.ts) ──
+    describe("invoice folder index", () => {
+      const resetIndex = async () => {
+        await db().invoiceFolderFile.deleteMany({});
+        await db().cloudAccount.updateMany({
+          data: {
+            invoiceIndexFolderId: null,
+            invoiceSignedFolderId: null,
+            invoiceDeltaLink: null,
+            invoiceIndexReadyAt: null,
+            invoiceCheckedAt: null,
+            invoiceIndexSyncedAt: null,
+            invoiceIndexError: null,
+          },
+        });
+      };
+
+      /** A's invoice folder as Graph delta reports it: two pages, then a delta link. */
+      const fakeDeltaA = (original: (url: any, init: any) => Promise<Response>, pages: Record<string, unknown>) =>
+        async (url: any, init: any) => {
+          const u = String(url);
+          const auth: string | undefined = init?.headers?.Authorization;
+          graphCalls.push({ url: u, token: auth ? auth.replace("Bearer ", "") : null });
+          const json = (body: unknown, status = 200) =>
+            new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+          for (const [match, body] of Object.entries(pages)) {
+            if (u.includes(match)) return body === 410 ? json({ error: { code: "resyncRequired" } }, 410) : json(body);
+          }
+          return original(url, init);
+        };
+
+      const G = "https://graph.microsoft.com/v1.0";
+      const firstPass = {
+        // The first request of a pass (later pages carry ?token=).
+        "/items/invoice-folder-A/delta?$select=": {
+          value: [
+            { id: "invoice-folder-A", name: "Invoices-A", folder: {}, parentReference: { id: "root-A" } },
+            { id: "signed-A", name: "signed", folder: {}, parentReference: { id: "invoice-folder-A" } },
+            { id: "a-1", name: "IV-8101.pdf", size: 10, file: {}, lastModifiedDateTime: "2026-11-18T06:00:00Z", parentReference: { id: "invoice-folder-A" } },
+          ],
+          "@odata.nextLink": `${G}/me/drive/items/invoice-folder-A/delta?token=page2`,
+        },
+        "token=page2": {
+          value: [
+            { id: "a-2", name: "IV-8102.pdf", size: 20, file: {}, lastModifiedDateTime: "2026-11-18T06:00:00Z", parentReference: { id: "invoice-folder-A" } },
+            { id: "a-1s", name: "iv-8101.pdf", size: 11, file: {}, lastModifiedDateTime: "2026-11-18T07:00:00Z", parentReference: { id: "signed-A" } },
+          ],
+          "@odata.deltaLink": `${G}/me/drive/items/invoice-folder-A/delta?token=after-pass`,
+        },
+      };
+
+      it("builds A's index from A's folder with A's token, and B's rows survive A's reset", async () => {
+        await resetIndex();
+        const theirs = await db().invoiceFolderFile.create({
+          data: { tenantId: f.b.tenantId, itemId: "b-1", parentId: "invoice-folder-B", filename: "IV-8101.pdf", nameKey: "iv-8101.pdf", modifiedAt: new Date() },
+        });
+        const fetchMock = vi.mocked(fetch);
+        const original = fetchMock.getMockImplementation()!;
+        fetchMock.mockImplementation(fakeDeltaA(original, firstPass));
+        try {
+          const { syncInvoiceIndex } = await import("@/lib/invoice-index-sync");
+          graphCalls.length = 0;
+          expect(await syncInvoiceIndex(f.a.tenantId, { minIntervalMs: 0 })).toMatchObject({ outcome: "synced", ready: true });
+          expect(graphCalls.every((c) => c.token === "access-token-A")).toBe(true);
+          expect(graphCalls.map((c) => c.url).join(" ")).not.toContain("folder-B");
+
+          const mine = await db().invoiceFolderFile.findMany({ where: { tenantId: f.a.tenantId }, orderBy: { itemId: "asc" } });
+          expect(mine.map((r) => [r.itemId, r.parentId])).toEqual([
+            ["a-1", "invoice-folder-A"],
+            ["a-1s", "signed-A"],
+            ["a-2", "invoice-folder-A"],
+          ]);
+          expect(await db().invoiceFolderFile.findUnique({ where: { id: theirs.id } })).not.toBeNull();
+          const account = await db().cloudAccount.findFirstOrThrow({ where: { tenantId: f.a.tenantId } });
+          expect(account).toMatchObject({
+            invoiceIndexFolderId: "invoice-folder-A",
+            invoiceSignedFolderId: "signed-A",
+            invoiceDeltaLink: `${G}/me/drive/items/invoice-folder-A/delta?token=after-pass`,
+            invoiceIndexError: null,
+          });
+          expect(account.invoiceIndexReadyAt).not.toBeNull();
+          const bAccount = await db().cloudAccount.findFirstOrThrow({ where: { tenantId: f.b.tenantId } });
+          expect(bAccount.invoiceIndexReadyAt).toBeNull();
+        } finally {
+          fetchMock.mockImplementation(original);
+          await db().invoiceFolderFile.deleteMany({ where: { tenantId: f.b.tenantId } });
+        }
+      });
+
+      it("the tab answers from A's index without listing the folder; B still lists its own", async () => {
+        const { GET } = await import("@/app/api/invoices/route");
+        useSession(adminSession(f.a));
+        graphCalls.length = 0;
+        const body = await (await GET(req("/api/invoices"))).json();
+        expect(graphCalls.filter((c) => c.url.includes("/children"))).toHaveLength(0);
+        expect(body.index).toMatchObject({ state: "ready", error: null });
+        expect(body.invoices.map((i: { filename: string; isSigned: boolean }) => [i.filename, i.isSigned])).toEqual([
+          ["IV-8101.pdf", true],
+          ["IV-8102.pdf", false],
+        ]);
+        expect(body).toMatchObject({ count: 2, signedCount: 1, unsignedCount: 1 });
+        // Every file got its registry row, in A's scope.
+        expect(await db().invoice.count({ where: { tenantId: f.a.tenantId, invoiceNoNormalized: { in: ["8101", "8102"] } } })).toBe(2);
+        expect(await db().invoice.count({ where: { tenantId: f.b.tenantId, invoiceNoNormalized: { in: ["8101", "8102"] } } })).toBe(0);
+
+        useSession(adminSession(f.b));
+        graphCalls.length = 0;
+        const theirs = await (await GET(req("/api/invoices"))).json();
+        expect(theirs.index).toMatchObject({ state: "building" });
+        expect(JSON.stringify(theirs)).not.toContain("IV-8101");
+        expect(graphCalls.some((c) => c.url.includes("/items/invoice-folder-B/children"))).toBe(true);
+        expect(graphCalls.every((c) => !c.token || c.token === "access-token-B")).toBe(true);
+      });
+
+      it("a later look applies only what changed; Graph's 410 rebuilds from nothing", async () => {
+        const fetchMock = vi.mocked(fetch);
+        const original = fetchMock.getMockImplementation()!;
+        const { syncInvoiceIndex } = await import("@/lib/invoice-index-sync");
+        try {
+          fetchMock.mockImplementation(
+            fakeDeltaA(original, {
+              "token=after-pass": {
+                value: [{ id: "a-2", deleted: {} }],
+                "@odata.deltaLink": `${G}/me/drive/items/invoice-folder-A/delta?token=after-delete`,
+              },
+            })
+          );
+          graphCalls.length = 0;
+          expect(await syncInvoiceIndex(f.a.tenantId, { minIntervalMs: 0 })).toMatchObject({ outcome: "synced", changed: 1 });
+          expect(graphCalls).toHaveLength(1);
+          expect((await db().invoiceFolderFile.findMany({ where: { tenantId: f.a.tenantId } })).map((r) => r.itemId).sort()).toEqual(["a-1", "a-1s"]);
+
+          // The saved link is refused: the index starts again and is whole again.
+          fetchMock.mockImplementation(fakeDeltaA(original, { "token=after-delete": 410, ...firstPass }));
+          expect(await syncInvoiceIndex(f.a.tenantId, { minIntervalMs: 0 })).toMatchObject({ outcome: "synced", ready: true });
+          expect(await db().invoiceFolderFile.count({ where: { tenantId: f.a.tenantId } })).toBe(3);
+
+          // Throttled inside the minute: no Graph call at all.
+          graphCalls.length = 0;
+          expect(await syncInvoiceIndex(f.a.tenantId)).toEqual({ outcome: "throttled" });
+          expect(graphCalls).toHaveLength(0);
+        } finally {
+          fetchMock.mockImplementation(original);
+        }
+      });
+
+      it("a reply with no link never marks the index complete", async () => {
+        await resetIndex();
+        const { syncInvoiceIndex } = await import("@/lib/invoice-index-sync");
+        // The default fake answers { value: [] } — neither a next nor a delta link.
+        expect(await syncInvoiceIndex(f.a.tenantId, { minIntervalMs: 0 })).toMatchObject({ outcome: "error" });
+        const account = await db().cloudAccount.findFirstOrThrow({ where: { tenantId: f.a.tenantId } });
+        expect(account.invoiceIndexReadyAt).toBeNull();
+        expect(account.invoiceIndexError).toMatch(/neither/);
+      });
+
+      it("a file Signex writes is recorded in the writer's scope only", async () => {
+        const { recordInvoiceFolderWrite, forgetInvoiceFolderItems } = await import("@/lib/invoice-index");
+        await recordInvoiceFolderWrite(
+          f.a.tenantId,
+          { id: "a-new", name: "IV-8103.pdf", size: 5, parentReference: { id: "signed-A" } },
+          { signed: true }
+        );
+        const row = await db().invoiceFolderFile.findFirstOrThrow({ where: { itemId: "a-new" } });
+        expect(row.tenantId).toBe(f.a.tenantId);
+        expect((await db().cloudAccount.findFirstOrThrow({ where: { tenantId: f.a.tenantId } })).invoiceSignedFolderId).toBe("signed-A");
+        expect((await db().cloudAccount.findFirstOrThrow({ where: { tenantId: f.b.tenantId } })).invoiceSignedFolderId).toBeNull();
+
+        // B cannot forget A's file by its id.
+        await forgetInvoiceFolderItems(f.b.tenantId, ["a-new"]);
+        expect(await db().invoiceFolderFile.count({ where: { itemId: "a-new" } })).toBe(1);
+        await forgetInvoiceFolderItems(f.a.tenantId, ["a-new"]);
+        expect(await db().invoiceFolderFile.count({ where: { itemId: "a-new" } })).toBe(0);
+        await resetIndex();
+      });
     });
   });
   // ── Looking across branches: overview, activity, usage ──────────────

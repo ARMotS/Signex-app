@@ -344,6 +344,8 @@ export async function disconnectCloudAccount(tenantId: string): Promise<void> {
   await scopedPrisma(tenantId).cloudAccount.deleteMany({
     where: { provider: PROVIDER },
   });
+  // The invoice folder index described that drive; a reconnect builds it again.
+  await scopedPrisma(tenantId).invoiceFolderFile.deleteMany({ where: {} });
 }
 
 /**
@@ -497,7 +499,7 @@ export interface OneDriveItem {
   lastModifiedDateTime: string;
   file?: { mimeType: string };
   folder?: { childCount: number };
-  parentReference?: { path: string };
+  parentReference?: { path: string; id?: string };
 }
 
 export interface OneDriveFolder {
@@ -1368,13 +1370,13 @@ export async function ensureSubfolder(
 
 /**
  * Upload a signed invoice to this scope's invoice folder "signed" subfolder.
- * Returns the uploaded item's id (null if Graph did not say).
+ * Returns the uploaded item as Graph described it (null if it did not say).
  */
 export async function uploadSignedInvoiceToOneDrive(
   tenantId: string,
   filename: string,
   buffer: Buffer
-): Promise<string | null> {
+): Promise<OneDriveItem | null> {
   const account = await getAccount(tenantId);
 
   if (!account?.invoiceFolderItemId) {
@@ -1407,8 +1409,13 @@ export async function uploadSignedInvoiceToOneDrive(
     const err = await res.text();
     throw new Error(`Graph API upload error (${res.status}): ${err}`);
   }
-  const item = await res.json().catch(() => null);
-  return item?.id ?? null;
+  const item = (await res.json().catch(() => null)) as OneDriveItem | null;
+  if (!item?.id) return null;
+  // The folder it went into is known here even when the reply leaves it out.
+  return {
+    ...item,
+    parentReference: { path: item.parentReference?.path ?? "", id: item.parentReference?.id ?? signedFolderId },
+  };
 }
 
 /**
@@ -1516,10 +1523,103 @@ export async function listInvoiceFolder(
   if (!account?.invoiceFolderItemId) return { pdfs: [], signed: [] };
 
   const isPdf = (item: OneDriveItem) => !item.folder && item.name.toLowerCase().endsWith(".pdf");
-  const children = await listFolderById(tenantId, account.invoiceFolderItemId);
-  const signedFolder = children.find((item) => item.folder && item.name.toLowerCase() === "signed");
-  const signed = signedFolder ? await listFolderById(tenantId, signedFolder.id) : [];
+  // Both folders at once (signed/ addressed by path from the invoice folder,
+  // as getSignedInvoiceItemByName does), and only the fields this needs:
+  // whole items carry download URLs, authors and hashes, several times the
+  // bytes per page on a folder of thousands.
+  const folderId = encodeURIComponent(account.invoiceFolderItemId);
+  const [children, signed] = await Promise.all([
+    graphGetAllItems(tenantId, `/me/drive/items/${folderId}/children?$top=200&$select=${LISTING_SELECT}`),
+    listSignedChildrenOrEmpty(tenantId, folderId),
+  ]);
   return { pdfs: children.filter(isPdf), signed: signed.filter(isPdf) };
+}
+
+const LISTING_SELECT = "id,name,size,lastModifiedDateTime,file,folder";
+
+/** The invoice folder's signed/ children; none when there is no signed/ yet. */
+async function listSignedChildrenOrEmpty(tenantId: string, folderId: string): Promise<OneDriveItem[]> {
+  const first = await graphGetOrNull<{ value?: OneDriveItem[]; "@odata.nextLink"?: string }>(
+    tenantId,
+    `/me/drive/items/${folderId}:/${SIGNED_SUBFOLDER}:/children?$top=200&$select=${LISTING_SELECT}`
+  );
+  if (!first) return [];
+  const rest = first["@odata.nextLink"] ? await graphGetAllItems(tenantId, first["@odata.nextLink"]) : [];
+  return [...(first.value ?? []), ...rest];
+}
+
+// ─── Invoice folder delta (lib/invoice-index-sync.ts) ─────────────────────
+
+/** One item as Graph delta reports it. A removed item carries `deleted`. */
+export interface DeltaItem {
+  id: string;
+  name?: string;
+  size?: number;
+  lastModifiedDateTime?: string;
+  parentReference?: { id?: string };
+  file?: object;
+  folder?: object;
+  deleted?: object;
+}
+
+export interface DeltaPage {
+  items: DeltaItem[];
+  /** More of this pass to fetch. */
+  nextLink: string | null;
+  /** The pass is complete; ask this next time for what changed since. */
+  deltaLink: string | null;
+}
+
+/**
+ * Graph will not carry on from the saved link (410, or a link that is not
+ * Graph's): the index must be built again from nothing.
+ */
+export class DeltaResyncRequired extends Error {}
+
+const DELTA_SELECT = "id,name,size,lastModifiedDateTime,parentReference,file,folder,deleted";
+
+/**
+ * One page of Graph delta over this scope's invoice folder and everything in
+ * it. `link` null starts a full pass; otherwise it is the nextLink/deltaLink a
+ * previous page gave. Always this scope's own token.
+ */
+export async function invoiceFolderDeltaPage(
+  tenantId: string,
+  folderItemId: string,
+  link: string | null
+): Promise<DeltaPage> {
+  let url: string;
+  if (link) {
+    // Only ever followed back to Graph: the link is stored in the database
+    // and sent with this scope's bearer token.
+    let origin: string | null = null;
+    try {
+      origin = new URL(link).origin;
+    } catch {
+      // not a URL
+    }
+    if (origin !== new URL(GRAPH_API_URL).origin) {
+      throw new DeltaResyncRequired("The saved delta link is not a Microsoft Graph link");
+    }
+    url = link;
+  } else {
+    url = `${GRAPH_API_URL}/me/drive/items/${encodeURIComponent(folderItemId)}/delta?$select=${DELTA_SELECT}`;
+  }
+
+  const token = await requireToken(tenantId);
+  const res = await graphFetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 410) {
+    throw new DeltaResyncRequired(`Graph asked for a full resync (410): ${await res.text()}`);
+  }
+  if (!res.ok) {
+    throw new Error(`Graph API error (${res.status}): ${await res.text()}`);
+  }
+  const data = await res.json();
+  return {
+    items: Array.isArray(data?.value) ? (data.value as DeltaItem[]) : [],
+    nextLink: typeof data?.["@odata.nextLink"] === "string" ? data["@odata.nextLink"] : null,
+    deltaLink: typeof data?.["@odata.deltaLink"] === "string" ? data["@odata.deltaLink"] : null,
+  };
 }
 
 /**
