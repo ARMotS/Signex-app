@@ -12,7 +12,7 @@
 
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import { pdfText, wrapText } from "./collections";
-import { formatSaDateTime } from "./sa-time";
+import { formatSaDate, formatSaDateTime } from "./sa-time";
 
 const PAGE_WIDTH = 595.28;
 const PAGE_HEIGHT = 841.89;
@@ -199,7 +199,7 @@ export async function buildSignedCreditNotePdf(
       "Collections",
       data.collections.length
         ? data.collections
-            .map((col) => `${col.collectionNo} (${col.status.toLowerCase()}${col.collectedAt ? `, ${day(col.collectedAt)}` : ""})`)
+            .map((col) => `${col.collectionNo} (${col.status.toLowerCase()}${col.collectedAt ? `, ${formatSaDate(col.collectedAt)}` : ""})`)
             .join(", ")
         : "None linked",
     ],

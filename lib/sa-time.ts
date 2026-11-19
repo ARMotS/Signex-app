@@ -39,3 +39,9 @@ export function formatSaDateTime(at: Date): string {
   const p = saParts(at);
   return `${p.day} ${MONTHS[Number(p.month) - 1]} ${p.year}, ${p.hour}:${p.minute}`;
 }
+
+/** "19 Nov 2026": the South African calendar day of a moment. */
+export function formatSaDate(at: Date): string {
+  const p = saParts(at);
+  return `${p.day} ${MONTHS[Number(p.month) - 1]} ${p.year}`;
+}
