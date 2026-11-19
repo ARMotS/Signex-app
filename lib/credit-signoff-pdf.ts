@@ -12,6 +12,7 @@
 
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import { pdfText, wrapText } from "./collections";
+import { formatSaDateTime } from "./sa-time";
 
 const PAGE_WIDTH = 595.28;
 const PAGE_HEIGHT = 841.89;
@@ -111,8 +112,7 @@ const money = (n: number | null) =>
   n === null ? "—" : `R ${n.toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const day = (d: Date | null) =>
   d ? d.toLocaleDateString("en-ZA", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }) : "—";
-const stamp = (d: Date) =>
-  d.toLocaleString("en-ZA", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+const stamp = (d: Date) => formatSaDateTime(d);
 
 /** A page cursor that starts a new page when the next block will not fit. */
 class Cursor {

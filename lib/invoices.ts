@@ -22,6 +22,7 @@ import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { readConfig } from "./config";
 import { wrapText } from "./collections";
 import { drawnWidth } from "./pdf-measure";
+import { formatSaDateTime } from "./sa-time";
 import {
   getOneDriveInvoiceSource,
   listOneDriveInvoiceFiles,
@@ -317,13 +318,8 @@ export async function embedSignatureOnPdf(
     pdfDoc.embedFont(StandardFonts.HelveticaBold),
   ]);
   const now = new Date();
-  const timestamp = now.toLocaleString("en-ZA", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  // South African time, not the server's (UTC) — see lib/sa-time.ts.
+  const timestamp = formatSaDateTime(now);
 
   // The name is typed by the customer, and the standard Helvetica font can
   // only encode Latin-1: an emoji or another script would make drawText throw
