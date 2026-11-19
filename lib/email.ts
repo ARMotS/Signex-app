@@ -10,7 +10,7 @@ import { DeliveryConfirmation } from "@/emails/DeliveryConfirmation";
 import { CollectionReceipt } from "@/emails/CollectionReceipt";
 import { CourierDispatch, type CourierDispatchProps } from "@/emails/CourierDispatch";
 import { CreditNoteSigned, type CreditNoteSignedProps } from "@/emails/CreditNoteSigned";
-import { format } from "date-fns";
+import { formatSaDateTime } from "./sa-time";
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp-relay.brevo.com",
@@ -61,7 +61,7 @@ export async function sendDeliveryConfirmation(
   params: DeliveryConfirmationParams
 ): Promise<{ success: boolean; emailId?: string; error?: string }> {
   try {
-    const signedAtFormatted = format(params.signedAt, "dd MMM yyyy, HH:mm");
+    const signedAtFormatted = formatSaDateTime(params.signedAt);
 
     const html = await render(
       DeliveryConfirmation({
@@ -127,7 +127,7 @@ export async function sendCollectionReceipt(
     const html = await render(
       CollectionReceipt({
         ...params,
-        collectedAt: format(params.collectedAt, "dd MMM yyyy, HH:mm"),
+        collectedAt: formatSaDateTime(params.collectedAt),
       })
     );
 

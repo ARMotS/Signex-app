@@ -1641,3 +1641,62 @@ export async function listOneDriveSignedInvoices(
     return item.name.toLowerCase().endsWith(".pdf");
   });
 }
+
+// ─── Guarded rewrite (prisma/fix-printed-times.ts) ────────────────────────
+
+export interface DriveItemVersion {
+  id: string;
+  name: string;
+  eTag: string;
+  lastModifiedDateTime: string;
+  fileSystemInfo?: { lastModifiedDateTime?: string };
+}
+
+/** One file's eTag and modified times, read with this scope's token. */
+export async function getDriveItemVersion(tenantId: string, itemId: string): Promise<DriveItemVersion> {
+  return graphGet(
+    tenantId,
+    `/me/drive/items/${encodeURIComponent(itemId)}?$select=id,name,eTag,lastModifiedDateTime,fileSystemInfo`
+  );
+}
+
+/**
+ * Replace a file's bytes only while it is still the version that was read
+ * (If-Match on its eTag), then set its modified time back. The Invoices tab
+ * and Backups read a signed copy's modified time as when it was signed, so a
+ * correction must not make every file read as signed today.
+ *
+ * `replaced: false` means the file changed since it was read (412) and was
+ * left alone. `lastModifiedDateTime` is what Graph reports afterwards, so the
+ * caller can see whether the time really held.
+ */
+export async function replaceFileContentIfUnchanged(
+  tenantId: string,
+  itemId: string,
+  eTag: string,
+  buffer: Buffer,
+  keepModified: string | null
+): Promise<{ replaced: boolean; lastModifiedDateTime?: string }> {
+  const token = await requireToken(tenantId);
+  const base = `${GRAPH_API_URL}/me/drive/items/${encodeURIComponent(itemId)}`;
+
+  const put = await graphFetch(`${base}/content`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/pdf", "If-Match": eTag },
+    body: new Uint8Array(buffer),
+  });
+  if (put.status === 412) return { replaced: false };
+  if (!put.ok) throw new Error(`Graph API upload error (${put.status}): ${await put.text()}`);
+  let item = (await put.json()) as DriveItemVersion;
+
+  if (keepModified) {
+    const patch = await graphFetch(base, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ fileSystemInfo: { lastModifiedDateTime: keepModified } }),
+    });
+    if (!patch.ok) throw new Error(`Graph API update error (${patch.status}): ${await patch.text()}`);
+    item = (await patch.json()) as DriveItemVersion;
+  }
+  return { replaced: true, lastModifiedDateTime: item.lastModifiedDateTime };
+}

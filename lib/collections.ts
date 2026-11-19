@@ -30,6 +30,7 @@ import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import type { CollectionStatus, CollectionType, UpliftSubtype } from "@prisma/client";
 import { readConfig } from "./config";
 import { scopedPrisma } from "./db-scoped";
+import { formatSaDateTime } from "./sa-time";
 import {
   getOneDriveCollectionsSource,
   listOneDriveCollectionDocuments,
@@ -1006,16 +1007,7 @@ export async function buildSignedCollectionPdf(
     ["Reason", data.exceptionReason || null],
     ["Notes", data.notes || null],
     ["Driver", data.driverName || null],
-    [
-      "Date / time",
-      data.collectedAt.toLocaleString("en-ZA", {
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    ],
+    ["Date / time", formatSaDateTime(data.collectedAt)],
   ];
 
   const labelWidth = 120;

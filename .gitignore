@@ -69,3 +69,6 @@ signex-trips.json
 
 .vercel
 .env*
+
+# originals saved by db:fix-printed-times (client documents)
+/printed-time-backup/
