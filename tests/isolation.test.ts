@@ -8268,4 +8268,189 @@ suite("cross-ADMIN isolation", () => {
       expect(withDevices[0]).toBe(s.adminId); // self first, devices or not
     });
   });
+  // ── Vehicles ─────────────────────────────────────────────────────────
+  //
+  // A branch's fleet is its own: another scope's vehicle is a 404 on every
+  // route, and a sheet's REGNO links only to a vehicle in the uploader's scope
+  // — both scopes hold the same registration here, so only scoping can pick.
+  describe("vehicles", () => {
+    const create = async (fx: typeof f.a, body: Record<string, unknown>) => {
+      const { POST } = await import("@/app/api/vehicles/route");
+      useSession(adminSession(fx));
+      return POST(req("/api/vehicles", { method: "POST", body }));
+    };
+    const save = async (fx: typeof f.a, regNo: string) => {
+      const { saveTripSheet } = await import("@/lib/trip-data");
+      return saveTripSheet(fx.tenantId, {
+        driverId: fx.driver.id,
+        driverName: fx.driver.name,
+        regNo,
+        uploadedBy: "test",
+        sourceFilename: "vehicles.csv",
+        stops: [],
+      });
+    };
+
+    it("lists, changes and deletes only the caller's own vehicles", async () => {
+      const { GET } = await import("@/app/api/vehicles/route");
+      const { PUT, DELETE } = await import("@/app/api/vehicles/[id]/route");
+
+      const a = await create(f.a, { registration: "ca 123-456", make: "Toyota", type: "Bakkie" });
+      expect(a.status).toBe(201);
+      const aVehicle = (await a.json()).vehicle;
+      expect(aVehicle.registration).toBe("CA 123-456");
+      const b = await create(f.b, { registration: "CA123456" });
+      // The same registration in another scope is not a clash.
+      expect(b.status).toBe(201);
+      const bVehicle = (await b.json()).vehicle;
+
+      try {
+        useSession(adminSession(f.a));
+        const listed = (await (await GET(req("/api/vehicles"))).json()).vehicles.map((v: { id: string }) => v.id);
+        expect(listed).toEqual([aVehicle.id]);
+
+        // B's vehicle is not found from A: the same 404 as an id that exists nowhere.
+        for (const res of [
+          await PUT(req(`/api/vehicles/${bVehicle.id}`, { method: "PUT", body: { isActive: false } }), params({ id: bVehicle.id })),
+          await DELETE(req(`/api/vehicles/${bVehicle.id}`, { method: "DELETE" }), params({ id: bVehicle.id })),
+        ]) {
+          expect(res.status).toBe(404);
+        }
+        const bRow = await db().vehicle.findUniqueOrThrow({ where: { id: bVehicle.id } });
+        expect(bRow.isActive).toBe(true);
+
+        // A second vehicle with the same key in A is a 409.
+        expect((await create(f.a, { registration: "CA-123 456" })).status).toBe(409);
+
+        // A DRIVER cannot manage vehicles.
+        useSession(driverSession(f.a));
+        expect((await GET(req("/api/vehicles"))).status).toBe(403);
+      } finally {
+        await db().vehicle.deleteMany({ where: { id: { in: [aVehicle.id, bVehicle.id] } } });
+      }
+    });
+
+    it("links a sheet's REGNO to the uploader's own vehicle only, and keeps the raw REGNO", async () => {
+      const aVehicle = (await (await create(f.a, { registration: "GP 77 XY" })).json()).vehicle;
+      const bVehicle = (await (await create(f.b, { registration: "GP77XY" })).json()).vehicle;
+      try {
+        const linked = await save(f.a, "gp-77-xy");
+        const unmatched = await save(f.a, "ZZ 999");
+        const blank = await save(f.a, "");
+        const inB = await save(f.b, "GP 77 XY");
+
+        const row = (id: string) => db().tripSheet.findUniqueOrThrow({ where: { id } });
+        expect((await row(linked.id)).vehicleId).toBe(aVehicle.id);
+        expect((await row(linked.id)).regNo).toBe("gp-77-xy");
+        // Unmatched or blank: the REGNO is kept as before and nothing is linked.
+        expect((await row(unmatched.id)).vehicleId).toBeNull();
+        expect((await row(unmatched.id)).regNo).toBe("ZZ 999");
+        expect((await row(blank.id)).vehicleId).toBeNull();
+        expect((await row(inB.id)).vehicleId).toBe(bVehicle.id);
+
+        // The database refuses a trip pointing at another scope's vehicle.
+        await expect(
+          db().tripSheet.update({ where: { id: unmatched.id }, data: { vehicleId: bVehicle.id } })
+        ).rejects.toThrow();
+
+        // A vehicle on a trip cannot be deleted, only deactivated.
+        const { DELETE, PUT } = await import("@/app/api/vehicles/[id]/route");
+        useSession(adminSession(f.a));
+        const refused = await DELETE(req(`/api/vehicles/${aVehicle.id}`, { method: "DELETE" }), params({ id: aVehicle.id }));
+        expect(refused.status).toBe(409);
+        expect((await refused.json()).code).toBe("IN_USE");
+        const deactivated = await PUT(
+          req(`/api/vehicles/${aVehicle.id}`, { method: "PUT", body: { isActive: false } }),
+          params({ id: aVehicle.id })
+        );
+        expect(deactivated.status).toBe(200);
+        expect((await deactivated.json()).vehicle).toMatchObject({ isActive: false, liveTrips: 1, used: true });
+
+        // An inactive vehicle still links: the sheet says it drove.
+        const again = await save(f.a, "GP 77 XY");
+        expect((await row(again.id)).vehicleId).toBe(aVehicle.id);
+
+        await db().tripSheet.deleteMany({ where: { id: { in: [linked.id, unmatched.id, blank.id, inB.id, again.id] } } });
+      } finally {
+        await db().tripSheet.deleteMany({ where: { vehicleId: { in: [aVehicle.id, bVehicle.id] } } });
+        await db().vehicle.deleteMany({ where: { id: { in: [aVehicle.id, bVehicle.id] } } });
+      }
+    });
+
+    it("a vehicle archived with a completed trip can no longer be deleted", async () => {
+      const { DELETE } = await import("@/app/api/vehicles/[id]/route");
+      const vehicle = (await (await create(f.a, { registration: "ND 4321" })).json()).vehicle;
+      const archive = await db().completedTripSheet.create({
+        data: {
+          tripSheetId: "gone",
+          driverId: f.a.driver.id,
+          driverName: f.a.driver.name,
+          vehicleId: vehicle.id,
+          sourceFilename: "old.csv",
+          uploadedAt: new Date(),
+          uploadedBy: "test",
+          totalStops: 0,
+          signedStops: 0,
+          stops: [],
+          tenantId: f.a.tenantId,
+        },
+      });
+      try {
+        useSession(adminSession(f.a));
+        const res = await DELETE(req(`/api/vehicles/${vehicle.id}`, { method: "DELETE" }), params({ id: vehicle.id }));
+        expect(res.status).toBe(409);
+        await db().completedTripSheet.delete({ where: { id: archive.id } });
+        const ok = await DELETE(req(`/api/vehicles/${vehicle.id}`, { method: "DELETE" }), params({ id: vehicle.id }));
+        expect(ok.status).toBe(200);
+        expect(await db().vehicle.count({ where: { id: vehicle.id } })).toBe(0);
+      } finally {
+        await db().completedTripSheet.deleteMany({ where: { id: archive.id } });
+        await db().vehicle.deleteMany({ where: { id: vehicle.id } });
+      }
+    });
+
+    it("deleting an admin takes their vehicles with it, with or without a purge", async () => {
+      const { POST, DELETE } = await import("@/app/api/admin/users/route");
+      const newAdmin = async (label: string) => {
+        useSession(superAdminSession(f));
+        const created = await (
+          await POST(
+            req("/api/admin/users", {
+              method: "POST",
+              body: {
+                name: `Admin ${label}`,
+                email: `admin-${label}@example.test`,
+                username: `office.${label}`,
+                password: `office-${label}-pass1`,
+              },
+            })
+          )
+        ).json();
+        const admin = await db().admin.findUniqueOrThrow({ where: { email: `admin-${label}@example.test` } });
+        return { tenantId: created.scope.tenantId as string, adminId: admin.id };
+      };
+
+      // Only a vehicle: configuration, so no purge — it must not block the scope's delete.
+      const bare = await newAdmin("veh1");
+      await db().vehicle.create({ data: { tenantId: bare.tenantId, registration: "V1", registrationKey: "V1" } });
+      expect((await DELETE(req("/api/admin/users", { method: "DELETE", body: { id: bare.adminId } }))).status).toBe(200);
+      expect(await db().vehicle.count({ where: { tenantId: bare.tenantId } })).toBe(0);
+      expect(await db().tenant.count({ where: { id: bare.tenantId } })).toBe(0);
+
+      // A vehicle on a live trip: purged after the trip that Restrict-references it.
+      const busy = await newAdmin("veh2");
+      const vehicle = await db().vehicle.create({ data: { tenantId: busy.tenantId, registration: "V2", registrationKey: "V2" } });
+      const driver = await db().driver.create({ data: { tenantId: busy.tenantId, name: "Veh Driver" } });
+      await db().tripSheet.create({
+        data: { tenantId: busy.tenantId, driverId: driver.id, vehicleId: vehicle.id, regNo: "V2", sourceFilename: "v.csv", uploadedBy: "t" },
+      });
+      expect((await DELETE(req("/api/admin/users", { method: "DELETE", body: { id: busy.adminId } }))).status).toBe(409);
+      const purged = await DELETE(
+        req("/api/admin/users", { method: "DELETE", body: { id: busy.adminId, deleteScopeData: true } })
+      );
+      expect(purged.status).toBe(200);
+      expect(await db().vehicle.count({ where: { tenantId: busy.tenantId } })).toBe(0);
+      expect(await db().tenant.count({ where: { id: busy.tenantId } })).toBe(0);
+    });
+  });
 });

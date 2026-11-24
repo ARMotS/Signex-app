@@ -98,6 +98,7 @@ model Tenant {
   courierTripSheetInvoices CourierTripSheetInvoice[]
   courierImportFailures CourierImportFailure[]
   invoiceFolderFiles InvoiceFolderFile[]
+  vehicles      Vehicle[]
 
   // Composite-FK target: an allocation names a branch together with its
   // company and kind, so allocating across companies, or allocating anything
@@ -242,6 +243,39 @@ model Driver {
   @@index([active])
 }
 
+// ─── Vehicles ─────────────────────────────────────────────────────────────
+//
+// A branch's fleet. Separate from Driver on purpose: drivers swap vehicles, so
+// a trip names its vehicle itself and nothing defaults one from the driver or
+// from the last trip (future tracking must never be attributed to the wrong
+// vehicle by a silent default). An Excel sheet's REGNO links to a vehicle only
+// when its registrationKey matches — never required, never a warning.
+
+model Vehicle {
+  id                String      @id @default(cuid())
+  /// As entered, for display: "CA 123-456".
+  registration      String
+  /// vehicleRegistrationKey(registration): uppercase, letters and digits only
+  /// ("CA123456"). What a sheet's REGNO is matched on; unique per scope.
+  registrationKey   String
+  make              String?
+  model             String?
+  /// Free text (Bakkie, Truck, Van …) — fleets name their own kinds.
+  type              String?
+  isActive          Boolean     @default(true)
+  licenceDiscExpiry DateTime?   @db.Date
+  tenantId          String      @default("")
+  tenant            Tenant      @relation(fields: [tenantId], references: [id])
+  tripSheets        TripSheet[]
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  @@unique([tenantId, registrationKey])
+  // Composite-FK target so a TripSheet cannot reference another scope's vehicle.
+  @@unique([tenantId, id])
+  @@index([tenantId])
+}
+
 // ─── Sign-in names ────────────────────────────────────────────────────────
 //
 // Every account signs in with a username and password from one form that has
@@ -323,6 +357,10 @@ model TripSheet {
   uploadedBy     String
   driverId       String
   regNo          String?
+  /// The fleet vehicle the sheet's REGNO names, when it names one of this
+  /// scope's vehicles (matched on Vehicle.registrationKey). Null when REGNO is
+  /// blank or matches nothing — regNo stays the record of what the sheet said.
+  vehicleId      String?
   status         TripSheetStatus @default(ACTIVE)
   adminId        String?
   /// The import template the sheet was read with; null for the built-in
@@ -344,10 +382,14 @@ model TripSheet {
   // refuses to delete a driver who still has one. See deleteDriver.
   driver Driver @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
   admin  Admin? @relation(fields: [tenantId, adminId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+  // Composite, so a trip can never point at another scope's vehicle. Restrict:
+  // a vehicle that has been on a trip is deactivated, never deleted.
+  vehicle Vehicle? @relation(fields: [tenantId, vehicleId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
 
   @@unique([tenantId, id])
   @@index([tenantId])
   @@index([driverId])
+  @@index([vehicleId])
   @@index([driverId, status])
   @@index([date])
 }
@@ -719,6 +761,9 @@ model CompletedTripSheet {
   driverId       String
   driverName     String
   regNo          String?
+  /// The vehicle the trip was linked to (TripSheet.vehicleId), frozen. No FK:
+  /// this is an archive, like driverId.
+  vehicleId      String?
   sourceFilename String
   /// Where the source file landed in processed/, or null if the move failed.
   archivedFile   String?
@@ -751,6 +796,7 @@ model CompletedTripSheet {
   @@index([tenantId])
   @@index([tenantId, completedAt])
   @@index([tenantId, driverId])
+  @@index([tenantId, vehicleId])
 }
 
 /// A delivery confirmation resent from the completed-trip archive.
@@ -1213,6 +1259,9 @@ enum AuditAction {
   BRANCH_DETACH
   ALLOCATE
   DEALLOCATE
+  VEHICLE_CREATE
+  VEHICLE_UPDATE
+  VEHICLE_DELETE
 }
 
 // Append-only: a trigger in the migration (20261025090000_audit_log_actor)

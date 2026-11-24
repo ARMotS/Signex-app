@@ -29,6 +29,7 @@
 
 import { scopedPrisma } from "./db-scoped";
 import { logAudit } from "./audit";
+import { vehicleIdForRegNo } from "./vehicles";
 
 export const REALLOCATION_REASON_MAX = 300;
 
@@ -129,6 +130,10 @@ export async function reallocateStops(
   }
   const pendingCollections = stops.reduce((n, s) => n + s.collections.length, 0);
 
+  // A new REGNO is matched to a vehicle afresh (none if it names none); no new
+  // REGNO keeps the original run's vehicle along with its REGNO.
+  const vehicleId = input.regNo ? await vehicleIdForRegNo(tenantId, input.regNo) : trip.vehicleId;
+
   let toTripSheetId: string;
   try {
     toTripSheetId = await db.$transaction(async (tx) => {
@@ -138,6 +143,7 @@ export async function reallocateStops(
           uploadedBy: input.reallocatedBy,
           driverId: toDriver.id,
           regNo: input.regNo ?? trip.regNo,
+          vehicleId,
           adminId: trip.adminId,
           status: "ACTIVE",
         },
