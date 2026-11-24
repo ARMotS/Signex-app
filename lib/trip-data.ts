@@ -24,6 +24,7 @@ import { readInvoiceNoPattern } from "./config";
 import { normalizeInvoiceNo, normalizedInvoiceNoOrNull, type InvoiceNoPattern } from "./invoice-number";
 import { ensureInvoices, scheduleInvoiceHeaders } from "./invoice-registry";
 import { scheduleCollectionSheets } from "./collection-sheet-sync";
+import { vehicleIdForRegNo } from "./vehicles";
 
 export type StopStatus = "PENDING" | "IN_PROGRESS" | "SIGNED";
 
@@ -346,6 +347,10 @@ export async function saveTripSheet(
     pattern
   );
 
+  // REGNO stays exactly what the sheet said; when it names one of this scope's
+  // vehicles the trip is linked to it as well. Never a warning, never required.
+  const vehicleId = await vehicleIdForRegNo(tenantId, trip.regNo);
+
   // The scoped client stamps tenantId on the sheet AND on the nested stops.
   const created = await db.tripSheet.create({
     data: {
@@ -353,6 +358,7 @@ export async function saveTripSheet(
       uploadedBy: trip.uploadedBy,
       driverId: trip.driverId,
       regNo: trip.regNo || null,
+      vehicleId,
       status,
       importTemplateId: trip.importTemplateId ?? null,
       ...(trip.mappingSnapshot !== undefined ? { mappingSnapshot: trip.mappingSnapshot } : {}),
@@ -947,6 +953,7 @@ export async function completeTripSheet(
         driverId: trip.driverId,
         driverName: driver?.name || "Unknown",
         regNo: trip.regNo,
+        vehicleId: trip.vehicleId,
         sourceFilename: trip.sourceFilename,
         archivedFile,
         uploadedAt: trip.date,

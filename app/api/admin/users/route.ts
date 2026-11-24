@@ -591,6 +591,9 @@ export const DELETE = withAuth(async (request: NextRequest) => {
       await tx.collection.deleteMany({ where: { tenantId } });
       await tx.stop.deleteMany({ where: { tenantId } });
       await tx.tripSheet.deleteMany({ where: { tenantId } });
+      // Configuration, like templates — after the trip sheets, which
+      // Restrict-reference them.
+      await tx.vehicle.deleteMany({ where: { tenantId } });
       // No FK to TripSheet (it outlives the sheet), so it does not cascade.
       await tx.removedStop.deleteMany({ where: { tenantId } });
       await tx.removedCollection.deleteMany({ where: { tenantId } });
@@ -639,6 +642,8 @@ export const DELETE = withAuth(async (request: NextRequest) => {
         // scope holding only those skips the purge above — and they would
         // block the Tenant delete on its foreign key.
         await tx.importTemplate.deleteMany({ where: { tenantId } });
+        // Vehicles are configuration too (no trip sheets are left to hold them).
+        await tx.vehicle.deleteMany({ where: { tenantId } });
         // A note about a file in the folder, not workspace data — same reason.
         await tx.courierImportFailure.deleteMany({ where: { tenantId } });
         // The invoice folder index is a copy of what OneDrive holds — same.

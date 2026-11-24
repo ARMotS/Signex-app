@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type ReactNode } from "react";
 import PasswordInput from "@/components/PasswordInput";
+import VehiclesPanel from "@/components/admin/VehiclesPanel";
 import Pager from "@/components/ui/Pager";
 import UsernameField, { type UsernameStatus } from "@/components/UsernameField";
 import { validatePassword, PASSWORD_HINT } from "@/lib/credentials";
@@ -23,7 +24,62 @@ const LABEL_CLASS = "block text-xs font-medium text-ink-muted uppercase tracking
 /** A username the form may submit: new and free, or the account's own. */
 const usernameUsable = (s: UsernameStatus) => s === "available" || s === "unchanged";
 
+type Section = "drivers" | "vehicles";
+
+const SECTIONS: { id: Section; label: string }[] = [
+  { id: "drivers", label: "Drivers" },
+  { id: "vehicles", label: "Vehicles" },
+];
+
+/**
+ * Drivers and the branch's vehicles, as two tabs. Separate lists on purpose:
+ * drivers swap vehicles, so neither is ever a default for the other. The tab
+ * is kept in the URL (?tab=vehicles) so a refresh or a shared link reopens it.
+ */
 export default function DriversPage() {
+  const [section, setSection] = useState<Section>("drivers");
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("tab") === "vehicles") setSection("vehicles");
+  }, []);
+
+  const choose = (next: Section) => {
+    setSection(next);
+    const url = new URL(window.location.href);
+    if (next === "drivers") url.searchParams.delete("tab");
+    else url.searchParams.set("tab", next);
+    window.history.replaceState(window.history.state, "", url.toString());
+  };
+
+  const tabBar = (
+    <div role="tablist" className="flex items-center border-b border-ink-border mb-6">
+      {SECTIONS.map((s) => (
+        <button
+          key={s.id}
+          type="button"
+          role="tab"
+          aria-selected={section === s.id}
+          onClick={() => choose(s.id)}
+          className={`px-3 sm:px-5 py-3 font-mono text-[13px] sm:text-sm font-medium uppercase tracking-wide whitespace-nowrap border-b-2 -mb-px transition-colors ${
+            section === s.id
+              ? "border-ink-green text-ink-black"
+              : "border-transparent text-ink-muted hover:text-ink-black"
+          }`}
+        >
+          {s.label}
+        </button>
+      ))}
+    </div>
+  );
+
+  return (
+    <div className="animate-fade-in">
+      {section === "vehicles" ? <VehiclesPanel tabBar={tabBar} /> : <DriversTab tabBar={tabBar} />}
+    </div>
+  );
+}
+
+function DriversTab({ tabBar }: { tabBar: ReactNode }) {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
@@ -210,8 +266,8 @@ export default function DriversPage() {
   const withoutLogin = drivers.filter((d) => !d.canSignIn);
 
   return (
-    <div className="animate-fade-in">
-      <div className="flex items-start justify-between mb-8 gap-4">
+    <>
+      <div className="flex items-start justify-between mb-6 gap-4">
         <div>
           <h1 className="text-2xl font-semibold text-ink-black tracking-tight">Drivers</h1>
           <p className="text-sm text-ink-muted mt-1">
@@ -235,6 +291,8 @@ export default function DriversPage() {
           Add Driver
         </button>
       </div>
+
+      {tabBar}
 
       {deleteError && (
         <div
@@ -560,6 +618,6 @@ export default function DriversPage() {
           />
         </div>
       )}
-    </div>
+    </>
   );
 }
