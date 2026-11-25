@@ -35,9 +35,10 @@ const serwist = new Serwist({
     // with the 10s timeout below, a big invoice folder that took 11s to list
     // was answered from the cache instead — a copy up to a day old, shown as
     // current, totals and all. The cache still answers when the network fails.
+    // The invoice picker reads the same folder.
     {
       matcher: ({ url }) =>
-        /^\/api\/(invoices|collections|credit-notes|courier|dashboard|exceptions)$/.test(url.pathname),
+        /^\/api\/(invoices|invoices\/picker|collections|credit-notes|courier|dashboard|exceptions)$/.test(url.pathname),
       handler: new NetworkFirst({
         cacheName: "signex-api-cache",
         plugins: [

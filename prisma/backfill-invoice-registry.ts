@@ -37,6 +37,7 @@ async function main() {
   const { readInvoiceNoPattern } = await import("../lib/config");
   const { normalizeInvoiceNo } = await import("../lib/invoice-number");
   const { ensureInvoices } = await import("../lib/invoice-registry");
+  const { isPlaceholderCell } = await import("../lib/import-fields");
 
   if (!APPLY) {
     console.log("\nDRY RUN — nothing will be written. Re-run with `-- --apply`.\n");
@@ -60,7 +61,9 @@ async function main() {
     const refs = new Map<string, Ref>();
     const add = (invoiceNo: string | null | undefined, ref: Omit<Ref, "invoiceNo">) => {
       const raw = invoiceNo?.trim();
-      if (!raw) return;
+      // "0", "-", N/A: a sheet saying "no invoice" (a collection-only row). A
+      // stop never stores one, but archived and courier rows may.
+      if (!raw || isPlaceholderCell(raw)) return;
       const key = normalizeInvoiceNo(raw, pattern);
       if (!key || refs.has(key)) return;
       refs.set(key, { invoiceNo: raw, ...ref });
