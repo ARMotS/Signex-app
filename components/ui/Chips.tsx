@@ -90,3 +90,22 @@ export function collectionTone(status: string): Tone {
 export function creditNoteTone(status: string): Tone {
   return status === "SIGNED" ? "blue" : status === "REJECTED" ? "red" : status === "NEEDS_REVIEW" ? "amber" : "green";
 }
+
+/**
+ * Where a trip came from: a Trip program sheet (named by its file) or one
+ * built in Signex (named by its SX- number). Shown only once the branch has
+ * run a manual trip (hasManualTrips), so a branch that only imports sheets
+ * sees no change.
+ */
+export function TripSourceBadge({ source, className = "" }: { source: string | undefined; className?: string }) {
+  const manual = source === "MANUAL";
+  return (
+    <StatusBadge
+      tone={manual ? "blue" : "idle"}
+      title={manual ? "Built in Signex" : "Imported from a Trip program sheet"}
+      className={`shrink-0 ${className}`}
+    >
+      {manual ? "Manual" : "Trip program"}
+    </StatusBadge>
+  );
+}

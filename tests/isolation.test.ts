@@ -8453,4 +8453,192 @@ suite("cross-ADMIN isolation", () => {
       expect(await db().tenant.count({ where: { id: busy.tenantId } })).toBe(0);
     });
   });
+  // ── Trip source, manual trip numbers, courier companies ──────────────
+  //
+  // A courier company list is a branch's own (404 across scopes, uniqueness
+  // per scope). Manual trip numbers are counted per scope, so one branch's
+  // numbering never moves another's. Whether the source badge shows is read
+  // per scope too — another branch's manual trip must not switch it on.
+  describe("trip source, manual trip numbers and courier companies", () => {
+    const createCourier = async (fx: typeof f.a, body: Record<string, unknown>) => {
+      const { POST } = await import("@/app/api/courier-companies/route");
+      useSession(adminSession(fx));
+      return POST(req("/api/courier-companies", { method: "POST", body }));
+    };
+
+    it("lists, changes and deletes only the caller's own courier companies", async () => {
+      const { GET } = await import("@/app/api/courier-companies/route");
+      const { PUT, DELETE } = await import("@/app/api/courier-companies/[id]/route");
+
+      const a = await createCourier(f.a, { name: "The Courier Guy", phone: "021 555 0100", accountNumber: "ACC-1" });
+      expect(a.status).toBe(201);
+      const aCo = (await a.json()).courierCompany;
+      // The same name in another scope is not a clash.
+      const b = await createCourier(f.b, { name: "the courier guy" });
+      expect(b.status).toBe(201);
+      const bCo = (await b.json()).courierCompany;
+
+      try {
+        useSession(adminSession(f.a));
+        const listed = (await (await GET(req("/api/courier-companies"))).json()).courierCompanies;
+        expect(listed.map((c: { id: string }) => c.id)).toEqual([aCo.id]);
+
+        for (const res of [
+          await PUT(req(`/api/courier-companies/${bCo.id}`, { method: "PUT", body: { isActive: false } }), params({ id: bCo.id })),
+          await DELETE(req(`/api/courier-companies/${bCo.id}`, { method: "DELETE" }), params({ id: bCo.id })),
+        ]) {
+          expect(res.status).toBe(404);
+        }
+        expect((await db().courierCompany.findUniqueOrThrow({ where: { id: bCo.id } })).isActive).toBe(true);
+
+        // Case, punctuation and &/and are ignored for "already in your list".
+        expect((await createCourier(f.a, { name: "THE COURIER-GUY" })).status).toBe(409);
+        expect((await createCourier(f.a, { name: "" })).status).toBe(400);
+        expect((await createCourier(f.a, { name: "Fast", email: "not-an-email" })).status).toBe(400);
+
+        useSession(adminSession(f.a));
+        const edited = await PUT(
+          req(`/api/courier-companies/${aCo.id}`, { method: "PUT", body: { contactPerson: "Thandi", isActive: false } }),
+          params({ id: aCo.id })
+        );
+        expect(edited.status).toBe(200);
+        expect((await edited.json()).courierCompany).toMatchObject({ contactPerson: "Thandi", isActive: false, phone: "021 555 0100" });
+
+        // A courier company is never a customer contact: nothing in Contact.
+        expect(await db().contact.count({ where: { tenantId: f.a.tenantId, companyName: { contains: "Courier Guy" } } })).toBe(0);
+
+        // A DRIVER cannot manage courier companies.
+        useSession(driverSession(f.a));
+        expect((await GET(req("/api/courier-companies"))).status).toBe(403);
+
+        useSession(adminSession(f.a));
+        expect((await DELETE(req(`/api/courier-companies/${aCo.id}`, { method: "DELETE" }), params({ id: aCo.id }))).status).toBe(200);
+        expect(await db().courierCompany.count({ where: { id: aCo.id } })).toBe(0);
+      } finally {
+        await db().courierCompany.deleteMany({ where: { id: { in: [aCo.id, bCo.id] } } });
+      }
+    });
+
+    it("issues manual trip numbers per scope, per Johannesburg day, never twice", async () => {
+      const { issueManualTripNumber } = await import("@/lib/trip-number");
+      const { PUT } = await import("@/app/api/settings/route");
+      // 23:30 UTC on 24 Nov is already 25 Nov in Johannesburg.
+      const at = new Date("2026-11-24T23:30:00Z");
+      try {
+        expect(await issueManualTripNumber(f.a.tenantId, at)).toBe("SX-261125-01");
+        expect(await issueManualTripNumber(f.a.tenantId, at)).toBe("SX-261125-02");
+        // B's counter is its own.
+        expect(await issueManualTripNumber(f.b.tenantId, at)).toBe("SX-261125-01");
+
+        // A branch code set in A's settings goes into A's numbers only; the
+        // sequence carries on, so changing the code never repeats a number.
+        useSession(adminSession(f.a));
+        expect((await PUT(req("/api/settings", { method: "PUT", body: { branchCode: "p-5" } }))).status).toBe(200);
+        expect(await issueManualTripNumber(f.a.tenantId, at)).toBe("SX-P5-261125-03");
+        expect(await issueManualTripNumber(f.b.tenantId, at)).toBe("SX-261125-02");
+        expect((await PUT(req("/api/settings", { method: "PUT", body: { branchCode: "P 5!" } }))).status).toBe(400);
+
+        // Two dispatchers at once still get different numbers, first of the day included.
+        const next = new Date("2026-11-26T08:00:00Z");
+        const burst = await Promise.all(Array.from({ length: 6 }, () => issueManualTripNumber(f.a.tenantId, next)));
+        expect(new Set(burst).size).toBe(6);
+        expect(burst.sort()).toEqual(["01", "02", "03", "04", "05", "06"].map((n) => `SX-P5-261126-${n}`));
+      } finally {
+        await db().tripNumberCounter.deleteMany({ where: { tenantId: { in: [f.a.tenantId, f.b.tenantId] } } });
+        await db().appConfig.deleteMany({ where: { tenantId: f.a.tenantId, key: "branchCode" } });
+      }
+    });
+
+    it("shows the source only where that branch has run a manual trip, and keeps it through reallocation and completion", async () => {
+      const { saveTripSheet, completeTripSheet, getCompletedTripSheets } = await import("@/lib/trip-data");
+      const { GET } = await import("@/app/api/trip-sheet/route");
+      const { GET: dashboard } = await import("@/app/api/dashboard/route");
+      const { POST: reallocate } = await import("@/app/api/trip-sheet/reallocate/route");
+      const flag = async (fx: typeof f.a) => {
+        useSession(adminSession(fx));
+        const list = (await (await GET(req("/api/trip-sheet"))).json()).hasManualTrips;
+        const dash = (await (await dashboard(req("/api/dashboard"))).json()).hasManualTrips;
+        expect(dash).toBe(list);
+        return list;
+      };
+
+      const relief = await db().driver.create({ data: { name: "Source Relief", tenantId: f.a.tenantId } });
+      const trip = await saveTripSheet(f.a.tenantId, {
+        driverId: f.a.driver.id,
+        driverName: f.a.driver.name,
+        regNo: "",
+        uploadedBy: "test",
+        sourceFilename: "SX-261125-07",
+        stops: [1, 2].map((n) => ({
+          stopNumber: n,
+          invoiceNumber: `INV-SRC${n}`,
+          customerName: "Source Co",
+          address: "1 Source Rd",
+          nop: 1,
+          status: "PENDING" as const,
+        })),
+      });
+      expect(trip.source).toBe("EXCEL");
+      try {
+        expect(await flag(f.a)).toBe(false);
+        expect(await flag(f.b)).toBe(false);
+
+        // Session 7 creates these; here the row is marked by hand.
+        await db().tripSheet.update({ where: { id: trip.id }, data: { source: "MANUAL" } });
+        expect(await flag(f.a)).toBe(true);
+        expect(await flag(f.b)).toBe(false);
+
+        // The run continued by another driver is still a manual trip.
+        useSession(adminSession(f.a));
+        const moved = await reallocate(
+          req("/api/trip-sheet/reallocate", {
+            method: "POST",
+            body: { tripSheetId: trip.id, stopIds: [trip.stops[1].id], toDriverId: relief.id },
+          })
+        );
+        expect(moved.status).toBe(200);
+        const continued = await db().tripSheet.findFirstOrThrow({ where: { driverId: relief.id } });
+        expect(continued.source).toBe("MANUAL");
+        expect(continued.sourceFilename).toBe("SX-261125-07");
+
+        // Completion freezes the source into the archive, and the flag stays on
+        // once no live manual trip is left.
+        await db().stop.updateMany({ where: { tripSheetId: trip.id }, data: { status: "SIGNED", signedAt: new Date() } });
+        expect((await completeTripSheet(f.a.tenantId, trip.id, "Admin A")).success).toBe(true);
+        await db().tripSheet.update({ where: { id: continued.id }, data: { source: "EXCEL" } });
+        const archived = (await getCompletedTripSheets(f.a.tenantId)).find((c) => c.tripSheetId === trip.id);
+        expect(archived?.source).toBe("MANUAL");
+        expect(await flag(f.a)).toBe(true);
+        expect(await flag(f.b)).toBe(false);
+      } finally {
+        await db().completedTripSheet.deleteMany({ where: { tripSheetId: trip.id } });
+        await db().stop.deleteMany({ where: { tripSheet: { driverId: relief.id } } });
+        await db().tripSheet.deleteMany({ where: { OR: [{ id: trip.id }, { driverId: relief.id }] } });
+        await db().reallocatedStop.deleteMany({ where: { fromTripSheetId: trip.id } });
+        await db().driver.delete({ where: { id: relief.id } });
+      }
+    });
+
+    it("deleting an admin takes their courier companies and trip counters with it", async () => {
+      const { POST, DELETE } = await import("@/app/api/admin/users/route");
+      useSession(superAdminSession(f));
+      const created = await (
+        await POST(
+          req("/api/admin/users", {
+            method: "POST",
+            body: { name: "Admin cc1", email: "admin-cc1@example.test", username: "office.cc1", password: "office-cc1-pass1" },
+          })
+        )
+      ).json();
+      const tenantId = created.scope.tenantId as string;
+      const admin = await db().admin.findUniqueOrThrow({ where: { email: "admin-cc1@example.test" } });
+      await db().courierCompany.create({ data: { tenantId, name: "Dawn Wing", nameKey: "dawn wing" } });
+      await db().tripNumberCounter.create({ data: { tenantId, day: "261125", value: 3 } });
+
+      expect((await DELETE(req("/api/admin/users", { method: "DELETE", body: { id: admin.id } }))).status).toBe(200);
+      expect(await db().courierCompany.count({ where: { tenantId } })).toBe(0);
+      expect(await db().tripNumberCounter.count({ where: { tenantId } })).toBe(0);
+      expect(await db().tenant.count({ where: { id: tenantId } })).toBe(0);
+    });
+  });
 });

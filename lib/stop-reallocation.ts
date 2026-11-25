@@ -140,6 +140,9 @@ export async function reallocateStops(
       const created = await tx.tripSheet.create({
         data: {
           sourceFilename: trip.sourceFilename,
+          // The new run is the same trip continued: a manual trip stays manual
+          // (and keeps its SX- number as its name).
+          source: trip.source,
           uploadedBy: input.reallocatedBy,
           driverId: toDriver.id,
           regNo: input.regNo ?? trip.regNo,

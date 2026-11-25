@@ -8,6 +8,7 @@ import {
 import {
   saveTripSheet,
   getAllTripSheets,
+  hasManualTrips,
   deleteTripSheet,
   deleteTripSheets,
   completeTripSheet,
@@ -257,6 +258,8 @@ export const GET = withAuth(async () => {
   return NextResponse.json({
     tripSheets,
     stats,
+    /** Show the trip source badge and filter only once the branch has run a manual trip. */
+    hasManualTrips: await hasManualTrips(ctx.tenantId, tripSheets),
   });
 });
 

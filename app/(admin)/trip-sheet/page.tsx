@@ -8,7 +8,7 @@ import { FilterSearch } from "@/components/admin/FilterSearch";
 import { matchesTokens, tokenizeQuery } from "@/lib/search-match";
 import CollectionSheetPanel, { type SheetCollection } from "@/components/admin/CollectionSheetPanel";
 import RemoveCollectionButton from "@/components/admin/RemoveCollectionButton";
-import { DocChip, StatusBadge, collectionKind, collectionTone, invoiceTone } from "@/components/ui/Chips";
+import { DocChip, StatusBadge, TripSourceBadge, collectionKind, collectionTone, invoiceTone } from "@/components/ui/Chips";
 import { awaitingCreditReview, creditReviewRequired, officeSheetDiscarded } from "@/lib/collection-confirm";
 import MappingWizard from "@/components/admin/import-mapping/MappingWizard";
 import ReadWithBar from "@/components/admin/import-mapping/ReadWithBar";
@@ -163,6 +163,8 @@ interface TripSheet {
   uploadedAt: string;
   uploadedBy: string;
   sourceFilename: string;
+  /** EXCEL (Trip program sheet) or MANUAL (built in Signex). */
+  source?: TripSourceValue;
   stops: TripStop[];
   /** Invoices taken off this run before they were signed. */
   removedStops?: RemovedStop[];
@@ -204,6 +206,8 @@ interface AlreadySignedInvoice {
   driverName: string | null;
   source: "database" | "filesystem";
 }
+
+type TripSourceValue = "EXCEL" | "MANUAL";
 
 /** An invoice already out, unsigned, on a live run — the server refuses it. */
 interface AlreadyOnRunInvoice {
@@ -341,6 +345,7 @@ interface CompletedTripSheet {
   driverName: string;
   regNo: string;
   sourceFilename: string;
+  source?: TripSourceValue;
   archivedFile: string | null;
   uploadedAt: string;
   completedAt: string;
@@ -452,6 +457,10 @@ export default function TripSheetPage() {
   // Filters on the trip lists. The driver filter is shared by both tabs, like
   // the search box, so following one driver survives the switch to Completed.
   const [driverFilter, setDriverFilter] = useState("");
+  // Trip program sheets vs trips built in Signex. Offered (and the badge shown)
+  // only once the branch has run a manual trip; shared by both tabs.
+  const [hasManualTrips, setHasManualTrips] = useState(false);
+  const [sourceFilter, setSourceFilter] = useState<"" | TripSourceValue>("");
   const [activeStatusFilter, setActiveStatusFilter] = useState<
     "all" | "in_progress" | "ready" | "unsent"
   >("all");
@@ -565,6 +574,7 @@ export default function TripSheetPage() {
       const data = await res.json();
       setTripSheets(data.tripSheets || []);
       setStats(data.stats || null);
+      setHasManualTrips(data.hasManualTrips === true);
     } catch {
       // ignore
     } finally {
@@ -797,6 +807,7 @@ export default function TripSheetPage() {
   const visibleTripSheets = useMemo(() => {
     return tripSheets.filter((t) => {
       if (driverFilter && t.driverId !== driverFilter) return false;
+      if (sourceFilter && (t.source ?? "EXCEL") !== sourceFilter) return false;
       if (activeStatusFilter !== "all") {
         const allSigned = tripCompletable(t);
         if (activeStatusFilter === "ready" && !allSigned) return false;
@@ -811,11 +822,12 @@ export default function TripSheetPage() {
         )
       );
     });
-  }, [tripSheets, tripTokens, driverFilter, activeStatusFilter]);
+  }, [tripSheets, tripTokens, driverFilter, sourceFilter, activeStatusFilter]);
 
   const visibleCompletedSheets = useMemo(() => {
     return completedSheets.filter((c) => {
       if (driverFilter && c.driverId !== driverFilter) return false;
+      if (sourceFilter && (c.source ?? "EXCEL") !== sourceFilter) return false;
       if (completedStatusFilter === "unsent" && !c.stops.some(archivedStopUnsent)) return false;
       if (tripTokens.length === 0) return true;
       return (
@@ -825,7 +837,7 @@ export default function TripSheetPage() {
         )
       );
     });
-  }, [completedSheets, tripTokens, driverFilter, completedStatusFilter]);
+  }, [completedSheets, tripTokens, driverFilter, sourceFilter, completedStatusFilter]);
 
   /** Drivers that appear on either list, for the driver filter. */
   const tripDrivers = useMemo(() => {
@@ -839,6 +851,7 @@ export default function TripSheetPage() {
 
   const tripFiltersActive =
     !!driverFilter ||
+    !!sourceFilter ||
     (tripTab === "active" ? activeStatusFilter !== "all" : completedStatusFilter !== "all");
 
   /** Marks the stop that put its sheet in the list, inside an expanded sheet. */
@@ -1437,6 +1450,7 @@ export default function TripSheetPage() {
 
   const clearTripFilters = () => {
     setDriverFilter("");
+    setSourceFilter("");
     setActiveStatusFilter("all");
     setCompletedStatusFilter("all");
     setTripQuery("");
@@ -2221,8 +2235,9 @@ export default function TripSheetPage() {
           <div className="bg-ink-card border border-ink-border rounded p-5">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <h3 className="font-mono text-sm font-medium text-ink-black">
+                <h3 className="font-mono text-sm font-medium text-ink-black flex items-center gap-2">
                   Upload Preview
+                  {hasManualTrips && <TripSourceBadge source="EXCEL" />}
                 </h3>
                 <p className="text-xs text-ink-muted mt-0.5">
                   {uploadedFile?.name} — {preview.preview.totalRows} rows parsed
@@ -2972,6 +2987,23 @@ export default function TripSheetPage() {
                   </option>
                 ))}
               </select>
+              {(hasManualTrips || sourceFilter) && (
+                <select
+                  value={sourceFilter}
+                  onChange={(e) => {
+                    setSourceFilter(e.target.value as typeof sourceFilter);
+                    resetTripLists();
+                  }}
+                  aria-label="Filter by source"
+                  className={`h-8 px-2 text-xs font-mono rounded border bg-ink-card outline-none focus:border-ink-green flex-1 sm:flex-none min-w-0 ${
+                    sourceFilter ? "border-ink-green text-ink-black" : "border-ink-border text-ink-muted"
+                  }`}
+                >
+                  <option value="">Any source</option>
+                  <option value="EXCEL">Trip program</option>
+                  <option value="MANUAL">Manual</option>
+                </select>
+              )}
               {tripTab === "active" ? (
                 <select
                   value={activeStatusFilter}
@@ -3268,6 +3300,7 @@ export default function TripSheetPage() {
                             <polyline points="14 2 14 8 20 8" />
                           </svg>
                           <span className="truncate">{trip.sourceFilename}</span>
+                          {hasManualTrips && <TripSourceBadge source={trip.source} className="ml-1" />}
                         </span>
                       </div>
                     </div>
@@ -3981,6 +4014,7 @@ export default function TripSheetPage() {
                               )}
                             </div>
                             <p className="text-[12px] sm:text-xs text-ink-muted font-mono mt-1 truncate">
+                              {hasManualTrips && <TripSourceBadge source={sheet.source} className="mr-1.5 align-middle" />}
                               {sheet.sourceFilename} · closed {formatDate(sheet.completedAt)}
                               {sheet.completedBy ? ` by ${sheet.completedBy}` : ""}
                             </p>

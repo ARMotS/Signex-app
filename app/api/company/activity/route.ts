@@ -8,7 +8,7 @@ import { branchActivity, branchesVisibleTo } from "@/lib/branch-overview";
 /** The actions a company admin can filter its feed by. Not exported: a route file exports handlers only. */
 const ACTIVITY_ACTIONS: AuditAction[] = [
   "SIGN", "UPLOAD", "STATUS_CHANGE", "LOGIN", "LOGOUT", "LOGIN_FAILED", "DRIVER_CREATE", "DRIVER_UPDATE",
-  "DRIVER_DELETE", "VEHICLE_CREATE", "VEHICLE_UPDATE", "VEHICLE_DELETE", "CONFIG_UPDATE", "PASSWORD_CHANGE", "USERNAME_CHANGE", "ACCOUNT_UPDATE", "EXPORT", "FILE_DELETE",
+  "DRIVER_DELETE", "VEHICLE_CREATE", "VEHICLE_UPDATE", "VEHICLE_DELETE", "COURIER_COMPANY_CREATE", "COURIER_COMPANY_UPDATE", "COURIER_COMPANY_DELETE", "CONFIG_UPDATE", "PASSWORD_CHANGE", "USERNAME_CHANGE", "ACCOUNT_UPDATE", "EXPORT", "FILE_DELETE",
   "SCOPE_SWITCH",
 ];
 const DAY = /^\d{4}-\d{2}-\d{2}$/;

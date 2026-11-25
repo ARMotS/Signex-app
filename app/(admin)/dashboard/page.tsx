@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useLiveSync } from "@/hooks/useLiveSync";
 import Link from "next/link";
-import { DocChip } from "@/components/ui/Chips";
+import { DocChip, TripSourceBadge } from "@/components/ui/Chips";
 import Pager from "@/components/ui/Pager";
 import type { CourierOverview } from "@/lib/courier-confirm";
 
@@ -31,6 +31,7 @@ interface TripSheet {
   status: "ACTIVE" | "QUEUED";
   uploadedAt: string;
   sourceFilename: string;
+  source?: "EXCEL" | "MANUAL";
   stops: TripStop[];
 }
 
@@ -73,6 +74,7 @@ interface CompletedSheet {
   driverName: string;
   regNo: string;
   sourceFilename: string;
+  source?: "EXCEL" | "MANUAL";
   completedAt: string;
   completedBy: string | null;
   totalStops: number;
@@ -112,6 +114,8 @@ interface DashboardData {
   drivers: DriverProgress[];
   tripSheets: TripSheet[];
   completedToday: CompletedSheet[];
+  /** The source badge shows only once the branch has run a manual trip. Absent from older servers. */
+  hasManualTrips?: boolean;
   recentSignatures: RecentSignature[];
 }
 
@@ -152,6 +156,7 @@ interface CompletionsData {
     driverName: string;
     regNo: string;
     sourceFilename: string;
+    source?: "EXCEL" | "MANUAL";
     completedAt: string;
     completedBy: string | null;
     totalStops: number;
@@ -704,7 +709,10 @@ export default function DashboardPage() {
                               <span className="text-ink-muted font-mono text-xs ml-2">{c.regNo}</span>
                             )}
                           </p>
-                          <p className="text-xs text-ink-muted truncate">{c.sourceFilename}</p>
+                          <p className="text-xs text-ink-muted truncate">
+                            {data.hasManualTrips && <TripSourceBadge source={c.source} className="mr-1.5 align-middle" />}
+                            {c.sourceFilename}
+                          </p>
                         </div>
                         <span className="text-xs font-mono text-ink-muted">
                           {c.signedStops} stops
@@ -833,6 +841,7 @@ export default function DashboardPage() {
                               </div>
                             ))}
                             <div className="px-5 py-2 text-[11px] text-ink-muted bg-ink-surface/30">
+                              {data.hasManualTrips && <TripSourceBadge source={sheet.source} className="mr-1.5 align-middle" />}
                               {sheet.sourceFilename} · uploaded {formatDateTime(sheet.uploadedAt)}
                             </div>
                           </div>
@@ -867,6 +876,7 @@ export default function DashboardPage() {
               driverId={completionsDriver}
               onRangeChange={setCompletionsRange}
               onDriverChange={setCompletionsDriver}
+              showSource={data?.hasManualTrips === true}
             />
           )}
 
@@ -980,6 +990,7 @@ function CompletedTripsReport({
   driverId,
   onRangeChange,
   onDriverChange,
+  showSource,
 }: {
   data: CompletionsData | null;
   loading: boolean;
@@ -987,6 +998,8 @@ function CompletedTripsReport({
   driverId: string;
   onRangeChange: (r: ReportRange) => void;
   onDriverChange: (id: string) => void;
+  /** Whether the branch has run a manual trip, so sheets carry the source badge. */
+  showSource: boolean;
 }) {
   const byDay = data?.byDay ?? [];
   const peak = byDay.reduce((m, d) => Math.max(m, d.deliveries), 0);
@@ -1244,6 +1257,7 @@ function CompletedTripsReport({
                         )}
                       </p>
                       <p className="text-xs text-ink-muted truncate">
+                        {showSource && <TripSourceBadge source={s.source} className="mr-1.5 align-middle" />}
                         {s.sourceFilename}
                         {s.completedBy ? ` · closed by ${s.completedBy}` : ""}
                       </p>

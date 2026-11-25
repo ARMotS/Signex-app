@@ -74,6 +74,8 @@ export async function resetDatabase() {
   await p.tripSheet.deleteMany();
   // After the trip sheets, which Restrict-reference it.
   await p.vehicle.deleteMany();
+  await p.courierCompany.deleteMany();
+  await p.tripNumberCounter.deleteMany();
   await p.completedTripSheet.deleteMany();
   await p.contact.deleteMany();
   await p.importedFile.deleteMany();
