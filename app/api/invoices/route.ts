@@ -1,27 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  listInvoiceFiles,
-  getInvoiceFolderPath,
   deleteInvoiceFiles,
   deleteInvoiceOriginalOnly,
   duplicateGroupsOf,
   InvoiceFolderUnreadable,
 } from "@/lib/invoices";
-import { getCloudAccountStatus } from "@/lib/microsoft-graph";
 import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
 import { logAudit } from "@/lib/audit";
-import { readInvoiceNoPattern } from "@/lib/config";
 import { normalizeInvoiceNo } from "@/lib/invoice-number";
-import {
-  customerMismatch,
-  detachInvoiceFiles,
-  ensureInvoices,
-  scheduleInvoiceHeaders,
-} from "@/lib/invoice-registry";
+import { customerMismatch, detachInvoiceFiles } from "@/lib/invoice-registry";
 import { CHAIN_STATUS_LABEL, WIDE_IN_LIST, chainStatuses } from "@/lib/invoice-chain";
-import { readInvoiceIndex, type InvoiceIndexStatus } from "@/lib/invoice-index";
-import { scheduleInvoiceIndexSync } from "@/lib/invoice-index-sync";
+import { readInvoiceFolderListing, registerListedInvoices } from "@/lib/invoice-folder-listing";
 import {
   DEFAULT_INVOICE_DELETED_REASON,
   normalizeRemovalReason,
@@ -36,82 +26,25 @@ export const GET = withAuth(async () => {
   const ctx = await getScope();
   requireOffice(ctx);
 
-  const cloudStatus = await getCloudAccountStatus(ctx.tenantId);
-  const isOneDrive = !!cloudStatus?.invoiceFolderItemId;
-
-  // The folder as the index last saw it (lib/invoice-index.ts) — no Graph at
-  // all. Until the index has finished its first pass, or after another folder
-  // is chosen, the folder is listed here as it always was.
-  const [indexed, folderPath, pattern] = await Promise.all([
-    isOneDrive ? readInvoiceIndex(ctx.tenantId) : null,
-    getInvoiceFolderPath(ctx.tenantId),
-    readInvoiceNoPattern(ctx.tenantId),
-  ]);
-  const index: InvoiceIndexStatus = indexed?.status ?? { state: "off", syncedAt: null, error: null };
-
-  // Listed once per load; duplicates come from that same listing. A folder
-  // that cannot be read is an error, never an empty list — "0 invoices" would
-  // be shown as fact, with every total wrong.
-  let files: Awaited<ReturnType<typeof listInvoiceFiles>>;
-  if (indexed?.files) {
-    files = indexed.files;
-  } else {
-    try {
-      files = await listInvoiceFiles(ctx.tenantId, { strict: true });
-    } catch (err) {
-      if (err instanceof InvoiceFolderUnreadable) {
-        if (isOneDrive) scheduleInvoiceIndexSync(ctx.tenantId, 40_000);
-        return NextResponse.json({ error: err.message, code: "FOLDER_UNREADABLE" }, { status: 502 });
-      }
-      throw err;
+  // Listed once per load (lib/invoice-folder-listing.ts: the index, else the
+  // folder itself); duplicates come from that same listing. A folder that
+  // cannot be read is an error, never an empty list — "0 invoices" would be
+  // shown as fact, with every total wrong.
+  let listing: Awaited<ReturnType<typeof readInvoiceFolderListing>>;
+  try {
+    listing = await readInvoiceFolderListing(ctx.tenantId, startedAt);
+  } catch (err) {
+    if (err instanceof InvoiceFolderUnreadable) {
+      return NextResponse.json({ error: err.message, code: "FOLDER_UNREADABLE" }, { status: 502 });
     }
+    throw err;
   }
-  // Catch up with the folder after the response: usually one small request,
-  // the whole first pass on a branch that has none yet. What is left of this
-  // function's time is its budget; progress is saved page by page.
-  if (isOneDrive) {
-    scheduleInvoiceIndexSync(ctx.tenantId, Math.max(10_000, 50_000 - (Date.now() - startedAt)));
-  }
+  const { files, index, isOneDrive, folderLabel, pattern } = listing;
   const duplicates = duplicateGroupsOf(files.map((f) => f.filename));
 
-  // The registry rows supply each file's invoice date and customer. Headers
-  // not read yet are read after the response — this page does not wait on PDFs.
-  const recordSelect = {
-    id: true,
-    invoiceNoNormalized: true,
-    pdfFilename: true,
-    customerName: true,
-    deliverToName: true,
-    billToName: true,
-    invoiceDate: true,
-    headerSource: true,
-    headerError: true,
-    isStub: true,
-  } as const;
-  let records = await ctx.db.invoice.findMany({ select: recordSelect });
-  // Every file gets a registry row ("fill": a listing never re-points an
-  // invoice at a different copy of itself). Only files that need it are
-  // passed — no row yet, or a row with no PDF recorded (a stub whose PDF has
-  // turned up) — not every file on every load.
-  const recordByKey = new Map(records.map((r) => [r.invoiceNoNormalized, r]));
-  const needRow = files.filter((f) => {
-    const key = normalizeInvoiceNo(f.name, pattern);
-    if (!key) return false; // no number in the name: never gets a row
-    const r = recordByKey.get(key);
-    return !r || !r.pdfFilename;
-  });
-  if (needRow.length > 0) {
-    await ensureInvoices(
-      ctx.tenantId,
-      needRow.map((f) => ({ invoiceNo: f.name, pdfFilename: f.filename })),
-      pattern,
-      { fileAuthority: "fill" }
-    );
-    records = await ctx.db.invoice.findMany({ select: recordSelect });
-    recordByKey.clear();
-    for (const r of records) recordByKey.set(r.invoiceNoNormalized, r);
-  }
-  scheduleInvoiceHeaders(ctx.tenantId, { limit: 25 });
+  // The registry rows supply each file's invoice date and customer; every
+  // file gets one. Headers not read yet are read after the response.
+  const recordByKey = await registerListedInvoices(ctx.tenantId, files, pattern);
 
   // Where each invoice's chain stands (delivered → collected → credited), for
   // the Invoices tab's status column. Two queries for the whole listing.
@@ -161,7 +94,7 @@ export const GET = withAuth(async () => {
   const unsignedCount = invoices.length - signedCount;
 
   return NextResponse.json({
-    folder: isOneDrive ? `OneDrive: ${cloudStatus!.invoiceFolderPath}` : folderPath,
+    folder: folderLabel,
     source: isOneDrive ? "onedrive" : "local",
     count: invoices.length,
     signedCount,

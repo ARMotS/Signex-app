@@ -7797,6 +7797,44 @@ suite("cross-ADMIN isolation", () => {
         expect(graphCalls.every((c) => !c.token || c.token === "access-token-B")).toBe(true);
       });
 
+      // The invoice picker (lib/invoice-picker.ts) reads A's folder index, A's
+      // registry and A's runs on every page and search: B's run on the same
+      // number must not make A's invoice look taken, nor name B's driver.
+      it("the invoice picker lists A's folder with A's allocations only; B sees none of it", async () => {
+        const { GET } = await import("@/app/api/invoices/picker/route");
+        await db().stop.update({ where: { id: f.b.stop.id }, data: { invoiceNoNormalized: "8102" } });
+        try {
+          useSession(adminSession(f.a));
+          graphCalls.length = 0;
+          const res = await GET(req("/api/invoices/picker?show=all&name=IV-8102.pdf"));
+          expect(res.status).toBe(200);
+          const body = await res.json();
+          expect(graphCalls.filter((c) => c.url.includes("/children"))).toHaveLength(0);
+          expect(body.items.map((i: { filename: string; state: string }) => [i.filename, i.state]).sort()).toEqual([
+            ["IV-8101.pdf", "SIGNED"],
+            ["IV-8102.pdf", "AVAILABLE"],
+          ]);
+          expect(body.named).toMatchObject([{ filename: "IV-8102.pdf", selectable: true, run: null }]);
+          expect(body.counts).toEqual({ available: 1, all: 2 });
+          expect(JSON.stringify(body)).not.toContain(f.b.driver.name);
+
+          // B's own picker: B's folder (listed with B's token), never A's files.
+          useSession(adminSession(f.b));
+          graphCalls.length = 0;
+          const theirs = await (await GET(req("/api/invoices/picker?show=all&name=IV-8101.pdf"))).json();
+          expect(JSON.stringify(theirs)).not.toContain("IV-8101");
+          expect(JSON.stringify(theirs)).not.toContain("IV-8102");
+          expect(theirs.named).toEqual([]);
+          expect(graphCalls.every((c) => !c.token || c.token === "access-token-B")).toBe(true);
+
+          // A driver is not offered the folder.
+          useSession(driverSession(f.a));
+          expect((await GET(req("/api/invoices/picker"))).status).toBe(403);
+        } finally {
+          await db().stop.update({ where: { id: f.b.stop.id }, data: { invoiceNoNormalized: null } });
+        }
+      });
+
       it("a later look applies only what changed; Graph's 410 rebuilds from nothing", async () => {
         const fetchMock = vi.mocked(fetch);
         const original = fetchMock.getMockImplementation()!;
