@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import InvoiceNumberSettings from "@/components/admin/InvoiceNumberSettings";
 import CollectionDeclarationSettings from "@/components/admin/CollectionDeclarationSettings";
 import CreditNoteSettings from "@/components/admin/CreditNoteSettings";
+import TripNumberSettings from "@/components/admin/TripNumberSettings";
 import ImportTemplatesSettings from "@/components/admin/import-mapping/ImportTemplatesSettings";
 import CourierStampSettings from "@/components/admin/CourierStampSettings";
 import { DEFAULT_STAMP_AREA, type StampArea } from "@/lib/courier-stamp-text";
@@ -87,6 +88,7 @@ interface Settings {
   vatRatePercent: string;
   uncreditedAlertDays: string;
   courierStampArea?: StampArea;
+  branchCode?: string;
 }
 
 /** The three folders an ADMIN configures. Collections is a SIBLING of invoices. */
@@ -1424,6 +1426,12 @@ export default function SettingsPage() {
       <InvoiceNumberSettings
         savedPattern={settings.invoiceNoPattern || ""}
         onSaved={(invoiceNoPattern) => setSettings((prev) => ({ ...prev, invoiceNoPattern }))}
+      />
+
+      {/* ─── Trip Numbers: the branch code in a manual trip's number ─── */}
+      <TripNumberSettings
+        savedCode={settings.branchCode || ""}
+        onSaved={(branchCode) => setSettings((prev) => ({ ...prev, branchCode }))}
       />
 
       {/* ─── Credit notes: the VAT rate their VAT line is checked against ─ */}

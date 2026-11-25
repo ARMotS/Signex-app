@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAllTripSheets, getCompletedTripSheets } from "@/lib/trip-data";
+import { getAllTripSheets, getCompletedTripSheets, hasManualTrips } from "@/lib/trip-data";
 import { dayWindow, parseTzOffset } from "@/lib/day-window";
 import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
@@ -246,6 +246,8 @@ export const GET = withAuth(async (request: NextRequest) => {
     drivers,
     tripSheets,
     completedToday,
+    /** Show the trip source badge only once the branch has run a manual trip. */
+    hasManualTrips: await hasManualTrips(ctx.tenantId, tripSheets),
 
     recentSignatures: recentSignedRows.map((s) => ({
       stopId: s.id,

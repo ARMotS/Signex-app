@@ -164,6 +164,7 @@ export const GET = withAuth(async (request: NextRequest) => {
       driverName: c.driverName,
       regNo: c.regNo,
       sourceFilename: c.sourceFilename,
+      source: c.source,
       completedAt: c.completedAt,
       completedBy: c.completedBy,
       totalStops: c.totalStops,

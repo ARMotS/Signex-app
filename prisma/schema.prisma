@@ -99,6 +99,8 @@ model Tenant {
   courierImportFailures CourierImportFailure[]
   invoiceFolderFiles InvoiceFolderFile[]
   vehicles      Vehicle[]
+  tripNumberCounters TripNumberCounter[]
+  courierCompanies CourierCompany[]
 
   // Composite-FK target: an allocation names a branch together with its
   // company and kind, so allocating across companies, or allocating anything
@@ -276,6 +278,51 @@ model Vehicle {
   @@index([tenantId])
 }
 
+/// The last manual trip number issued in a scope on one day. One row per
+/// [scope, day]; issuing a number is one atomic increment, so two dispatchers
+/// building at once never get the same one. Kept by day rather than derived
+/// from the trips themselves: a completed trip is deleted, and a number must
+/// never be issued twice even after its trip is gone.
+model TripNumberCounter {
+  tenantId  String   @default("")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  /// YYMMDD, the Johannesburg date the numbers were issued on.
+  day       String
+  value     Int
+  updatedAt DateTime @updatedAt
+
+  @@id([tenantId, day])
+}
+
+/// A courier company the branch dispatches through (Contacts → Courier
+/// companies). Deliberately NOT a Contact: every customer email (delivery
+/// confirmation, courier confirmation, credit note, collection receipt)
+/// finds its recipient by matching Contact.companyName, and a courier company
+/// there could be picked as the customer. Signex never emails a courier
+/// company.
+model CourierCompany {
+  id            String   @id @default(cuid())
+  name          String
+  /// companyKey(name) (lib/courier-sheet.ts): case, punctuation and &/and
+  /// ignored. Unique per scope, so "The Courier Guy" is entered once.
+  nameKey       String
+  contactPerson String?
+  phone         String?
+  email         String?
+  accountNumber String?
+  notes         String?
+  isActive      Boolean  @default(true)
+  tenantId      String   @default("")
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([tenantId, nameKey])
+  // Composite-FK target for the courier dispatches that will name one.
+  @@unique([tenantId, id])
+  @@index([tenantId])
+}
+
 // ─── Sign-in names ────────────────────────────────────────────────────────
 //
 // Every account signs in with a username and password from one form that has
@@ -345,6 +392,16 @@ model UserSession {
 
 // ─── Trip Sheets & Stops ──────────────────────────────────────────────────
 
+/// Where a trip sheet came from. EXCEL: a sheet from the Trip program, uploaded
+/// or picked up from the trip sheet folder; its name (sourceFilename) is the
+/// file's. MANUAL: built in Signex; it has no file, and sourceFilename holds the
+/// SX- trip number it was issued (lib/trip-number.ts), so every screen that
+/// names a trip names it without change.
+enum TripSource {
+  EXCEL
+  MANUAL
+}
+
 enum TripSheetStatus {
   ACTIVE
   QUEUED
@@ -362,6 +419,7 @@ model TripSheet {
   /// blank or matches nothing — regNo stays the record of what the sheet said.
   vehicleId      String?
   status         TripSheetStatus @default(ACTIVE)
+  source         TripSource      @default(EXCEL)
   adminId        String?
   /// The import template the sheet was read with; null for the built-in
   /// layout. No foreign key: a template can be edited or deleted, and
@@ -764,6 +822,8 @@ model CompletedTripSheet {
   /// The vehicle the trip was linked to (TripSheet.vehicleId), frozen. No FK:
   /// this is an archive, like driverId.
   vehicleId      String?
+  /// TripSheet.source, frozen.
+  source         TripSource @default(EXCEL)
   sourceFilename String
   /// Where the source file landed in processed/, or null if the move failed.
   archivedFile   String?
@@ -797,6 +857,8 @@ model CompletedTripSheet {
   @@index([tenantId, completedAt])
   @@index([tenantId, driverId])
   @@index([tenantId, vehicleId])
+  // hasManualTrips: whether the branch has ever run a manual trip.
+  @@index([tenantId, source])
 }
 
 /// A delivery confirmation resent from the completed-trip archive.
@@ -1262,6 +1324,9 @@ enum AuditAction {
   VEHICLE_CREATE
   VEHICLE_UPDATE
   VEHICLE_DELETE
+  COURIER_COMPANY_CREATE
+  COURIER_COMPANY_UPDATE
+  COURIER_COMPANY_DELETE
 }
 
 // Append-only: a trigger in the migration (20261025090000_audit_log_actor)

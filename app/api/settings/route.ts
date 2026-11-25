@@ -3,6 +3,7 @@ import { readConfig, writeConfig, validateFolderPath, parseVatRatePercent, parse
 import { assertCollectionsFolderIsSibling } from "@/lib/collections";
 import { compileInvoiceNoPattern, type InvoiceNoPattern } from "@/lib/invoice-number";
 import { readStampArea } from "@/lib/courier-stamp-text";
+import { readBranchCode } from "@/lib/trip-number-format";
 import { renormalizeInvoiceNumbers } from "@/lib/trip-data";
 import { getScope, requireOffice } from "@/lib/tenant";
 import { withAuth } from "@/lib/api-handler";
@@ -103,6 +104,13 @@ export const PUT = withAuth(async (request: NextRequest) => {
       return NextResponse.json({ error: "Enter a number of days between 1 and 365." }, { status: 400 });
     }
     body.uncreditedAlertDays = raw ? String(parseAlertDays(raw)) : "";
+  }
+
+  // The branch's code in manual trip numbers. Blank = numbers carry none.
+  if (body.branchCode !== undefined) {
+    const code = readBranchCode(body.branchCode);
+    if (!code.ok) return NextResponse.json({ error: code.error }, { status: 400 });
+    body.branchCode = code.value;
   }
 
   // Where the courier handover is stamped: on the page, and big enough.

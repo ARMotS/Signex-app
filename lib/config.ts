@@ -73,6 +73,12 @@ export interface SignexConfig {
    * (percent of the page, from the bottom-left). See lib/courier-stamp.ts.
    */
   courierStampArea: StampArea;
+  /**
+   * The branch's short code in manual trip numbers (SX-{code}-261125-01).
+   * Letters and digits, uppercase; empty means numbers carry no code. See
+   * lib/trip-number-format.ts.
+   */
+  branchCode: string;
 }
 
 export const DEFAULT_UNCREDITED_ALERT_DAYS = 7;
@@ -92,6 +98,7 @@ const DEFAULT_CONFIG: SignexConfig = {
   vatRatePercent: "",
   uncreditedAlertDays: "",
   courierStampArea: DEFAULT_STAMP_AREA,
+  branchCode: "",
 };
 
 /**
@@ -122,6 +129,8 @@ export async function readConfig(tenantId: string): Promise<SignexConfig> {
         config.vatRatePercent = row.value;
       } else if (row.key === "uncreditedAlertDays") {
         config.uncreditedAlertDays = row.value;
+      } else if (row.key === "branchCode") {
+        config.branchCode = row.value;
       } else if (row.key === "courierStampArea") {
         // A stored area that no longer validates falls back to the default.
         config.courierStampArea = readStampArea(row.value) ?? DEFAULT_STAMP_AREA;

@@ -40,6 +40,12 @@ export function formatSaDateTime(at: Date): string {
   return `${p.day} ${MONTHS[Number(p.month) - 1]} ${p.year}, ${p.hour}:${p.minute}`;
 }
 
+/** "261119": the South African calendar day of a moment, as YYMMDD. */
+export function saDayKey(at: Date): string {
+  const p = saParts(at);
+  return `${p.year.slice(-2)}${p.month}${p.day}`;
+}
+
 /** "19 Nov 2026": the South African calendar day of a moment. */
 export function formatSaDate(at: Date): string {
   const p = saParts(at);

@@ -11,7 +11,7 @@
 import { scopedPrisma } from "./db-scoped";
 import { collectionReasonLines, type ReasonLine } from "./collection-confirm";
 import { logAudit } from "./audit";
-import { Prisma, StopStatus as PrismaStopStatus } from "@prisma/client";
+import { Prisma, StopStatus as PrismaStopStatus, type TripSource } from "@prisma/client";
 import type {
   CollectionStatus,
   CollectionType,
@@ -187,6 +187,8 @@ export interface TripSheet {
   uploadedAt: Date;
   uploadedBy: string;
   sourceFilename: string;
+  /** EXCEL (a Trip program sheet) or MANUAL (built in Signex, named by its SX- number). */
+  source: TripSource;
   stops: TripStop[];
   /** Invoices the office took off this run before they were signed. */
   removedStops?: TripRemovedStop[];
@@ -273,6 +275,7 @@ export interface CompletedTripSheet {
   driverName: string;
   regNo: string;
   sourceFilename: string;
+  source: TripSource;
   archivedFile: string | null;
   uploadedAt: Date;
   uploadedBy: string;
@@ -466,6 +469,7 @@ export async function saveTripSheet(
     uploadedAt: created.date,
     uploadedBy: created.uploadedBy,
     sourceFilename: created.sourceFilename,
+    source: created.source,
     stops: stops.map((s) =>
       mapStop({ ...s, collections: collectionsByStop.get(s.id) })
     ),
@@ -557,6 +561,21 @@ const TRIP_STOP_SELECT = {
 } satisfies Prisma.StopSelect;
 
 /**
+ * Whether this scope has ever had a manual trip (live, or in the completed
+ * archive). The trip lists show the source badge and filter only then, so a
+ * branch that only ever imports Trip program sheets sees no change. `live` is
+ * the trips the caller already read.
+ */
+export async function hasManualTrips(tenantId: string, live: { source: TripSource }[]): Promise<boolean> {
+  if (live.some((t) => t.source === "MANUAL")) return true;
+  const archived = await scopedPrisma(tenantId).completedTripSheet.findFirst({
+    where: { source: "MANUAL" },
+    select: { id: true },
+  });
+  return archived !== null;
+}
+
+/**
  * Get all trip sheets in a scope, with their stops.
  */
 export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
@@ -605,6 +624,7 @@ export async function getAllTripSheets(tenantId: string): Promise<TripSheet[]> {
       uploadedAt: t.date,
       uploadedBy: t.uploadedBy,
       sourceFilename: t.sourceFilename,
+      source: t.source,
       stops: (stopsByTrip.get(t.id) || []).map(mapStop),
       removedStops: removedByTrip.get(t.id) ?? [],
       removedCollections: removedCollectionsByTrip.get(t.id) ?? [],
@@ -647,6 +667,7 @@ export async function getTripSheet(
     uploadedAt: trip.date,
     uploadedBy: trip.uploadedBy,
     sourceFilename: trip.sourceFilename,
+    source: trip.source,
     stops: stops.map(mapStop),
     removedStops: (await loadRemovedStops(tenantId, [trip.id])).get(trip.id) ?? [],
     ...(await loadReallocations(tenantId, [trip.id]).then((r) => ({
@@ -708,6 +729,7 @@ export async function getTripSheetsForDriver(
     uploadedAt: t.date,
     uploadedBy: t.uploadedBy,
     sourceFilename: t.sourceFilename,
+    source: t.source,
     stops: (stopsByTrip.get(t.id) || []).map(mapStop),
     removedStops: removedByTrip.get(t.id) ?? [],
     reallocatedOut: realloc.out.get(t.id) ?? [],
@@ -954,6 +976,7 @@ export async function completeTripSheet(
         driverName: driver?.name || "Unknown",
         regNo: trip.regNo,
         vehicleId: trip.vehicleId,
+        source: trip.source,
         sourceFilename: trip.sourceFilename,
         archivedFile,
         uploadedAt: trip.date,
@@ -1237,6 +1260,7 @@ export async function getCompletedTripSheets(
     driverName: r.driverName,
     regNo: r.regNo || "",
     sourceFilename: r.sourceFilename,
+    source: r.source,
     archivedFile: r.archivedFile,
     uploadedAt: r.uploadedAt,
     uploadedBy: r.uploadedBy,
