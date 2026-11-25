@@ -217,6 +217,13 @@ interface AlreadyOnRunInvoice {
   status: string;
 }
 
+/** An invoice a courier sheet already holds — warned about, never skipped. */
+interface OnCourierSheetInvoice {
+  invoiceNumber: string;
+  courierSheetNo: string;
+  completed: boolean;
+}
+
 /** What a fresh preview skips by default: already signed, or already on a run. */
 function defaultSkips(preview?: { alreadySigned?: AlreadySignedInvoice[]; alreadyOnRun?: AlreadyOnRunInvoice[] }): Set<string> {
   return new Set([
@@ -251,6 +258,8 @@ interface PreviewData {
     alreadySigned: AlreadySignedInvoice[];
     /** Absent from a server on the previous bundle. */
     alreadyOnRun?: AlreadyOnRunInvoice[];
+    /** A warning only. Absent when there are none. */
+    onCourierSheet?: OnCourierSheetInvoice[];
     missingInvoices: MissingInvoice[];
   };
 }
@@ -2353,6 +2362,39 @@ export default function TripSheetPage() {
                         On {inv.driverName}&apos;s run{inv.sourceFilename ? ` · ${inv.sourceFilename}` : ""}
                       </span>
                       <span className="text-ink-amber font-mono">skip</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* On a courier sheet — a warning only: the dispatcher decides.
+                An open courier sheet blocks itself at signing once the
+                delivery is out; a completed one usually reads as signed too. */}
+            {preview.preview.onCourierSheet && preview.preview.onCourierSheet.length > 0 && (
+              <div className="mb-4 border border-ink-amber/40 rounded overflow-hidden" role="status">
+                <div className="flex items-start gap-3 px-4 py-3 bg-ink-amber-dim/40">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-amber shrink-0 mt-0.5">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="12" y1="8" x2="12" y2="12" />
+                    <line x1="12" y1="16" x2="12.01" y2="16" />
+                  </svg>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-ink-black">
+                      {preview.preview.onCourierSheet.length} invoice{preview.preview.onCourierSheet.length !== 1 ? "s are" : " is"} also on a courier sheet
+                    </p>
+                    <p className="text-xs text-ink-muted mt-0.5">
+                      Not skipped. Make sure it goes one way only. Skip it here, or remove it from the courier sheet.
+                    </p>
+                  </div>
+                </div>
+                <div className="divide-y divide-ink-border">
+                  {preview.preview.onCourierSheet.map((inv) => (
+                    <div key={inv.invoiceNumber} className="flex items-center gap-3 px-4 py-2.5 text-xs">
+                      <span className="font-mono font-medium text-ink-black min-w-[100px]">{inv.invoiceNumber}</span>
+                      <span className="text-ink-muted flex-1 truncate">
+                        {inv.completed ? "Sent by courier" : "On courier sheet"} · {inv.courierSheetNo}
+                      </span>
                     </div>
                   ))}
                 </div>
