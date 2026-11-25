@@ -36,6 +36,7 @@ import {
   type InvoiceNoPattern,
 } from "./invoice-number";
 import type { TripCollection, TripStop } from "./trip-data";
+import { findOnCourierSheet, type OnCourierSheetInvoice } from "./invoice-allocation";
 import { fieldForHeader } from "./import-fields";
 import {
   BUILT_IN_TRIP_SHEET,
@@ -150,6 +151,11 @@ export interface ParseResult {
   alreadySigned: AlreadySignedInvoice[];
   /** Delivery stops already out, unsigned, on a live run in this scope. */
   alreadyOnRun: AlreadyOnRunInvoice[];
+  /**
+   * Deliveries a courier sheet in this scope already holds. A warning only —
+   * neither skipped nor refused. Absent when there are none.
+   */
+  onCourierSheet?: OnCourierSheetInvoice[];
   /** Every row with no matching PDF, across all drivers */
   missingInvoices: MissingInvoice[];
 }
@@ -616,10 +622,13 @@ export async function parseTripSheet(
 
     // 8. Deliveries already out on a live run. Only delivery stops: an invoice
     // on a collection row is the one being credited, not a delivery.
-    const alreadyOnRun = await detectAlreadyOnRun(
-      tenantId,
-      driverResults.flatMap((r) => r.stops.map((s) => s.invoiceNumber)).filter(Boolean)
-    );
+    const deliveryInvoiceNumbers = driverResults
+      .flatMap((r) => r.stops.map((s) => s.invoiceNumber))
+      .filter(Boolean);
+    const alreadyOnRun = await detectAlreadyOnRun(tenantId, deliveryInvoiceNumbers);
+
+    // 9. Deliveries a courier sheet already holds — a warning, not a skip.
+    const onCourierSheet = await findOnCourierSheet(tenantId, deliveryInvoiceNumbers, pattern);
 
     return {
       success: true,
@@ -637,6 +646,9 @@ export async function parseTripSheet(
         : {}),
       alreadySigned,
       alreadyOnRun,
+      // Only when there is something to say, as collectionsFolderError: the
+      // golden snapshots hold the whole result, and they stay as recorded.
+      ...(onCourierSheet.length > 0 ? { onCourierSheet } : {}),
       missingInvoices,
     };
   } catch (err) {

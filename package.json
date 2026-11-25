@@ -14,6 +14,7 @@
     "db:backfill-isolation": "npx tsx prisma/backfill-tenant-isolation.ts",
     "db:backfill-invoice-no": "npx tsx prisma/backfill-invoice-no.ts",
     "db:backfill-invoice-headers": "npx tsx prisma/backfill-invoice-headers.ts",
+    "db:backfill-invoice-registry": "npx tsx prisma/backfill-invoice-registry.ts",
     "db:backfill-companies": "npx tsx prisma/backfill-companies.ts",
     "db:backfill-collection-reasons": "npx tsx prisma/backfill-collection-reasons.ts",
     "db:fix-printed-times": "npx tsx prisma/fix-printed-times.ts",

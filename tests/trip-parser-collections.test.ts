@@ -50,6 +50,7 @@ vi.mock("@/lib/collections", async (importOriginal) => {
 vi.mock("@/lib/db-scoped", () => ({
   scopedPrisma: () => ({
     stop: { findMany: async () => [] },
+    courierTripSheetInvoice: { findMany: async () => [] },
     appConfig: { findUnique: async () => null },
   }),
 }));

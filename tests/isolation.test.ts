@@ -921,6 +921,44 @@ suite("cross-ADMIN isolation", () => {
       expect(matched?.driverId).toBe(f.a.driver.id);
       expect(matched?.driverId).not.toBe(f.b.driver.id);
     });
+
+    // The invoice picker will read this on every page of a folder, so a
+    // scoping bug here would be a standing side channel: B's run or courier
+    // sheet must never make A's invoice look taken, nor name B's driver.
+    it("invoice allocation and the courier-sheet warning read only the caller's scope", async () => {
+      const { parseTripSheet } = await import("@/lib/trip-parser");
+      const { readInvoiceAllocations } = await import("@/lib/invoice-allocation");
+
+      await db().stop.update({ where: { id: f.b.stop.id }, data: { invoiceNoNormalized: "1001" } });
+      const sheet = await db().courierTripSheet.create({
+        data: {
+          tenantId: f.b.tenantId,
+          courierSheetNo: "700001",
+          sheetDate: new Date("2026-11-25"),
+          customerName: "Acme Trading",
+          sourceFileName: "cts-700001-p5.xlsx",
+          importedById: f.b.admin.id,
+          status: "AWAITING_COLLECTION",
+          waybills: ["W70"],
+          invoices: { create: [{ lineNo: 1, invoiceNo: "INV-1001", invoiceNoNormalized: "1001", waybillNo: "W70" }] },
+        },
+      });
+      try {
+        const mine = (await readInvoiceAllocations(f.a.tenantId, ["1001"])).get("1001");
+        expect(mine).toMatchObject({ state: "AVAILABLE", selectable: true, run: null, courierSheet: null });
+
+        const theirs = (await readInvoiceAllocations(f.b.tenantId, ["1001"])).get("1001");
+        expect(theirs).toMatchObject({ state: "ON_RUN", courierSheet: { courierSheetNo: "700001" } });
+
+        const csv = "Date,Driver,Reg No,Customer,Invoice No,NOP\n2026-11-25,Jane Delivery,REG-A,Acme Trading,INV-1001,1\n";
+        const result = await parseTripSheet(f.a.tenantId, Buffer.from(csv, "utf8"), "route.csv");
+        expect(result.onCourierSheet).toBeUndefined();
+        expect(JSON.stringify(result)).not.toContain("700001");
+      } finally {
+        await db().courierTripSheet.delete({ where: { id: sheet.id } });
+        await db().stop.update({ where: { id: f.b.stop.id }, data: { invoiceNoNormalized: null } });
+      }
+    });
   });
 
   // ── Import templates ─────────────────────────────────────────────────
