@@ -136,6 +136,7 @@ const SHARED_LIMIT_ROUTES: RegExp[] = [
   /^\/api\/collections\/[^/]+\/sheet$/,
   /^\/api\/collections\/sheets$/,
   /^\/api\/import-templates\/preview$/,
+  /^\/api\/invoice-records\/[^/]+\/lines$/,
 ];
 
 /** Only POST / PUT: a GET of the same path is a list read (and often a poll). */

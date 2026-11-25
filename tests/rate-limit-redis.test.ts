@@ -206,6 +206,7 @@ describe("which requests keep the shared budget", () => {
       ["POST", "/api/collections/sheets"],
       ["PUT", "/api/collections/abc/sheet"],
       ["POST", "/api/import-templates/preview"],
+      ["POST", "/api/invoice-records/abc/lines"],
     ]) {
       expect(usesSharedLimit(method, path), `${method} ${path}`).toBe(true);
     }
@@ -222,6 +223,8 @@ describe("which requests keep the shared budget", () => {
       ["GET", "/api/courier/attention"],
       ["PUT", "/api/collections/abc"],
       ["POST", "/api/credit-notes/abc/sign"],
+      ["GET", "/api/invoice-records/abc/lines"],
+      ["PATCH", "/api/invoice-records/abc"],
     ]) {
       expect(usesSharedLimit(method, path), `${method} ${path}`).toBe(false);
     }

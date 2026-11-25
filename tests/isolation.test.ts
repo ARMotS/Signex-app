@@ -4953,6 +4953,81 @@ suite("cross-ADMIN isolation", () => {
       expect(row?.headerSource).toBe("MANUAL");
     });
 
+    it("reads an invoice's lines once, in the owner's scope only", async () => {
+      const { creditNotePdf } = await import("./helpers/credit-note-fixture");
+      const upload = (await import("@/app/api/invoices/upload/route")).POST;
+      const lines = await import("@/app/api/invoice-records/[id]/lines/route");
+      useSession(adminSession(f.a));
+
+      const pdf = await creditNotePdf({ layout: "CR-407710", documentTitle: "TAX INVOICE", creditNo: "634573", invoiceNo: null });
+      const form = new FormData();
+      form.append("file", new File([new Uint8Array(pdf)], "scan.pdf", { type: "application/pdf" }));
+      form.append("invoiceNumber", "IV-634573");
+      form.append("overwrite", "true");
+      expect((await upload(formReq("/api/invoices/upload", form))).status).toBe(200);
+      const id = (await db().invoice.findFirst({ where: { tenantId: f.a.tenantId, invoiceNoNormalized: "634573" } }))!.id;
+
+      // Another scope's id is 404 on both verbs, and a driver is not office.
+      useSession(adminSession(f.b));
+      expect((await lines.GET(req(`/api/invoice-records/${id}/lines`), params({ id }))).status).toBe(404);
+      expect((await lines.POST(req(`/api/invoice-records/${id}/lines`, { method: "POST", body: {} }), params({ id }))).status).toBe(404);
+      useSession(driverSession(f.a));
+      expect((await lines.POST(req(`/api/invoice-records/${id}/lines`, { method: "POST", body: {} }), params({ id }))).status).toBe(403);
+      expect(await db().invoice.findUnique({ where: { id }, select: { linesAttempts: true } })).toEqual({ linesAttempts: 0 });
+
+      // The scope's OneDrive serves the file — through its own token only.
+      const fetchMock = vi.mocked(fetch);
+      const original = fetchMock.getMockImplementation()!;
+      const downloads: (string | null)[] = [];
+      fetchMock.mockImplementation(async (url: any, init: any) => {
+        if (!String(url).includes("/content")) return original(url, init);
+        downloads.push(init?.headers?.Authorization ?? null);
+        return new Response(new Uint8Array(pdf), { status: 200, headers: { "Content-Type": "application/pdf" } });
+      });
+      useSession(adminSession(f.a));
+      let first;
+      try {
+        first = await (await lines.POST(req(`/api/invoice-records/${id}/lines`, { method: "POST", body: {} }), params({ id }))).json();
+      } finally {
+        fetchMock.mockImplementation(original);
+      }
+      expect(first.error).toBeNull();
+      expect(downloads).toEqual(["Bearer access-token-A"]);
+      expect(first).toMatchObject({ outcome: "READ", status: "OK", source: "TEXT", issues: [], stale: false });
+      expect(first.lines.map((l: { itemCode: string; qty: number }) => [l.itemCode, l.qty])).toEqual([
+        ["220740I", 1],
+        ["431456M", 1],
+        ["0986AH0250", 2],
+      ]);
+      expect(await db().invoiceLine.count({ where: { invoiceId: id, tenantId: f.a.tenantId } })).toBe(3);
+      // One download filled the unread header too.
+      const row = await db().invoice.findUnique({ where: { id } });
+      expect(row?.headerSource).toBe("TEXT");
+      expect(row?.invoiceDate?.toISOString().slice(0, 10)).toBe("2025-11-25");
+
+      // The same file is never read twice.
+      const again = await (await lines.POST(req(`/api/invoice-records/${id}/lines`, { method: "POST", body: {} }), params({ id }))).json();
+      expect(again.outcome).toBe("CACHED");
+      expect((await db().invoice.findUnique({ where: { id } }))?.linesAttempts).toBe(1);
+
+      // Lines typed by hand are never replaced, even by a forced read.
+      await db().invoice.update({ where: { id }, data: { linesSource: "MANUAL" } });
+      const forced = await (await lines.POST(req(`/api/invoice-records/${id}/lines`, { method: "POST", body: { force: true } }), params({ id }))).json();
+      expect(forced.outcome).toBe("MANUAL");
+      expect((await db().invoice.findUnique({ where: { id } }))?.linesAttempts).toBe(1);
+    });
+
+    it("an invoice with no PDF on file reads nothing", async () => {
+      const lines = await import("@/app/api/invoice-records/[id]/lines/route");
+      const { ensureInvoices } = await import("@/lib/invoice-registry");
+      const id = (await ensureInvoices(f.a.tenantId, [{ invoiceNo: "IV-8803" }], null)).get("8803")!;
+      await db().invoice.update({ where: { id }, data: { pdfFilename: null, isStub: true } });
+
+      useSession(adminSession(f.a));
+      const body = await (await lines.POST(req(`/api/invoice-records/${id}/lines`, { method: "POST", body: {} }), params({ id }))).json();
+      expect(body).toMatchObject({ outcome: "NO_PDF", status: null, lines: [] });
+    });
+
     it("a driver's stops carry only their own scope's invoice dates", async () => {
       // B registers the SAME invoice number as A's fixture stop, with a date.
       const { ensureInvoices } = await import("@/lib/invoice-registry");
