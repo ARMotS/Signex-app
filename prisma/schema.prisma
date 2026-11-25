@@ -32,16 +32,16 @@ datasource db {
 // accounts that oversee some of them. Managed only by the SUPER_ADMIN. A
 // registry like Tenant — read through UNSAFE_unscopedPrisma, never scoped.
 model Company {
-  id          String    @id @default(cuid())
-  name        String
+  id            String                   @id @default(cuid())
+  name          String
   // An inactive company's COMPANY_ADMINs can view none of its branches.
   // Its branches themselves (their ADMINs, drivers) are unaffected.
-  isActive    Boolean   @default(true)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  tenants     Tenant[]
+  isActive      Boolean                  @default(true)
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+  tenants       Tenant[]
   companyAdmins Admin[]
-  allocations CompanyAdminAllocation[]
+  allocations   CompanyAdminAllocation[]
 }
 
 // What a scope is. ROOT: the SUPER_ADMIN's own. BRANCH: one ADMIN's workspace
@@ -55,52 +55,53 @@ enum TenantKind {
 }
 
 model Tenant {
-  id            String         @id @default(cuid())
-  name          String
-  slug          String         @unique
-  kind          TenantKind     @default(BRANCH)
+  id                       String                    @id @default(cuid())
+  name                     String
+  slug                     String                    @unique
+  kind                     TenantKind                @default(BRANCH)
   // The company a BRANCH belongs to (null until assigned), or the company a
   // COMPANY scope is the home of. Always null for ROOT (CHECK in migration).
-  companyId     String?
-  company       Company?       @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  allocations   CompanyAdminAllocation[]
+  companyId                String?
+  company                  Company?                  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  allocations              CompanyAdminAllocation[]
   // Shown in the public driver-login company picker. The only field of a scope
   // that is ever exposed pre-authentication, and only for scopes whose owning
   // ADMIN is active.
-  companyName   String?
+  companyName              String?
   // The ADMIN this scope belongs to. Null for the root (SUPER_ADMIN) scope.
-  ownerAdminId  String?        @unique
-  createdAt     DateTime       @default(now())
-  users         User[]
-  admins        Admin[]
-  drivers       Driver[]
-  contacts      Contact[]
-  tripSheets    TripSheet[]
-  completedTripSheets CompletedTripSheet[]
-  archivedEmailResends ArchivedEmailResend[]
-  stops         Stop[]
-  appConfigs    AppConfig[]
-  cloudAccounts CloudAccount[]
-  importedFiles ImportedFile[]
-  collections   Collection[]
-  collectionLines CollectionLine[]
-  removedStops  RemovedStop[]
-  removedCollections RemovedCollection[]
-  rejectedLines RejectedLine[]
-  reallocatedStops ReallocatedStop[]
-  invoices      Invoice[]
-  creditNotes   CreditNote[]
-  creditNoteLines CreditNoteLine[]
-  creditNoteCollections CreditNoteCollection[]
-  creditNoteAllocations CreditNoteAllocation[]
-  importTemplates ImportTemplate[]
-  courierTripSheets CourierTripSheet[]
+  ownerAdminId             String?                   @unique
+  createdAt                DateTime                  @default(now())
+  users                    User[]
+  admins                   Admin[]
+  drivers                  Driver[]
+  contacts                 Contact[]
+  tripSheets               TripSheet[]
+  completedTripSheets      CompletedTripSheet[]
+  archivedEmailResends     ArchivedEmailResend[]
+  stops                    Stop[]
+  appConfigs               AppConfig[]
+  cloudAccounts            CloudAccount[]
+  importedFiles            ImportedFile[]
+  collections              Collection[]
+  collectionLines          CollectionLine[]
+  removedStops             RemovedStop[]
+  removedCollections       RemovedCollection[]
+  rejectedLines            RejectedLine[]
+  reallocatedStops         ReallocatedStop[]
+  invoices                 Invoice[]
+  creditNotes              CreditNote[]
+  creditNoteLines          CreditNoteLine[]
+  invoiceLines             InvoiceLine[]
+  creditNoteCollections    CreditNoteCollection[]
+  creditNoteAllocations    CreditNoteAllocation[]
+  importTemplates          ImportTemplate[]
+  courierTripSheets        CourierTripSheet[]
   courierTripSheetInvoices CourierTripSheetInvoice[]
-  courierImportFailures CourierImportFailure[]
-  invoiceFolderFiles InvoiceFolderFile[]
-  vehicles      Vehicle[]
-  tripNumberCounters TripNumberCounter[]
-  courierCompanies CourierCompany[]
+  courierImportFailures    CourierImportFailure[]
+  invoiceFolderFiles       InvoiceFolderFile[]
+  vehicles                 Vehicle[]
+  tripNumberCounters       TripNumberCounter[]
+  courierCompanies         CourierCompany[]
 
   // Composite-FK target: an allocation names a branch together with its
   // company and kind, so allocating across companies, or allocating anything
@@ -135,36 +136,36 @@ enum UserRole {
 // ─── Accounts ─────────────────────────────────────────────────────────────
 
 model Admin {
-  id           String      @id @default(cuid())
-  name         String
-  email        String      @unique
-  passwordHash String
+  id                  String                   @id @default(cuid())
+  name                String
+  email               String                   @unique
+  passwordHash        String
   // A deactivated ADMIN cannot log in. Their drivers are unaffected and keep
   // signing in and completing deliveries; see login() in lib/accounts.ts.
-  active       Boolean     @default(true)
+  active              Boolean                  @default(true)
   // Retired: one session per admin. Still written (the newest login) so the
   // previous deploy keeps validating through the rollout; drop it in a later
   // migration once nothing reads it.
-  sessionToken String?
+  sessionToken        String?
   // Retired by UserSession, which is what sessions are checked against now.
   // Still written (live tokens, oldest first) so a rollback keeps validating;
   // drop it in a later migration.
-  sessionTokens String[]   @default([])
-  sessions     UserSession[]
-  tenantId     String      @default("")
-  tenant       Tenant      @relation(fields: [tenantId], references: [id])
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
-  tripSheets   TripSheet[]
-  login        LoginName?
+  sessionTokens       String[]                 @default([])
+  sessions            UserSession[]
+  tenantId            String                   @default("")
+  tenant              Tenant                   @relation(fields: [tenantId], references: [id])
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+  tripSheets          TripSheet[]
+  login               LoginName?
   // Set only on a COMPANY_ADMIN account (User.role): the company it oversees.
   // Null for every ADMIN and SUPER_ADMIN.
-  companyId    String?
-  company      Company?    @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  companyId           String?
+  company             Company?                 @relation(fields: [companyId], references: [id], onDelete: Restrict)
   // As a COMPANY_ADMIN: the branch admins allocated to it.
   overseesAllocations CompanyAdminAllocation[] @relation("AllocationCompanyAdmin")
   // As a branch ADMIN: the COMPANY_ADMINs it is allocated to.
-  allocatedTo  CompanyAdminAllocation[] @relation("AllocationAdmin")
+  allocatedTo         CompanyAdminAllocation[] @relation("AllocationAdmin")
 
   // Composite-FK target so TripSheet.adminId cannot cross a scope boundary.
   @@unique([tenantId, id])
@@ -212,7 +213,7 @@ model CompanyAdminAllocation {
 }
 
 model Driver {
-  id           String      @id @default(cuid())
+  id           String        @id @default(cuid())
   // The name trip sheets match on. Not a sign-in identifier — see LoginName.
   name         String
   // Retired: drivers sign in with a username and password. Nullable rather than
@@ -222,16 +223,16 @@ model Driver {
   // Null for a driver created before usernames existed. Such a driver cannot
   // sign in until an ADMIN sets a username and password on the Drivers page.
   passwordHash String?
-  active       Boolean     @default(true)
+  active       Boolean       @default(true)
   // Retired by UserSession; still written so a rollback keeps validating.
   sessionToken String?
   sessions     UserSession[]
-  userId       String?     @unique
-  user         User?       @relation(fields: [userId], references: [id])
-  tenantId     String      @default("")
-  tenant       Tenant      @relation(fields: [tenantId], references: [id])
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  userId       String?       @unique
+  user         User?         @relation(fields: [userId], references: [id])
+  tenantId     String        @default("")
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
   tripSheets   TripSheet[]
   collections  Collection[]
   login        LoginName?
@@ -408,38 +409,38 @@ enum TripSheetStatus {
 }
 
 model TripSheet {
-  id             String          @id @default(cuid())
-  date           DateTime        @default(now())
-  sourceFilename String
-  uploadedBy     String
-  driverId       String
-  regNo          String?
+  id               String          @id @default(cuid())
+  date             DateTime        @default(now())
+  sourceFilename   String
+  uploadedBy       String
+  driverId         String
+  regNo            String?
   /// The fleet vehicle the sheet's REGNO names, when it names one of this
   /// scope's vehicles (matched on Vehicle.registrationKey). Null when REGNO is
   /// blank or matches nothing — regNo stays the record of what the sheet said.
-  vehicleId      String?
-  status         TripSheetStatus @default(ACTIVE)
-  source         TripSource      @default(EXCEL)
-  adminId        String?
+  vehicleId        String?
+  status           TripSheetStatus @default(ACTIVE)
+  source           TripSource      @default(EXCEL)
+  adminId          String?
   /// The import template the sheet was read with; null for the built-in
   /// layout. No foreign key: a template can be edited or deleted, and
   /// mappingSnapshot (the template as it was used) is the record of how this
   /// sheet was read.
   importTemplateId String?
   mappingSnapshot  Json?
-  tenantId       String          @default("")
-  tenant         Tenant          @relation(fields: [tenantId], references: [id])
-  stops          Stop[]
-  collections    Collection[]
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+  tenantId         String          @default("")
+  tenant           Tenant          @relation(fields: [tenantId], references: [id])
+  stops            Stop[]
+  collections      Collection[]
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
 
   // Restrict, not Cascade: deleting a driver used to delete their live runs —
   // signed stops and signatures with them, with no archive. A trip sheet only
   // exists while its run is live (completion deletes it), so the database now
   // refuses to delete a driver who still has one. See deleteDriver.
-  driver Driver @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
-  admin  Admin? @relation(fields: [tenantId, adminId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+  driver  Driver   @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+  admin   Admin?   @relation(fields: [tenantId, adminId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
   // Composite, so a trip can never point at another scope's vehicle. Restrict:
   // a vehicle that has been on a trip is deactivated, never deleted.
   vehicle Vehicle? @relation(fields: [tenantId, vehicleId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
@@ -478,47 +479,47 @@ enum EmailStatus {
 }
 
 model Stop {
-  id            String     @id @default(cuid())
-  stopNumber    Int
+  id                  String         @id @default(cuid())
+  stopNumber          Int
   /// As printed on the trip sheet; what is displayed.
-  invoiceNumber String
+  invoiceNumber       String
   /// invoiceNumber reduced to the digits every document agrees on
   /// (INV-2026-1047 → 1047, lib/invoice-number.ts) under this scope's pattern.
   /// What matching reads. Null for a stop with no invoice, and for rows written
   /// before the column existed until the backfill runs.
   invoiceNoNormalized String?
-  customerName  String     @default("Unknown")
-  address       String     @default("")
-  nop           Int        @default(0)
-  invoiceFile   String?
-  status        StopStatus @default(PENDING)
-  signedAt      DateTime?
-  emailSentAt   DateTime?
-  emailStatus   EmailStatus @default(NOT_SENT)
-  emailAttempts Int         @default(0)
-  emailLastAttemptAt DateTime?
+  customerName        String         @default("Unknown")
+  address             String         @default("")
+  nop                 Int            @default(0)
+  invoiceFile         String?
+  status              StopStatus     @default(PENDING)
+  signedAt            DateTime?
+  emailSentAt         DateTime?
+  emailStatus         EmailStatus    @default(NOT_SENT)
+  emailAttempts       Int            @default(0)
+  emailLastAttemptAt  DateTime?
   /// Why the last attempt failed, shown verbatim to the dispatcher. A bad
   /// address and a dead SMTP relay need different fixes.
-  emailError    String?    @db.Text
+  emailError          String?        @db.Text
   /// When a contact was attached to this stop AFTER it was already signed and
   /// found to have nowhere to send — i.e. the admin finally added the missing
   /// customer. Such a stop is actionable again however old the delivery is, so
   /// the dashboard exempts it from the untried-queue age bound. Null means the
   /// stop has never been rescued this way.
-  emailRelinkedAt DateTime?
-  signatureData String?    @db.Text
+  emailRelinkedAt     DateTime?
+  signatureData       String?        @db.Text
   /// The name the customer typed beside their signature. Stamped on the signed
   /// PDF and shown as "Delivered to" in the confirmation email. Null for stops
   /// signed before the field existed.
-  signedByName  String?
-  tripSheetId   String
-  contactId     String?
-  tenantId      String     @default("")
-  tenant        Tenant     @relation(fields: [tenantId], references: [id])
-  collections   Collection[]
-  rejectedLines RejectedLine[]
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  signedByName        String?
+  tripSheetId         String
+  contactId           String?
+  tenantId            String         @default("")
+  tenant              Tenant         @relation(fields: [tenantId], references: [id])
+  collections         Collection[]
+  rejectedLines       RejectedLine[]
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
 
   tripSheet TripSheet @relation(fields: [tenantId, tripSheetId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   // Restrict, not SetNull: the composite FK includes the required tenantId, so
@@ -620,77 +621,77 @@ enum CollectionSheetStatus {
 }
 
 model Collection {
-  id                String           @id @default(cuid())
+  id                   String           @id @default(cuid())
   /// The number on the trip sheet's COLLECTNO column. Unique per trip within a
   /// scope — the same number may legitimately recur on a later trip.
-  collectionNo      String
-  type              CollectionType
-  upliftSubtype     UpliftSubtype?
-  notes             String?          @db.Text
+  collectionNo         String
+  type                 CollectionType
+  upliftSubtype        UpliftSubtype?
+  notes                String?          @db.Text
   /// The invoice this credit goes back against. Read off the collection
   /// document when one is matched; null when the paperwork does not carry it.
-  originalInvoiceNo String?
+  originalInvoiceNo    String?
   /// originalInvoiceNo normalized exactly as Stop.invoiceNoNormalized — the
   /// key a credit note is matched to its collection on.
-  invoiceNoNormalized String?
+  invoiceNoNormalized  String?
   /// The invoice this collection is credited against: the anchor of the
   /// invoice → collection → credit note chain. Set at deploy (a stub invoice
   /// is created when the PDF is not on file). Null for an ad hoc collection or
   /// an uplift with no invoice behind it.
-  invoiceId         String?
-  status            CollectionStatus @default(PENDING)
+  invoiceId            String?
+  status               CollectionStatus @default(PENDING)
   /// Required whenever status is PARTIAL, NOT_AVAILABLE or REFUSED.
-  exceptionReason   String?          @db.Text
-  expectedQty       Int?
-  collectedQty      Int?
+  exceptionReason      String?          @db.Text
+  expectedQty          Int?
+  collectedQty         Int?
   /// The pending collection document, matched to collectionNo by filename the
   /// same way invoices are. Both *FilePath columns hold the FILENAME within the
   /// relevant subfolder, not an absolute path: that is the key both the OneDrive
   /// and the local reader address a file by, and an absolute path recorded on a
   /// server that has since moved would resolve to nothing.
-  sourceFileId      String?
-  sourceFilePath    String?
+  sourceFileId         String?
+  sourceFilePath       String?
   /// The stamped output in the collections folder's Signed/ subfolder.
-  signedFileId      String?
-  signedFilePath    String?
+  signedFileId         String?
+  signedFilePath       String?
   /// PNG data URL, as Stop.signatureData. Same capture component, same storage.
   /// Cleared when the trip completes, once the signed PDF holding it is filed —
   /// that PDF is the record, and this is the bulk of the row.
-  signature         String?          @db.Text
+  signature            String?          @db.Text
   /// The signed PDF really contains the office's original pages. False when
   /// the original could not be read at signing (the receipt page stands
   /// alone), and for receipts signed before this was recorded. Only when true
   /// may the original in Pending/ be removed.
-  signedIncludesSource Boolean       @default(false)
-  signedByName      String?
-  collectedAt       DateTime?
+  signedIncludesSource Boolean          @default(false)
+  signedByName         String?
+  collectedAt          DateTime?
   /// The signed collection receipt emailed to the customer — same states and
   /// lease semantics as Stop.emailStatus (see lib/collection-notify.ts). Only
   /// COLLECTED and PARTIAL are sent: nothing changed hands on the others.
-  emailStatus        EmailStatus @default(NOT_SENT)
-  emailSentAt        DateTime?
-  emailAttempts      Int         @default(0)
-  emailLastAttemptAt DateTime?
-  emailError         String?     @db.Text
+  emailStatus          EmailStatus      @default(NOT_SENT)
+  emailSentAt          DateTime?
+  emailAttempts        Int              @default(0)
+  emailLastAttemptAt   DateTime?
+  emailError           String?          @db.Text
   /// Who completed it. Null until the collection reaches a terminal status.
-  driverId          String?
+  driverId             String?
   /// The live trip and stop. BOTH null once the trip has completed: the row
   /// outlives them — a credit note arrives days later and must find it — so
   /// completion detaches it (lib/trip-data.ts completeTripSheet) before the
   /// trip is deleted. "tripSheetId is null" is what archived means. Deleting a
   /// trip any other way still cascades its (attached) collections away.
-  tripSheetId       String?
-  stopId            String?
+  tripSheetId          String?
+  stopId               String?
   /// The stop's customer, copied onto the row so an archived collection —
   /// which has no stop left — still names who it was collected from.
-  customerName      String?
+  customerName         String?
   /// The CompletedTripSheet snapshot this collection was archived with. No FK:
   /// the archive is never joined to, as RemovedStop is never joined to a trip.
   completedTripSheetId String?
-  tenantId          String           @default("")
-  tenant            Tenant           @relation(fields: [tenantId], references: [id])
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
+  tenantId             String           @default("")
+  tenant               Tenant           @relation(fields: [tenantId], references: [id])
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
 
   // Composite FKs kept while attached, so a live collection still cannot point
   // into another scope's trip or stop. A null component switches the
@@ -699,13 +700,13 @@ model Collection {
   stop      Stop?      @relation(fields: [tenantId, stopId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   // Restrict, not SetNull: the composite FK includes the required tenantId, so
   // SetNull would try to null a NOT NULL column. Same reasoning as Stop.contact.
-  driver    Driver?   @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+  driver    Driver?    @relation(fields: [tenantId, driverId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
   // Restrict for the same reason as driver: an invoice is a durable anchor and
   // is never deleted while anything points at it.
-  invoice   Invoice?  @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+  invoice   Invoice?   @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
 
   // ── The office's collection sheet, read into lines (lib/collection-sheet.ts)
-  sheetStatus       CollectionSheetStatus @default(MISSING)
+  sheetStatus       CollectionSheetStatus  @default(MISSING)
   /// What disagreed on the last read — shown to the office. [{code, message}]
   sheetIssues       Json?
   /// The sheet's own header as read (collection no, invoice no, customer,
@@ -719,13 +720,13 @@ model Collection {
   sheetFileModified DateTime?
   /// Last look for a sheet, read or not — throttles the re-checks.
   sheetCheckedAt    DateTime?
-  sheetError        String?   @db.Text
+  sheetError        String?                @db.Text
   sheetReviewedBy   String?
   sheetReviewedAt   DateTime?
   lines             CollectionLine[]
   creditNoteLinks   CreditNoteCollection[]
   /// The driver chose "Not as listed": what came back differs from the sheet.
-  hasVariance       Boolean   @default(false)
+  hasVariance       Boolean                @default(false)
   /// Why a collection failed: CUSTOMER_NOT_READY · GOODS_NOT_AVAILABLE ·
   /// CUSTOMER_REFUSED · OTHER. The status (NOT_AVAILABLE / REFUSED) says what
   /// accounts does about it; this says what happened at the door.
@@ -735,12 +736,14 @@ model Collection {
   /// Only a CR (credit return against an invoice) that came back needs one.
   /// REJECTED: kept on record, never matched to a credit note.
   creditReview       CreditReview?
-  creditReviewReason String?   @db.Text
+  creditReviewReason String?       @db.Text
   creditReviewedBy   String?
   creditReviewedAt   DateTime?
   creditCharge       CreditCharge?
 
   @@unique([tenantId, tripSheetId, collectionNo])
+  // Composite-FK target, so a CollectionLine cannot hang off another scope's collection.
+  @@unique([tenantId, id])
   @@index([tenantId])
   @@index([tripSheetId])
   @@index([stopId])
@@ -750,49 +753,47 @@ model Collection {
   @@index([tenantId, type, collectedAt])
   @@index([tenantId, invoiceNoNormalized])
   @@index([tenantId, completedTripSheetId])
-  // Composite-FK target, so a CollectionLine cannot hang off another scope's collection.
-  @@unique([tenantId, id])
 }
 
 /// One line of the office's collection sheet — what the driver is expected to
 /// bring back. Read off the sheet, never typed by the driver: the sheet is the
 /// source of truth, and the driver records only differences (step 5).
 model CollectionLine {
-  id           String   @id @default(cuid())
-  tenantId     String   @default("")
-  tenant       Tenant   @relation(fields: [tenantId], references: [id])
-  collectionId String
+  id                 String         @id @default(cuid())
+  tenantId           String         @default("")
+  tenant             Tenant         @relation(fields: [tenantId], references: [id])
+  collectionId       String
   /// Position on the sheet, 1-based, across pages.
-  lineNo       Int
+  lineNo             Int
   /// The sheet's "Product no".
-  itemCode     String?
+  itemCode           String?
   /// The unlabelled short-name column between Product no and Description.
-  shortName    String?
-  description  String
+  shortName          String?
+  description        String
   /// The sheet's Qty: the count the office expects back.
-  qtyListed    Int
+  qtyListed          Int
   /// The sheet's Returned column as printed — 0 on the office's copy. What
   /// the driver actually collects is qtyCollected.
   qtyReturnedPrinted Int?
   /// What the driver brought back — set at the door. "Collected as listed"
   /// sets it to qtyListed on every line; "Not as listed" records the counts.
-  qtyCollected Int?
+  qtyCollected       Int?
   /// Why it differs from the sheet: SHORT · DAMAGED · NOT_AVAILABLE ·
   /// CUSTOMER_KEPT · OTHER (lib/collection-confirm.ts). Required when fewer
   /// came back; allowed on a full count (goods back, but damaged).
-  diffReason   String?
-  diffNote     String?   @db.Text
+  diffReason         String?
+  diffNote           String?        @db.Text
   /// Handed over but not on the sheet — added by the driver (qtyListed 0).
-  isExtra      Boolean   @default(false)
+  isExtra            Boolean        @default(false)
   /// The sheet's Reason cell, as printed: the office's typed reason for this
   /// line (the client's sample sheet held the placeholders 1, 2, 3).
-  reasonCode   String?
+  reasonCode         String?
   /// Credit return or non-credit uplift. The sheet has no Type column: a sheet
   /// that names an invoice is a credit return against it; one with no invoice
   /// (or a row the trip sheet marks as an uplift) is crates, parcels or
   /// documents — never matched to a credit note.
-  type         CollectionType @default(CREDIT_RETURN)
-  createdAt    DateTime @default(now())
+  type               CollectionType @default(CREDIT_RETURN)
+  createdAt          DateTime       @default(now())
 
   collection Collection @relation(fields: [tenantId, collectionId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
 
@@ -812,32 +813,32 @@ model CollectionLine {
 // edits to drivers or contacts cannot rewrite what was delivered.
 
 model CompletedTripSheet {
-  id             String   @id @default(cuid())
+  id                   String                @id @default(cuid())
   /// The id the trip sheet had before it was deleted. For cross-referencing an
   /// audit-log entry only; there is no row left to point at.
-  tripSheetId    String
-  driverId       String
-  driverName     String
-  regNo          String?
+  tripSheetId          String
+  driverId             String
+  driverName           String
+  regNo                String?
   /// The vehicle the trip was linked to (TripSheet.vehicleId), frozen. No FK:
   /// this is an archive, like driverId.
-  vehicleId      String?
+  vehicleId            String?
   /// TripSheet.source, frozen.
-  source         TripSource @default(EXCEL)
-  sourceFilename String
+  source               TripSource            @default(EXCEL)
+  sourceFilename       String
   /// Where the source file landed in processed/, or null if the move failed.
-  archivedFile   String?
-  uploadedAt     DateTime
-  uploadedBy     String
-  completedAt    DateTime @default(now())
-  completedBy    String?
-  totalStops     Int
-  signedStops    Int
-  totalCollections Int    @default(0)
-  collectedCollections Int @default(0)
+  archivedFile         String?
+  uploadedAt           DateTime
+  uploadedBy           String
+  completedAt          DateTime              @default(now())
+  completedBy          String?
+  totalStops           Int
+  signedStops          Int
+  totalCollections     Int                   @default(0)
+  collectedCollections Int                   @default(0)
   /// Frozen array of { stopNumber, invoiceNumber, customerName, address, nop,
   /// signedAt, emailStatus }.
-  stops          Json
+  stops                Json
   /// Frozen array of the trip's collections — see ArchivedCollection in
   /// lib/trip-data.ts. Nullable because rows archived before collections
   /// existed have none; readers treat null as [].
@@ -845,11 +846,11 @@ model CompletedTripSheet {
   /// This is the whole record once the trip is closed: the Collection rows
   /// cascade away with the trip sheet, so signedFilePath here is what the
   /// archive view and the credit-return report read.
-  collections    Json?
-  tenantId       String   @default("")
-  tenant         Tenant   @relation(fields: [tenantId], references: [id])
-  createdAt      DateTime @default(now())
-  emailResends   ArchivedEmailResend[]
+  collections          Json?
+  tenantId             String                @default("")
+  tenant               Tenant                @relation(fields: [tenantId], references: [id])
+  createdAt            DateTime              @default(now())
+  emailResends         ArchivedEmailResend[]
 
   // Composite-FK target so a resend cannot point at another scope's archive.
   @@unique([tenantId, id])
@@ -932,12 +933,32 @@ model Invoice {
   headerSource        String?
   headerAttempts      Int       @default(0)
   headerError         String?   @db.Text
+  /// The product lines (InvoiceLine), read on demand — never in a sweep over
+  /// the folder, because a scan goes to Claude (lib/invoice-lines.ts).
+  /// Null = not read yet · OK · NEEDS_REVIEW (see linesIssues) · FAILED
+  /// (three tries; linesError says why).
+  linesStatus         String?
+  /// TEXT (PDF text layer), AI (Claude) or MANUAL (typed by the office — never
+  /// overwritten by a read).
+  linesSource         String?
+  /// [{code, level: review|warning, message}] from the last read.
+  linesIssues         Json?
+  linesAttempts       Int       @default(0)
+  linesError          String?   @db.Text
+  linesReadAt         DateTime?
+  /// A read in progress: a lease, not a lock — older than two minutes it can
+  /// be claimed again, so a crashed read never strands the invoice.
+  linesClaimedAt      DateTime?
+  /// The PDF the lines were read from. A different file filed under this
+  /// number later is read again; the same file never is.
+  linesPdfFilename    String?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  collections Collection[]
-  creditNotes CreditNote[]
+  collections     Collection[]
+  creditNotes     CreditNote[]
   courierInvoices CourierTripSheetInvoice[]
+  lines           InvoiceLine[]
 
   @@unique([tenantId, invoiceNoNormalized])
   // Composite-FK target, as Stop's.
@@ -945,6 +966,33 @@ model Invoice {
   @@index([tenantId, invoiceDate])
   @@index([tenantId, customerName])
   @@index([tenantId, headerSource])
+}
+
+/// One product line of an invoice, as printed. QUANTITIES ONLY (user
+/// decision, 2026-11-25): prices are read to check the lines add up to the
+/// SUB TOTAL and then dropped. What has already been collected against a line
+/// is derived from CollectionLine rows, never stored here.
+model InvoiceLine {
+  id          String   @id @default(cuid())
+  tenantId    String   @default("")
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  invoiceId   String
+  /// Position on the invoice, 1-based, across pages.
+  lineNo      Int
+  /// "Product no" — the code collection sheets and credit notes print.
+  itemCode    String?
+  /// The unlabelled short-name column after Product no.
+  shortName   String?
+  description String
+  qty         Decimal  @db.Decimal(12, 3)
+  /// From the follow-on row ("Uom: EACH"), when printed.
+  uom         String?
+  createdAt   DateTime @default(now())
+
+  invoice Invoice @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([tenantId, invoiceId, lineNo])
+  @@index([tenantId, invoiceId])
 }
 
 model AppConfig {
@@ -965,20 +1013,20 @@ model AppConfig {
 // holds ciphertext, never a usable bearer token.
 
 model CloudAccount {
-  id                  String   @id @default(cuid())
-  tenantId            String   @default("")
-  tenant              Tenant   @relation(fields: [tenantId], references: [id])
-  provider            String // "onedrive" | "gdrive"
-  accountEmail        String?
-  accountName         String?
-  accessToken         String   @db.Text // encrypted
-  refreshToken        String   @db.Text // encrypted
-  tokenExpiry         DateTime
-  driveId             String?
-  folderPath          String? // trip sheet folder
-  folderItemId        String? // trip sheet folder item ID
-  invoiceFolderPath   String?
-  invoiceFolderItemId String?
+  id                      String    @id @default(cuid())
+  tenantId                String    @default("")
+  tenant                  Tenant    @relation(fields: [tenantId], references: [id])
+  provider                String // "onedrive" | "gdrive"
+  accountEmail            String?
+  accountName             String?
+  accessToken             String    @db.Text // encrypted
+  refreshToken            String    @db.Text // encrypted
+  tokenExpiry             DateTime
+  driveId                 String?
+  folderPath              String? // trip sheet folder
+  folderItemId            String? // trip sheet folder item ID
+  invoiceFolderPath       String?
+  invoiceFolderItemId     String?
   // Collections live in a SIBLING folder of the invoices folder, never inside
   // it: the invoice listing and the collections listing must not see each
   // other's documents. lib/collections.ts rejects a nested configuration.
@@ -988,41 +1036,41 @@ model CloudAccount {
   // credit notes to, with flat Originals/ Signed/ Rejected/ beneath it. Not
   // inside (or around) the invoice or collections folder — every listing here
   // is extension-based. See lib/credit-intake.ts.
-  creditsFolderPath   String?
-  creditsFolderItemId String?
+  creditsFolderPath       String?
+  creditsFolderItemId     String?
   /// Last look at the credits folder — throttles the automatic check.
-  creditsCheckedAt    DateTime?
+  creditsCheckedAt        DateTime?
   /// Why the last look failed, for the Credits page. Null when it worked.
-  creditsError        String?  @db.Text
+  creditsError            String?   @db.Text
   /// Courier trip sheets: the folder the Trip application saves them to.
   /// Files directly in it are imported; Signex files each in YYYY/MM/
   /// beneath it. Unset: the "Courier Trip Sheets" folder beside the trip sheet
   /// folder, remembered here once created. See lib/courier-folder.ts.
-  courierFolderPath   String?
-  courierFolderItemId String?
+  courierFolderPath       String?
+  courierFolderItemId     String?
   /// Last look at the courier folder — throttles the automatic check.
-  courierCheckedAt    DateTime?
-  courierError        String?  @db.Text
+  courierCheckedAt        DateTime?
+  courierError            String?   @db.Text
   /// Invoice folder index (InvoiceFolderFile, lib/invoice-index-sync.ts).
   /// The invoice folder the index was built for: a different folder chosen in
   /// Settings starts the index again from nothing.
-  invoiceIndexFolderId  String?
+  invoiceIndexFolderId    String?
   /// The invoice folder's "signed" subfolder, as the index last saw it.
-  invoiceSignedFolderId String?
+  invoiceSignedFolderId   String?
   /// Graph's link to carry on from: a nextLink while the first pass is still
   /// under way, the deltaLink once it has finished.
-  invoiceDeltaLink      String?   @db.Text
+  invoiceDeltaLink        String?   @db.Text
   /// When the first full pass finished. Null: the index is not complete and
   /// the Invoices tab lists the folder itself, as it always did.
-  invoiceIndexReadyAt   DateTime?
+  invoiceIndexReadyAt     DateTime?
   /// Last look at the invoice folder — throttles the automatic check.
-  invoiceCheckedAt      DateTime?
+  invoiceCheckedAt        DateTime?
   /// Last look that worked, for the tab's "Checked … ago".
-  invoiceIndexSyncedAt  DateTime?
+  invoiceIndexSyncedAt    DateTime?
   /// Why the last look failed. Null when it worked.
-  invoiceIndexError     String?   @db.Text
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  invoiceIndexError       String?   @db.Text
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
 
   @@unique([tenantId, provider])
   @@index([tenantId])
@@ -1097,87 +1145,87 @@ enum CourierStatus {
 }
 
 model CourierTripSheet {
-  id               String        @id @default(cuid())
-  tenantId         String        @default("")
-  tenant           Tenant        @relation(fields: [tenantId], references: [id])
+  id                    String        @id @default(cuid())
+  tenantId              String        @default("")
+  tenant                Tenant        @relation(fields: [tenantId], references: [id])
   /// From the filename (cts-200189-p5 → 200189). Unique per scope.
-  courierSheetNo   String
-  sheetDate        DateTime      @db.Date
+  courierSheetNo        String
+  sheetDate             DateTime      @db.Date
   /// Not in the client's export; typed at import or at signing.
-  courierCompany   String?
-  courierService   String?
-  courierContact   String?
+  courierCompany        String?
+  courierService        String?
+  courierContact        String?
   /// One customer per sheet — a sheet naming two is refused at import.
-  customerName     String
-  contactId        String?
+  customerName          String
+  contactId             String?
   /// Copied from the contact when linked; null when it has no email.
-  customerEmail    String?
+  customerEmail         String?
   /// Total parcels: every row's NOP added up (blank rows are packed with another).
-  parcels          Int?
+  parcels               Int?
   /// Distinct waybills in sheet order — several are allowed (client decision).
-  waybills         String[]      @default([])
-  status           CourierStatus @default(AWAITING_COLLECTION)
+  waybills              String[]      @default([])
+  status                CourierStatus @default(AWAITING_COLLECTION)
   /// [{ code, level: "block" | "warning", invoiceNo?, message }]. A "block"
   /// holds the sheet in NEEDS_ATTENTION; a missing email is only a warning
   /// (client decision: the handover goes ahead, the email waits).
-  issues           Json?
-  checkedAt        DateTime?
+  issues                Json?
+  checkedAt             DateTime?
   /// As uploaded.
-  sourceFileName   String
+  sourceFileName        String
   /// Where the original was kept: OneDrive item id, and the path for display.
-  sourceFileId     String?
-  sourceFilePath   String?
+  sourceFileId          String?
+  sourceFilePath        String?
   /// The original's bytes, held only until they are stored (for Retry) —
   /// a few KB, cleared once filed.
-  sourceFileBytes  Bytes?
-  sourceFileError  String?       @db.Text
-  importTemplateId String?
-  mappingSnapshot  Json?
-  importedById     String
-  importedByName   String?
+  sourceFileBytes       Bytes?
+  sourceFileError       String?       @db.Text
+  importTemplateId      String?
+  mappingSnapshot       Json?
+  importedById          String
+  importedByName        String?
   // ── The handover (lib/courier-collect.ts) ──
   /// Typed at signing (prefilled with the office login's name).
-  dispatcherName   String?
+  dispatcherName        String?
   /// The office login that recorded the handover — the authority.
-  dispatcherUserId String?
+  dispatcherUserId      String?
   /// The branch it left from, set by the server, never typed.
-  dispatchCompany  String?
-  courierDriverName String?
+  dispatchCompany       String?
+  courierDriverName     String?
   /// PNG data URL, as Stop.signatureData. Cleared once every signed copy is
   /// filed — the stamped PDFs are then the record.
-  driverSignature  String?       @db.Text
+  driverSignature       String?       @db.Text
   /// When the courier signed, captured by the server. Set with status COLLECTED.
-  collectedAt      DateTime?
+  collectedAt           DateTime?
   /// Every invoice's signed copy is filed. Null while filing is unfinished
   /// (filingError says why) — the confirmation email waits for this.
-  filingCompletedAt DateTime?
-  filingError      String?       @db.Text
+  filingCompletedAt     DateTime?
+  filingError           String?       @db.Text
   // ── The customer's confirmation (lib/courier-confirm.ts) ──
   /// Same lease semantics as Stop.emailStatus. NO_EMAIL waits for a contact
   /// email; the daily job and the office's Send pick it up.
-  emailStatus        EmailStatus @default(NOT_SENT)
-  emailAttempts      Int         @default(0)
-  emailLastAttemptAt DateTime?
-  emailSentAt        DateTime?
-  emailRecipient     String?
-  emailError         String?     @db.Text
+  emailStatus           EmailStatus   @default(NOT_SENT)
+  emailAttempts         Int           @default(0)
+  emailLastAttemptAt    DateTime?
+  emailSentAt           DateTime?
+  emailRecipient        String?
+  emailError            String?       @db.Text
   /// SHA-256 of the link's token — what a visit is looked up by. Globally
   /// unique: the link carries no scope, the row it finds does.
-  confirmTokenHash   String?     @unique
+  confirmTokenHash      String?       @unique
   /// The same token encrypted (lib/crypto.ts), so the reminder can carry the
   /// same link. Useless without TOKEN_ENCRYPTION_KEY, which is not in the DB.
-  confirmTokenEnc    String?     @db.Text
+  confirmTokenEnc       String?       @db.Text
   confirmTokenExpiresAt DateTime?
   /// The one reminder. Set when claimed; cleared again if the send fails.
-  reminderSentAt     DateTime?
+  reminderSentAt        DateTime?
   /// The customer pressed Confirm received. Set with status DELIVERED.
-  confirmedAt        DateTime?
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  confirmedAt           DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
 
   invoices CourierTripSheetInvoice[]
   // Restrict, as Stop's: the composite FK includes the required tenantId.
-  contact  Contact? @relation(fields: [tenantId, contactId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+  contact  Contact?                  @relation(fields: [tenantId, contactId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
 
   @@unique([tenantId, courierSheetNo])
   @@unique([tenantId, id])
@@ -1377,21 +1425,21 @@ enum ContactSource {
 }
 
 model Contact {
-  id            String        @id @default(cuid())
-  tenantId      String        @default("")
-  tenant        Tenant        @relation(fields: [tenantId], references: [id])
-  companyName   String
-  contactPerson String?
-  email         String?
-  phone         String?
-  altPhone      String?
-  address       String?
-  notes         String?
-  source        ContactSource @default(MANUAL)
-  deletedAt     DateTime?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  stops         Stop[]
+  id                String             @id @default(cuid())
+  tenantId          String             @default("")
+  tenant            Tenant             @relation(fields: [tenantId], references: [id])
+  companyName       String
+  contactPerson     String?
+  email             String?
+  phone             String?
+  altPhone          String?
+  address           String?
+  notes             String?
+  source            ContactSource      @default(MANUAL)
+  deletedAt         DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  stops             Stop[]
   courierTripSheets CourierTripSheet[]
 
   // Composite-FK target so a Stop cannot reference a contact in another scope.
@@ -1550,9 +1598,9 @@ enum CreditNoteStatus {
 /// prints a collection number) and through that invoice to the collections
 /// whose goods it pays for.
 model CreditNote {
-  id                  String   @id @default(cuid())
-  tenantId            String   @default("")
-  tenant              Tenant   @relation(fields: [tenantId], references: [id])
+  id                  String           @id @default(cuid())
+  tenantId            String           @default("")
+  tenant              Tenant           @relation(fields: [tenantId], references: [id])
   /// As printed ("CR NOTE 407712"). Null when it could not be read.
   creditNo            String?
   /// The digits of creditNo. NOT unique: a duplicate is kept, as REJECTED.
@@ -1570,21 +1618,21 @@ model CreditNote {
   /// the notes that name none: those reach collections through the invoice.
   collectionRef       String?
   /// The note's own date — its "Invoice date" box, not the Order date.
-  creditDate          DateTime? @db.Date
+  creditDate          DateTime?        @db.Date
   accountNo           String?
   deliverToName       String?
   billToName          String?
-  subtotal            Decimal? @db.Decimal(12, 2)
-  vatAmount           Decimal? @db.Decimal(12, 2)
-  total               Decimal? @db.Decimal(12, 2)
+  subtotal            Decimal?         @db.Decimal(12, 2)
+  vatAmount           Decimal?         @db.Decimal(12, 2)
+  total               Decimal?         @db.Decimal(12, 2)
   status              CreditNoteStatus @default(RECEIVED)
   /// What the last check found: [{code, level, message}].
   issues              Json?
   /// TEXT (the PDF text layer, by position) or AI (a scan read by Claude).
   readSource          String?
   readAt              DateTime?
-  readError           String?  @db.Text
-  rejectReason        String?  @db.Text
+  readError           String?          @db.Text
+  rejectReason        String?          @db.Text
   /// The file. The OneDrive item id follows it through moves between
   /// subfolders; the name is for display and for the signed copy's name.
   sourceItemId        String
@@ -1595,51 +1643,51 @@ model CreditNote {
   /// The file's last-modified time when read: a re-saved note is read again.
   sourceModifiedAt    DateTime?
   /// A move between subfolders that failed — the row is right, the folder is not.
-  fileError           String?  @db.Text
+  fileError           String?          @db.Text
   /// Who uploaded it through Signex. Null when it was picked up from the folder.
   uploadedBy          String?
 
   // ── Sign-off (lib/credit-signoff.ts) ──
   /// The name the dispatcher typed.
-  signedByName        String?
+  signedByName         String?
   /// The office login that signed — the session's name, not something typed.
-  signedByLogin       String?
-  signedByUserId      String?
-  signedAt            DateTime?
+  signedByLogin        String?
+  signedByUserId       String?
+  signedAt             DateTime?
   /// PNG data URL of the drawn signature. Cleared once the signed copy is
   /// filed: that PDF is the record. Kept while filing has not succeeded, so
   /// a retry can still build it.
-  signature           String?  @db.Text
+  signature            String?   @db.Text
   /// The issues the dispatcher saw and accepted when signing, and why.
-  acknowledgedIssues  Json?
-  acknowledgement     String?  @db.Text
+  acknowledgedIssues   Json?
+  acknowledgement      String?   @db.Text
   /// The signed copy in Signed/ (original pages + the sign-off page).
-  signedFileId        String?
-  signedFilename      String?
-  filedAt             DateTime?
+  signedFileId         String?
+  signedFilename       String?
+  filedAt              DateTime?
   /// Why filing (or removing the original) did not finish — the signature
   /// stands either way; the office can retry.
-  filingError         String?  @db.Text
+  filingError          String?   @db.Text
   /// The signed copy really contains the original's pages. Only then may the
   /// original be removed (as Collection.signedIncludesSource).
-  signedIncludesSource Boolean @default(false)
+  signedIncludesSource Boolean   @default(false)
   /// The unsigned original was removed from Originals/ after filing.
-  originalRemoved     Boolean  @default(false)
+  originalRemoved      Boolean   @default(false)
 
   // ── The customer's email (lib/credit-note-email.ts) ──
   /// Sent when the note is signed, with the signed copy attached. Same lease
   /// semantics as Stop.emailStatus: SENDING is a claim, re-claimable once
   /// stale; NO_EMAIL waits for a contact with an address.
-  emailStatus         EmailStatus @default(NOT_SENT)
-  emailRecipient      String?
-  emailSentAt         DateTime?
-  emailError          String?  @db.Text
-  emailAttempts       Int      @default(0)
-  emailLastAttemptAt  DateTime?
-  rejectedBy          String?
-  rejectedAt          DateTime?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  emailStatus        EmailStatus @default(NOT_SENT)
+  emailRecipient     String?
+  emailSentAt        DateTime?
+  emailError         String?     @db.Text
+  emailAttempts      Int         @default(0)
+  emailLastAttemptAt DateTime?
+  rejectedBy         String?
+  rejectedAt         DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
 
   // Restrict, as Collection.invoice: an invoice is a durable anchor.
   invoice     Invoice?               @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
@@ -1688,17 +1736,17 @@ model CreditNoteLine {
 /// invoice. MANUAL: linked by the office. EXCLUDED: an AUTO link the office
 /// took away, kept so the next automatic check does not put it back.
 model CreditNoteCollection {
-  id           String   @id @default(cuid())
-  tenantId     String   @default("")
-  tenant       Tenant   @relation(fields: [tenantId], references: [id])
-  creditNoteId String
-  collectionId String
-  source       String
-  linkedBy     String?
+  id               String    @id @default(cuid())
+  tenantId         String    @default("")
+  tenant           Tenant    @relation(fields: [tenantId], references: [id])
+  creditNoteId     String
+  collectionId     String
+  source           String
+  linkedBy         String?
   /// The collection's signed receipt got this note's reference page appended.
   /// Set once, so a retried filing never appends it twice.
   receiptStampedAt DateTime?
-  createdAt    DateTime @default(now())
+  createdAt        DateTime  @default(now())
 
   creditNote CreditNote @relation(fields: [tenantId, creditNoteId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
   // Cascade: a collection deleted with its live trip takes its links with it.

@@ -122,6 +122,12 @@ export async function creditNotePdf(
     layout?: keyof typeof LAYOUTS;
     /** The free-text footer line ("RFC INV 639568 CRC-23328"), with a name beside it as printed. */
     reference?: string;
+    /**
+     * Print this in place of "CR NOTE" — "TAX INVOICE" draws the client's
+     * invoice, which comes out of the same system with the same table. The
+     * number printed beside it is `creditNo`.
+     */
+    documentTitle?: string;
   } = {}
 ): Promise<Buffer> {
   const layout = opts.layout ?? "CR-407712";
@@ -154,13 +160,13 @@ export async function creditNotePdf(
     text(page, times, "Website: www.electro-city.co.za", 327, 134.8, 12);
 
     if (columnInvoice) {
-      text(page, bold, "CR NOTE", 78.8, 163.6, 16);
+      text(page, bold, opts.documentTitle ?? "CR NOTE", 78.8, 163.6, 16);
       text(page, mono, opts.creditNo ?? "407710", 212.4, 163.6, 16);
       text(page, sans, "Customer VAT no", 334.5, 162.6, 12);
       text(page, mono, "4770255505", 453, 163.4, 12);
     } else {
       text(page, bold, "COPY", 29.3, 155.9, 12);
-      text(page, bold, "CR NOTE", 78.8, 157.6, 16);
+      text(page, bold, opts.documentTitle ?? "CR NOTE", 78.8, 157.6, 16);
       text(page, mono, opts.creditNo ?? "407712", 225.9, 157.6, 16);
       text(page, sans, "Customer VAT no", 334.5, 156.6, 12);
     }
