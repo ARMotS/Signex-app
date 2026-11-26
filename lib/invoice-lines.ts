@@ -20,8 +20,12 @@
  *
  * Lines are read ON DEMAND, one invoice per request, never in a sweep over
  * the folder: a scan or an unknown layout goes to Claude, which costs money
- * per invoice. A file is read once — `linesPdfFilename` records which — and a
- * MANUAL entry is never overwritten by a read.
+ * per invoice. A file is read once — `linesPdfFilename` records which.
+ *
+ * The office can type the lines in instead (`saveManualLines`, source
+ * MANUAL) — for a scan nobody could read, or a read that went wrong. An
+ * ordinary read never touches MANUAL lines; a FORCED re-read may replace them
+ * (user decision, 2026-11-25), and a forced read that fails leaves them be.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -41,6 +45,7 @@ import {
   type TextItem,
 } from "./invoice-header";
 import { readTable, readTotals, round2, type DocumentTotals } from "./document-table";
+import type { ManualLine } from "./invoice-lines-input";
 
 // ─── What a read gives ────────────────────────────────────────────────────
 
@@ -329,12 +334,32 @@ export interface InvoiceLinesView {
   reading: boolean;
   /** The lines were read from a different PDF than the one now on file. */
   stale: boolean;
+  /** The registry row's header, for the review panel. */
+  header: {
+    invoiceNoNormalized: string;
+    isStub: boolean;
+    customerName: string | null;
+    deliverToName: string | null;
+    billToName: string | null;
+    /** YYYY-MM-DD */
+    invoiceDate: string | null;
+    headerSource: string | null;
+    headerError: string | null;
+  };
   lines: { lineNo: number; itemCode: string | null; shortName: string | null; description: string; qty: number; uom: string | null }[];
 }
 
 const VIEW_SELECT = {
   id: true,
   invoiceNo: true,
+  invoiceNoNormalized: true,
+  isStub: true,
+  customerName: true,
+  deliverToName: true,
+  billToName: true,
+  invoiceDate: true,
+  headerSource: true,
+  headerError: true,
   pdfFilename: true,
   linesStatus: true,
   linesSource: true,
@@ -353,6 +378,14 @@ const VIEW_SELECT = {
 type ViewRow = {
   id: string;
   invoiceNo: string;
+  invoiceNoNormalized: string;
+  isStub: boolean;
+  customerName: string | null;
+  deliverToName: string | null;
+  billToName: string | null;
+  invoiceDate: Date | null;
+  headerSource: string | null;
+  headerError: string | null;
   pdfFilename: string | null;
   linesStatus: string | null;
   linesSource: string | null;
@@ -385,6 +418,16 @@ function toView(row: ViewRow): InvoiceLinesView {
       !!row.linesPdfFilename &&
       !!row.pdfFilename &&
       row.linesPdfFilename.toLowerCase() !== row.pdfFilename.toLowerCase(),
+    header: {
+      invoiceNoNormalized: row.invoiceNoNormalized,
+      isStub: row.isStub,
+      customerName: row.customerName,
+      deliverToName: row.deliverToName,
+      billToName: row.billToName,
+      invoiceDate: row.invoiceDate?.toISOString().slice(0, 10) ?? null,
+      headerSource: row.headerSource,
+      headerError: row.headerError,
+    },
     lines: row.lines.map((l) => ({ ...l, qty: Number(l.qty) })),
   };
 }
@@ -397,7 +440,7 @@ export async function getInvoiceLines(tenantId: string, invoiceId: string): Prom
 
 /**
  * Why nothing was read: NO_PDF (a stub, or the file was deleted), MANUAL (the
- * office typed the lines — a read never replaces them), CACHED (this file was
+ * office typed the lines — only a forced read replaces them), CACHED (this file was
  * read already), GAVE_UP (three failed reads of this file), BUSY (another
  * request is reading it now).
  */
@@ -413,24 +456,23 @@ const sameFile = (a: string | null, b: string | null) => !!a && !!b && a.toLower
  * Claimed with a lease (`linesClaimedAt`), so two people opening the same
  * invoice cause one read, not two Claude calls. The result is written only
  * while that claim still holds and the same PDF is still on file, and never
- * over a MANUAL entry made meanwhile. `force` re-reads a file already read
- * (or given up on); it still never overrides MANUAL or a live claim.
+ * over a MANUAL entry made meanwhile (saving one clears the claim). `force`
+ * re-reads a file already read (or given up on), and may replace MANUAL lines
+ * — `replacedManual` says it did; it never overrides a live claim.
  */
 export async function readInvoiceLines(
   tenantId: string,
   invoiceId: string,
   { force = false }: { force?: boolean } = {}
-): Promise<{ outcome: LinesOutcome; view: InvoiceLinesView } | null> {
+): Promise<{ outcome: LinesOutcome; view: InvoiceLinesView; replacedManual: boolean } | null> {
   const db = scopedPrisma(tenantId);
-  const row = await db.invoice.findFirst({
-    where: { id: invoiceId },
-    select: { ...VIEW_SELECT, invoiceNoNormalized: true, headerSource: true },
-  });
+  const row = await db.invoice.findFirst({ where: { id: invoiceId }, select: VIEW_SELECT });
   if (!row) return null;
-  const done = (outcome: LinesOutcome) => ({ outcome, view: toView(row) });
+  const done = (outcome: LinesOutcome) => ({ outcome, view: toView(row), replacedManual: false });
+  const wasManual = row.linesSource === "MANUAL";
 
   if (!row.pdfFilename) return done("NO_PDF");
-  if (row.linesSource === "MANUAL") return done("MANUAL");
+  if (wasManual && !force) return done("MANUAL");
   if (claimIsLive(row.linesClaimedAt)) return done("BUSY");
 
   const fileChanged = !sameFile(row.linesPdfFilename, row.pdfFilename);
@@ -440,15 +482,17 @@ export async function readInvoiceLines(
   }
 
   // The claim: conditional on the state just read, so of two racing requests
-  // exactly one proceeds. A new file (or a forced re-read) starts its tries again.
+  // exactly one proceeds — and lines typed in meanwhile (source changed) are
+  // never replaced by a read that did not see them. A new file (or a forced
+  // re-read) starts its tries again.
   const claimedAt = new Date();
   const claim = await db.invoice.updateMany({
     where: {
       id: invoiceId,
       linesAttempts: row.linesAttempts,
       pdfFilename: row.pdfFilename,
-      OR: [{ linesSource: null }, { linesSource: { not: "MANUAL" } }],
-      AND: [{ OR: [{ linesClaimedAt: null }, { linesClaimedAt: { lt: new Date(claimedAt.getTime() - STALE_LINES_CLAIM_MS) } }] }],
+      linesSource: row.linesSource,
+      OR: [{ linesClaimedAt: null }, { linesClaimedAt: { lt: new Date(claimedAt.getTime() - STALE_LINES_CLAIM_MS) } }],
     },
     data: {
       linesClaimedAt: claimedAt,
@@ -457,7 +501,7 @@ export async function readInvoiceLines(
   });
   if (claim.count === 0) {
     const now = await getInvoiceLines(tenantId, invoiceId);
-    return now && { outcome: now.source === "MANUAL" ? "MANUAL" : "BUSY", view: now };
+    return now && { outcome: now.source === "MANUAL" && !wasManual ? "MANUAL" : "BUSY", view: now, replacedManual: false };
   }
   const attempt = fileChanged || force ? 1 : row.linesAttempts + 1;
   const ours = { id: invoiceId, linesClaimedAt: claimedAt, pdfFilename: row.pdfFilename };
@@ -516,12 +560,20 @@ export async function readInvoiceLines(
     });
 
     const view = await getInvoiceLines(tenantId, invoiceId);
-    return view && { outcome: written ? "READ" : view.source === "MANUAL" ? "MANUAL" : "BUSY", view };
+    return (
+      view && {
+        outcome: written ? "READ" : view.source === "MANUAL" && !wasManual ? "MANUAL" : "BUSY",
+        view,
+        replacedManual: written && wasManual,
+      }
+    );
   } catch (err) {
     const error = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
     const spent = attempt >= MAX_LINES_ATTEMPTS;
     await db.$transaction(async (tx) => {
-      if (fileChanged) {
+      // A forced read over lines typed by hand keeps them when it fails: only
+      // a read that worked may replace what a person entered.
+      if (fileChanged && !wasManual) {
         // Lines from the PDF that used to be filed here describe another
         // document: drop them, and count this file's tries from here on.
         const update = await tx.invoice.updateMany({
@@ -552,6 +604,69 @@ export async function readInvoiceLines(
       });
     });
     const view = await getInvoiceLines(tenantId, invoiceId);
-    return view && { outcome: "FAILED", view };
+    return view && { outcome: "FAILED", view, replacedManual: false };
   }
+}
+
+// ─── Typed in by the office ───────────────────────────────────────────────
+
+export type ManualSaveOutcome = "SAVED" | "CHANGED";
+
+/**
+ * Store lines the office typed (already checked by `readManualLines`) as the
+ * invoice's lines: source MANUAL, status OK — a person has vouched for them —
+ * replacing whatever was read. Works on a stub too (no PDF to read).
+ *
+ * `basedOn` is the `readAt` of the lines the editor was opened on (null when
+ * there were none). The write is conditional on it, so a read that landed —
+ * or a colleague's save — since then answers CHANGED instead of being
+ * overwritten unseen. Clearing `linesClaimedAt` makes a read still running
+ * lose its claim, so it cannot write over these lines when it finishes.
+ */
+export async function saveManualLines(
+  tenantId: string,
+  invoiceId: string,
+  lines: ManualLine[],
+  { basedOn }: { basedOn: Date | null }
+): Promise<{
+  outcome: ManualSaveOutcome;
+  view: InvoiceLinesView;
+  previous: { source: LinesSource | null; count: number };
+} | null> {
+  const db = scopedPrisma(tenantId);
+  const row = await db.invoice.findFirst({ where: { id: invoiceId }, select: VIEW_SELECT });
+  if (!row) return null;
+  const previous = { source: (row.linesSource as LinesSource | null) ?? null, count: row.lines.length };
+
+  const saved = await db.$transaction(async (tx) => {
+    const update = await tx.invoice.updateMany({
+      where: { id: invoiceId, linesReadAt: basedOn },
+      data: {
+        linesStatus: "OK",
+        linesSource: "MANUAL",
+        linesIssues: [],
+        linesError: null,
+        linesReadAt: new Date(),
+        linesClaimedAt: null,
+        linesPdfFilename: row.pdfFilename,
+      },
+    });
+    if (update.count === 0) return false;
+    await tx.invoiceLine.deleteMany({ where: { invoiceId } });
+    await tx.invoiceLine.createMany({
+      data: lines.map((l, i) => ({
+        invoiceId,
+        lineNo: i + 1,
+        itemCode: l.itemCode,
+        shortName: l.shortName,
+        description: l.description,
+        qty: l.qty,
+        uom: l.uom,
+      })),
+    });
+    return true;
+  });
+
+  const view = await getInvoiceLines(tenantId, invoiceId);
+  return view && { outcome: saved ? "SAVED" : "CHANGED", view, previous };
 }

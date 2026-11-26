@@ -5010,11 +5010,96 @@ suite("cross-ADMIN isolation", () => {
       expect(again.outcome).toBe("CACHED");
       expect((await db().invoice.findUnique({ where: { id } }))?.linesAttempts).toBe(1);
 
-      // Lines typed by hand are never replaced, even by a forced read.
+      // Lines typed by hand are never replaced by an ordinary read.
       await db().invoice.update({ where: { id }, data: { linesSource: "MANUAL" } });
-      const forced = await (await lines.POST(req(`/api/invoice-records/${id}/lines`, { method: "POST", body: { force: true } }), params({ id }))).json();
-      expect(forced.outcome).toBe("MANUAL");
+      const unforced = await (await lines.POST(req(`/api/invoice-records/${id}/lines`, { method: "POST", body: {} }), params({ id }))).json();
+      expect(unforced.outcome).toBe("MANUAL");
       expect((await db().invoice.findUnique({ where: { id } }))?.linesAttempts).toBe(1);
+    });
+
+    it("lets the office type an invoice's lines in, in its own scope only", async () => {
+      const lines = await import("@/app/api/invoice-records/[id]/lines/route");
+      const { ensureInvoices } = await import("@/lib/invoice-registry");
+      const id = (await ensureInvoices(f.a.tenantId, [{ invoiceNo: "IV-8804" }], null)).get("8804")!;
+      // A stub: no PDF to read, so the lines can only be typed in.
+      await db().invoice.update({ where: { id }, data: { pdfFilename: null, isStub: true } });
+      const put = (body: unknown) => lines.PUT(req(`/api/invoice-records/${id}/lines`, { method: "PUT", body }), params({ id }));
+      const typed = [
+        { itemCode: "220788", description: "30A MINI FUSE", qty: "10", uom: "EACH", nett: 125 },
+        { itemCode: "", description: "", qty: "" },
+        { itemCode: "618ABG", description: "BATTERY", qty: 1 },
+      ];
+
+      useSession(adminSession(f.b));
+      expect((await put({ lines: typed, basedOn: null })).status).toBe(404);
+      useSession(driverSession(f.a));
+      expect((await put({ lines: typed, basedOn: null })).status).toBe(403);
+      expect(await db().invoiceLine.count({ where: { invoiceId: id } })).toBe(0);
+
+      useSession(adminSession(f.a));
+      expect((await put({ lines: [{ description: "X", qty: 0 }], basedOn: null })).status).toBe(400);
+      expect((await put({ lines: typed })).status).toBe(400); // basedOn is required
+
+      const saved = await put({ lines: typed, basedOn: null });
+      expect(saved.status).toBe(200);
+      const view = await saved.json();
+      expect(view).toMatchObject({ outcome: "SAVED", status: "OK", source: "MANUAL", issues: [] });
+      expect(view.lines.map((l: { lineNo: number; itemCode: string; qty: number }) => [l.lineNo, l.itemCode, l.qty])).toEqual([
+        [1, "220788", 10],
+        [2, "618ABG", 1],
+      ]);
+      // Written in the owner's scope; nothing priced is a column to write.
+      const rows = await db().invoiceLine.findMany({ where: { invoiceId: id }, orderBy: { lineNo: "asc" } });
+      expect(rows.every((r) => r.tenantId === f.a.tenantId)).toBe(true);
+      expect(Object.keys(rows[0])).not.toContain("nett");
+      const audit = await db().auditLog.findFirst({ where: { entityId: id, tenantId: f.a.tenantId }, orderBy: { createdAt: "desc" } });
+      expect(audit?.details).toMatch(/2 lines entered by hand/);
+
+      // An editor opened on what was there before is told it changed, not obeyed.
+      const stale = await put({ lines: [{ description: "Other", qty: 5 }], basedOn: null });
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toMatchObject({ code: "LINES_CHANGED", source: "MANUAL", lines: [{ itemCode: "220788" }, { itemCode: "618ABG" }] });
+      expect(await db().invoiceLine.count({ where: { invoiceId: id } })).toBe(2);
+
+      // One opened on the saved lines replaces them.
+      const again = await put({ lines: [{ description: "Other", qty: 5 }], basedOn: view.readAt });
+      expect(again.status).toBe(200);
+      expect((await again.json()).lines).toMatchObject([{ lineNo: 1, description: "Other", qty: 5 }]);
+    });
+
+    it("a forced re-read may replace lines typed by hand, and a failed one keeps them", async () => {
+      const { creditNotePdf } = await import("./helpers/credit-note-fixture");
+      const lines = await import("@/app/api/invoice-records/[id]/lines/route");
+      const { ensureInvoices } = await import("@/lib/invoice-registry");
+      const id = (await ensureInvoices(f.a.tenantId, [{ invoiceNo: "IV-634574", pdfFilename: "IV-634574.pdf" }], null)).get("634574")!;
+      useSession(adminSession(f.a));
+      expect(
+        (await lines.PUT(req(`/api/invoice-records/${id}/lines`, { method: "PUT", body: { lines: [{ description: "Typed", qty: 7 }], basedOn: null } }), params({ id }))).status
+      ).toBe(200);
+
+      const fetchMock = vi.mocked(fetch);
+      const original = fetchMock.getMockImplementation()!;
+      const forceRead = async (serve: () => Response) => {
+        fetchMock.mockImplementation(async (url: any, init: any) => (String(url).includes("/content") ? serve() : original(url, init)));
+        try {
+          return await (await lines.POST(req(`/api/invoice-records/${id}/lines`, { method: "POST", body: { force: true } }), params({ id }))).json();
+        } finally {
+          fetchMock.mockImplementation(original);
+        }
+      };
+
+      // The PDF cannot be downloaded: the typed lines stay, the failure is said.
+      const failed = await forceRead(() => new Response("gone", { status: 404 }));
+      expect(failed).toMatchObject({ outcome: "FAILED", source: "MANUAL", status: "OK", lines: [{ description: "Typed", qty: 7 }] });
+      expect(failed.error).toBeTruthy();
+
+      // It can: the read replaces them, and that is audited.
+      const pdf = await creditNotePdf({ layout: "CR-407710", documentTitle: "TAX INVOICE", creditNo: "634574", invoiceNo: null });
+      const read = await forceRead(() => new Response(new Uint8Array(pdf), { status: 200, headers: { "Content-Type": "application/pdf" } }));
+      expect(read).toMatchObject({ outcome: "READ", source: "TEXT", status: "OK" });
+      expect(read.lines).toHaveLength(3);
+      const audit = await db().auditLog.findFirst({ where: { entityId: id, tenantId: f.a.tenantId }, orderBy: { createdAt: "desc" } });
+      expect(audit?.details).toMatch(/typed by hand replaced by a re-read/);
     });
 
     it("an invoice with no PDF on file reads nothing", async () => {
