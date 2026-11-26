@@ -149,3 +149,46 @@ describe("the credit note reader still reads the shared table as before", () => 
     ]);
   });
 });
+
+describe("lines typed in by the office", () => {
+  it("keeps quantities only, trims, and drops a row left blank", async () => {
+    const { readManualLines } = await import("@/lib/invoice-lines-input");
+    const out = readManualLines([
+      { itemCode: " 220788 ", description: "30A  MINI FUSE", qty: "10", uom: "each", nett: 125, unitPrice: 12.5 },
+      { itemCode: "", description: "", qty: "", uom: "" },
+      { itemCode: "618ABG", description: "", qty: "2,5", uom: null },
+    ]);
+    expect(out).toEqual({
+      ok: true,
+      lines: [
+        { itemCode: "220788", shortName: null, description: "30A MINI FUSE", qty: 10, uom: "each" },
+        // No description: the code stands in for it, as a read does.
+        { itemCode: "618ABG", shortName: null, description: "618ABG", qty: 2.5, uom: null },
+      ],
+    });
+  });
+
+  it("names the line that is wrong", async () => {
+    const { readManualLines } = await import("@/lib/invoice-lines-input");
+    expect(readManualLines([{ description: "A", qty: 1 }, { description: "B", qty: "0" }])).toMatchObject({ ok: false, line: 2 });
+    expect(readManualLines([{ description: "A", qty: "two" }])).toMatchObject({ ok: false, line: 1 });
+    expect(readManualLines([{ description: "A", qty: "1.2345" }])).toMatchObject({ ok: false, error: expect.stringMatching(/3 decimals/) });
+    expect(readManualLines([{ qty: 3, uom: "EACH" }])).toMatchObject({ ok: false, error: expect.stringMatching(/description or a product code/) });
+    expect(readManualLines([{ description: "A", qty: 1e10 }])).toMatchObject({ ok: false, error: expect.stringMatching(/too large/) });
+  });
+
+  it("refuses an empty list and a non-list", async () => {
+    const { readManualLines, MAX_MANUAL_LINES } = await import("@/lib/invoice-lines-input");
+    expect(readManualLines([])).toMatchObject({ ok: false, error: "Add at least one line" });
+    expect(readManualLines([{}])).toMatchObject({ ok: false, error: "Add at least one line" });
+    expect(readManualLines("lines")).toMatchObject({ ok: false });
+    const many = Array.from({ length: MAX_MANUAL_LINES + 1 }, (_, i) => ({ description: `L${i}`, qty: 1 }));
+    expect(readManualLines(many)).toMatchObject({ ok: false });
+  });
+
+  it("accepts three decimals without float noise", async () => {
+    const { readManualLines } = await import("@/lib/invoice-lines-input");
+    expect(readManualLines([{ description: "Cable", qty: "2.675", uom: "M" }])).toMatchObject({ ok: true, lines: [{ qty: 2.675 }] });
+    expect(readManualLines([{ description: "Cable", qty: 0.1 + 0.2 }])).toMatchObject({ ok: true, lines: [{ qty: 0.3 }] });
+  });
+});

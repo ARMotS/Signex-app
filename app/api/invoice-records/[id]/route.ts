@@ -99,13 +99,15 @@ export const GET = withAuth(async (
 });
 
 /**
- * Correct an invoice's date or customer by hand — for a scan nobody could
+ * Correct an invoice's date, customer, Deliver to or Invoice to by hand — for a scan nobody could
  * read, or a PDF whose header was read wrong.
  *
  * ADMIN only, and addressed by the registry row's id (the Invoices page has it
  * as `recordId`); an id from another scope is 404 through the scoped client.
- * A corrected date marks the header MANUAL, so a background read finishing
- * later never overwrites what a person decided.
+ * A corrected date, Deliver to or Invoice to (the fields read off the PDF)
+ * marks the header MANUAL, so a background read finishing later never
+ * overwrites what a person decided. The customer is the trip sheet's, so a
+ * later sheet naming it differently still wins, as before.
  */
 export const PATCH = withAuth(async (
   request: NextRequest,
@@ -117,14 +119,20 @@ export const PATCH = withAuth(async (
 
   const existing = await ctx.db.invoice.findFirst({
     where: { id },
-    select: { id: true, invoiceNo: true, invoiceDate: true, customerName: true },
+    select: { id: true, invoiceNo: true, invoiceDate: true, customerName: true, deliverToName: true, billToName: true },
   });
   if (!existing) {
     return NextResponse.json({ error: "Invoice not found" }, { status: 404 });
   }
 
   const body = await request.json().catch(() => ({}));
-  const data: { invoiceDate?: Date | null; customerName?: string | null; headerSource?: string } = {};
+  const data: {
+    invoiceDate?: Date | null;
+    customerName?: string | null;
+    deliverToName?: string | null;
+    billToName?: string | null;
+    headerSource?: string;
+  } = {};
 
   if (body.invoiceDate !== undefined) {
     if (body.invoiceDate === null || body.invoiceDate === "") {
@@ -144,6 +152,13 @@ export const PATCH = withAuth(async (
     data.customerName = name || null;
   }
 
+  for (const key of ["deliverToName", "billToName"] as const) {
+    if (body[key] === undefined) continue;
+    const name = String(body[key] ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+    data[key] = name || null;
+    data.headerSource = "MANUAL";
+  }
+
   if (Object.keys(data).length === 0) {
     return NextResponse.json({ error: "Nothing to change" }, { status: 400 });
   }
@@ -154,6 +169,8 @@ export const PATCH = withAuth(async (
     data.invoiceDate !== undefined &&
       `date ${existing.invoiceDate?.toISOString().slice(0, 10) ?? "—"} → ${updated.invoiceDate?.toISOString().slice(0, 10) ?? "—"}`,
     data.customerName !== undefined && `customer "${existing.customerName ?? ""}" → "${updated.customerName ?? ""}"`,
+    data.deliverToName !== undefined && `deliver to "${existing.deliverToName ?? ""}" → "${updated.deliverToName ?? ""}"`,
+    data.billToName !== undefined && `invoice to "${existing.billToName ?? ""}" → "${updated.billToName ?? ""}"`,
   ].filter(Boolean);
   await logAudit({
     action: "STATUS_CHANGE",
@@ -168,5 +185,8 @@ export const PATCH = withAuth(async (
     success: true,
     invoiceDate: updated.invoiceDate?.toISOString().slice(0, 10) ?? null,
     customerName: updated.customerName,
+    deliverToName: updated.deliverToName,
+    billToName: updated.billToName,
+    headerSource: updated.headerSource,
   });
 });

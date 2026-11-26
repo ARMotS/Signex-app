@@ -1,14 +1,17 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { DocChip, StatusBadge, collectionKind, collectionTone, creditNoteTone, type Tone } from "@/components/ui/Chips";
 import { officeSheetDiscarded } from "@/lib/collection-confirm";
+import InvoiceReviewPanel, { type InvoiceLinesView } from "@/components/admin/InvoiceReviewPanel";
 
 /**
  * One invoice's chain: its delivery, the collections credited against it,
  * the credit notes that paid for them, and what is still outstanding per item.
  * Reached from the Invoices tab, and from any collection or credit note.
+ * The invoice's details and product lines are checked and corrected in the
+ * review panel under the invoice card.
  */
 
 interface Chain {
@@ -119,6 +122,20 @@ export default function InvoiceChainPage({ params }: { params: Promise<{ id: str
   const { id } = use(params);
   const [chain, setChain] = useState<Chain | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // The panel corrects the header: keep the card above it in step.
+  const onPanelChange = useCallback((v: InvoiceLinesView) => {
+    setChain((prev) =>
+      prev && {
+        ...prev,
+        invoice: {
+          ...prev.invoice,
+          invoiceDate: v.header.invoiceDate,
+          customerName: v.header.customerName ?? v.header.deliverToName ?? v.header.billToName,
+        },
+      }
+    );
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -340,6 +357,10 @@ export default function InvoiceChainPage({ params }: { params: Promise<{ id: str
           <span className="text-ink-muted"> · </span>
           {invoice.customerName ?? "—"}
         </p>
+      </div>
+
+      <div className="mt-3">
+        <InvoiceReviewPanel invoiceId={invoice.id} onChange={onPanelChange} />
       </div>
 
       {/* The chain */}
